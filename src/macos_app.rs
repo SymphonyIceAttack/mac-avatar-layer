@@ -1,7 +1,14 @@
 #![cfg(target_os = "macos")]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::{c_char, c_double, c_long, c_ulong, c_void, CString};
+use crate::cubism;
+use crate::live2d_model::Live2dModel;
+#[cfg(feature = "metal-renderer")]
+use crate::metal_renderer::MetalRenderer;
+#[cfg(feature = "cubism-core")]
+use crate::software_renderer::SoftwareRenderer;
+use std::ffi::{CString, c_char, c_double, c_long, c_ulong, c_void};
+use std::path::Path;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +33,9 @@ const NS_EVENT_MASK_ANY: NSUInteger = NSUInteger::MAX;
 const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: NSUInteger = 1 << 0;
 const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: NSUInteger = 1 << 4;
 const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: NSUInteger = 1 << 8;
+const NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED: NSUInteger = 1 << 15;
+const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: NSUInteger = 0x00ff_ffff;
+const TARGET_FPS: f64 = 60.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -60,30 +70,238 @@ unsafe extern "C" {}
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}
 
-pub fn run() -> Result<(), String> {
+#[cfg(feature = "cubism-core")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGColorSpaceCreateDeviceRGB() -> Id;
+    fn CGColorSpaceRelease(space: Id);
+    fn CGDataProviderCreateWithCFData(data: Id) -> Id;
+    fn CGDataProviderRelease(provider: Id);
+    fn CGImageCreate(
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bits_per_pixel: usize,
+        bytes_per_row: usize,
+        color_space: Id,
+        bitmap_info: u32,
+        provider: Id,
+        decode: *const CGFloat,
+        should_interpolate: Bool,
+        intent: u32,
+    ) -> Id;
+    fn CGImageRelease(image: Id);
+}
+
+pub fn run(model_path: &str) -> Result<(), String> {
     unsafe {
         let app = msg_id(class("NSApplication")?, "sharedApplication");
-        msg_void_id(app, "setActivationPolicy:", NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY);
+        msg_void_id(
+            app,
+            "setActivationPolicy:",
+            NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+        );
+        let _activity_token = prevent_app_nap()?;
+        let model = Live2dModel::load(model_path)?;
+        println!("Loaded {}", model.summary());
+        println!("Model root: {}", model.root_dir.display());
+        println!("Moc: {}", model.moc.display());
+        for texture in &model.textures {
+            println!("Texture: {}", texture.display());
+        }
+        let mut cubism_runtime = cubism::load_runtime(&model)?;
+        let cubism_summary = cubism_runtime.info().summary();
+        println!("{cubism_summary}");
+        log_cubism_preview(&cubism_runtime);
+        #[cfg(feature = "metal-renderer")]
+        log_metal_probe(&model, &cubism_runtime)?;
 
         let window = create_avatar_window()?;
         let root_layer = create_root_layer(window)?;
-        let avatar_layer = create_avatar_layer()?;
+        let avatar_layer = create_avatar_layer(&model)?;
+        let diagnostics_layer = create_diagnostics_layer()?;
         msg_void_id(root_layer, "addSublayer:", avatar_layer);
+        msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
 
         msg_void_id(window, "makeKeyAndOrderFront:", NIL);
         msg_void(window, "orderFrontRegardless");
         msg_void_id(app, "activateIgnoringOtherApps:", YES);
 
         let run_loop_mode = ns_string("kCFRunLoopDefaultMode")?;
-        let mut frame_clock = FrameClock::new(60.0);
+        let mut frame_clock = FrameClock::new(TARGET_FPS);
+        let mut diagnostics = Diagnostics::new(
+            frame_clock.frame_duration(),
+            model.summary(),
+            cubism_summary,
+        );
+        #[cfg(feature = "cubism-core")]
+        let mut software_renderer = SoftwareRenderer::load(&model)?;
         let started_at = Instant::now();
 
         loop {
             drain_pending_events(app, run_loop_mode);
+            begin_immediate_layer_update();
+            cubism_runtime.update();
+            #[cfg(feature = "cubism-core")]
+            {
+                let rgba = software_renderer.render(&cubism_runtime);
+                set_layer_bitmap(avatar_layer, rgba, 512, 512)?;
+            }
+            #[cfg(not(feature = "cubism-core"))]
             draw_avatar_frame(avatar_layer, started_at.elapsed().as_secs_f64())?;
+            diagnostics.record_frame(diagnostics_layer, started_at)?;
+            commit_layer_update();
             frame_clock.sleep_until_next_frame();
         }
     }
+}
+
+#[cfg(feature = "metal-renderer")]
+fn log_metal_probe(
+    model: &Live2dModel,
+    runtime: &cubism::CubismModelRuntime,
+) -> Result<(), String> {
+    let renderer = MetalRenderer::load(model)?;
+    let probe = renderer.render_probe(runtime);
+    println!(
+        "Metal renderer probe: device '{}' textures {} drawables {} triangles {} queue {}",
+        probe.device_name,
+        probe.texture_count,
+        probe.drawable_count,
+        probe.triangle_count,
+        probe.has_command_queue
+    );
+    Ok(())
+}
+
+fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
+    let parameters = runtime.parameters();
+    if !parameters.is_empty() {
+        println!("Cubism parameters: {}", parameters.len());
+        for parameter in parameters.iter().take(8) {
+            println!(
+                "  param {} value {:.3} default {:.3} range [{:.3}, {:.3}]",
+                parameter.id, parameter.value, parameter.default, parameter.min, parameter.max
+            );
+        }
+    }
+
+    let drawables = runtime.drawables();
+    if !drawables.is_empty() {
+        println!("Cubism drawables: {}", drawables.len());
+        for drawable in drawables.iter().take(8) {
+            println!(
+                "  drawable #{} {} tex {} vertices {} indices {} opacity {:.3} draw {} render {} flags visible={} double_sided={} additive={} multiply={} inverted_mask={}",
+                drawable.index,
+                drawable.id,
+                drawable.texture_index,
+                drawable.vertex_count,
+                drawable.index_count,
+                drawable.opacity,
+                drawable.draw_order,
+                drawable.render_order,
+                drawable.flags.visible,
+                drawable.flags.double_sided,
+                drawable.flags.blend_additive,
+                drawable.flags.blend_multiplicative,
+                drawable.flags.inverted_mask
+            );
+        }
+
+        if let Some(frame) = runtime.drawable_frame_by_index(0) {
+            println!(
+                "First drawable frame: positions {} uvs {} indices {}",
+                frame.positions.len(),
+                frame.uvs.len(),
+                frame.indices.len()
+            );
+        }
+    }
+}
+
+#[cfg(feature = "cubism-core")]
+unsafe fn set_layer_bitmap(
+    layer: Id,
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<(), String> {
+    let expected_len = width * height * 4;
+    if rgba.len() != expected_len {
+        return Err(format!(
+            "RGBA buffer has {} bytes, expected {}",
+            rgba.len(),
+            expected_len
+        ));
+    }
+
+    let data = msg_id_bytes(
+        class("NSData")?,
+        "dataWithBytes:length:",
+        rgba.as_ptr().cast::<c_void>(),
+        rgba.len(),
+    );
+    if data.is_null() {
+        return Err("NSData dataWithBytes:length: returned nil".to_string());
+    }
+
+    let color_space = CGColorSpaceCreateDeviceRGB();
+    if color_space.is_null() {
+        return Err("CGColorSpaceCreateDeviceRGB returned null".to_string());
+    }
+
+    let provider = CGDataProviderCreateWithCFData(data);
+    if provider.is_null() {
+        CGColorSpaceRelease(color_space);
+        return Err("CGDataProviderCreateWithCFData returned null".to_string());
+    }
+
+    let image = CGImageCreate(
+        width,
+        height,
+        8,
+        32,
+        width * 4,
+        color_space,
+        0x2002,
+        provider,
+        ptr::null(),
+        0,
+        0,
+    );
+
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(color_space);
+
+    if image.is_null() {
+        return Err("CGImageCreate returned null".to_string());
+    }
+
+    msg_void_id(layer, "setContents:", image);
+    CGImageRelease(image);
+    Ok(())
+}
+
+unsafe fn prevent_app_nap() -> Result<Id, String> {
+    let options = NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP
+        | NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED;
+    let reason = ns_string("Keep vtube-studio-rs avatar rendering while switching Spaces")?;
+    let process_info = msg_id(class("NSProcessInfo")?, "processInfo");
+    if process_info.is_null() {
+        return Err("NSProcessInfo processInfo returned nil".to_string());
+    }
+
+    let token = msg_id_ulong_id(
+        process_info,
+        "beginActivityWithOptions:reason:",
+        options,
+        reason,
+    );
+    if token.is_null() {
+        return Err("beginActivityWithOptions returned nil".to_string());
+    }
+
+    Ok(token)
 }
 
 unsafe fn create_avatar_window() -> Result<Id, String> {
@@ -146,7 +364,7 @@ unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
     Ok(layer)
 }
 
-unsafe fn create_avatar_layer() -> Result<Id, String> {
+unsafe fn create_avatar_layer(model: &Live2dModel) -> Result<Id, String> {
     let layer = msg_id(class("CALayer")?, "layer");
     if layer.is_null() {
         return Err("CALayer allocation returned nil".to_string());
@@ -162,10 +380,75 @@ unsafe fn create_avatar_layer() -> Result<Id, String> {
     msg_void_rect(layer, "setFrame:", frame);
     msg_void_double(layer, "setCornerRadius:", 104.0);
     msg_void_bool(layer, "setMasksToBounds:", YES);
+    msg_void_id(layer, "setContentsGravity:", ns_string("resizeAspectFill")?);
+
+    if let Some(texture) = model.primary_texture() {
+        set_layer_image(layer, texture)?;
+    }
 
     Ok(layer)
 }
 
+unsafe fn create_diagnostics_layer() -> Result<Id, String> {
+    let layer = msg_id(class("CATextLayer")?, "layer");
+    if layer.is_null() {
+        return Err("CATextLayer allocation returned nil".to_string());
+    }
+
+    let frame = NSRect {
+        origin: NSPoint { x: 18.0, y: 18.0 },
+        size: NSSize {
+            width: 324.0,
+            height: 148.0,
+        },
+    };
+
+    let text_color = ns_color(0.92, 0.97, 1.0, 0.92)?;
+    let text_cg_color = msg_id(text_color, "CGColor");
+    msg_void_rect(layer, "setFrame:", frame);
+    msg_void_id(layer, "setForegroundColor:", text_cg_color);
+    msg_void_double(layer, "setFontSize:", 13.0);
+    msg_void_double(layer, "setContentsScale:", 2.0);
+    msg_void_double(layer, "setZPosition:", 10.0);
+    msg_void_bool(layer, "setWrapped:", YES);
+    set_layer_text(
+        layer,
+        "Model: loading\nCubism Core: loading\nFPS: warming up\nFrame delta: warming up\nSlow frames: 0\nFrames: 0\nApp Nap guard: active",
+    )?;
+
+    Ok(layer)
+}
+
+unsafe fn set_layer_image(layer: Id, path: &Path) -> Result<(), String> {
+    let path_string = path
+        .to_str()
+        .ok_or_else(|| format!("Texture path is not valid UTF-8: {}", path.display()))?;
+    let ns_path = ns_string(path_string)?;
+    let image = msg_id_id(
+        msg_id(class("NSImage")?, "alloc"),
+        "initWithContentsOfFile:",
+        ns_path,
+    );
+    if image.is_null() {
+        return Err(format!("Failed to load texture image: {}", path.display()));
+    }
+
+    msg_void_id(layer, "setContents:", image);
+    Ok(())
+}
+
+unsafe fn begin_immediate_layer_update() {
+    let transaction = class("CATransaction").expect("CATransaction must exist on macOS");
+    msg_void(transaction, "begin");
+    msg_void_bool(transaction, "setDisableActions:", YES);
+}
+
+unsafe fn commit_layer_update() {
+    let transaction = class("CATransaction").expect("CATransaction must exist on macOS");
+    msg_void(transaction, "commit");
+}
+
+#[cfg(not(feature = "cubism-core"))]
 unsafe fn draw_avatar_frame(layer: Id, elapsed_seconds: f64) -> Result<(), String> {
     let breathe = (elapsed_seconds * 2.2).sin() * 0.5 + 0.5;
     let red = 0.30 + breathe * 0.12;
@@ -177,6 +460,12 @@ unsafe fn draw_avatar_frame(layer: Id, elapsed_seconds: f64) -> Result<(), Strin
 
     let y = 216.0 + (elapsed_seconds * 1.7).sin() * 8.0;
     msg_void_point(layer, "setPosition:", NSPoint { x: 180.0, y });
+    Ok(())
+}
+
+unsafe fn set_layer_text(layer: Id, text: &str) -> Result<(), String> {
+    let text = ns_string(text)?;
+    msg_void_id(layer, "setString:", text);
     Ok(())
 }
 
@@ -213,6 +502,10 @@ impl FrameClock {
         }
     }
 
+    fn frame_duration(&self) -> Duration {
+        self.frame_duration
+    }
+
     fn sleep_until_next_frame(&mut self) {
         self.next_frame += self.frame_duration;
         let now = Instant::now();
@@ -224,11 +517,111 @@ impl FrameClock {
     }
 }
 
+struct Diagnostics {
+    target_frame_duration: Duration,
+    model_summary: String,
+    cubism_summary: String,
+    total_frames: u64,
+    slow_frames: u64,
+    frames_since_report: u64,
+    intervals_since_report: u64,
+    interval_sum_since_report: Duration,
+    worst_interval_since_report: Duration,
+    last_frame_at: Option<Instant>,
+    last_report: Instant,
+}
+
+impl Diagnostics {
+    fn new(target_frame_duration: Duration, model_summary: String, cubism_summary: String) -> Self {
+        let now = Instant::now();
+        Self {
+            target_frame_duration,
+            model_summary,
+            cubism_summary,
+            total_frames: 0,
+            slow_frames: 0,
+            frames_since_report: 0,
+            intervals_since_report: 0,
+            interval_sum_since_report: Duration::ZERO,
+            worst_interval_since_report: Duration::ZERO,
+            last_frame_at: None,
+            last_report: now,
+        }
+    }
+
+    unsafe fn record_frame(&mut self, layer: Id, started_at: Instant) -> Result<(), String> {
+        self.total_frames += 1;
+        self.frames_since_report += 1;
+
+        let now = Instant::now();
+        if let Some(last_frame_at) = self.last_frame_at {
+            let interval = now.duration_since(last_frame_at);
+            self.intervals_since_report += 1;
+            self.interval_sum_since_report += interval;
+            self.worst_interval_since_report = self.worst_interval_since_report.max(interval);
+
+            if interval > self.target_frame_duration.mul_f64(1.5) {
+                self.slow_frames += 1;
+            }
+
+            if interval >= Duration::from_millis(250) {
+                println!(
+                    "Long frame gap: {:.1} ms after {:.1}s uptime. This often indicates a Space switch or OS throttling.",
+                    duration_ms(interval),
+                    now.duration_since(started_at).as_secs_f64(),
+                );
+            }
+        }
+        self.last_frame_at = Some(now);
+
+        let report_interval = now.duration_since(self.last_report);
+        if report_interval < Duration::from_millis(500) {
+            return Ok(());
+        }
+
+        let fps = self.frames_since_report as f64 / report_interval.as_secs_f64();
+        let uptime = now.duration_since(started_at).as_secs_f64();
+        let avg_interval = if self.intervals_since_report == 0 {
+            Duration::ZERO
+        } else {
+            self.interval_sum_since_report / self.intervals_since_report as u32
+        };
+        let text = format!(
+            "Model: {}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
+            self.model_summary,
+            self.cubism_summary,
+            fps,
+            TARGET_FPS,
+            duration_ms(avg_interval),
+            duration_ms(self.worst_interval_since_report),
+            duration_ms(self.target_frame_duration),
+            self.slow_frames,
+            self.total_frames,
+            uptime
+        );
+        set_layer_text(layer, &text)?;
+
+        self.frames_since_report = 0;
+        self.intervals_since_report = 0;
+        self.interval_sum_since_report = Duration::ZERO;
+        self.worst_interval_since_report = Duration::ZERO;
+        self.last_report = now;
+        Ok(())
+    }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
 unsafe fn class(name: &str) -> Result<Class, String> {
     let name = CString::new(name).map_err(|error| error.to_string())?;
     let class = objc_getClass(name.as_ptr());
     if class.is_null() {
-        Err(format!("Objective-C class not found: {}", name.to_string_lossy()))
+        Err(format!(
+            "Objective-C class not found: {}",
+            name.to_string_lossy()
+        ))
     } else {
         Ok(class)
     }
@@ -291,6 +684,7 @@ unsafe fn msg_void_rect(receiver: Id, selector_name: &str, rect: NSRect) {
     msg_void_id(receiver, selector_name, rect);
 }
 
+#[cfg(not(feature = "cubism-core"))]
 unsafe fn msg_void_point(receiver: Id, selector_name: &str, point: NSPoint) {
     msg_void_id(receiver, selector_name, point);
 }
@@ -299,6 +693,29 @@ unsafe fn msg_id_cstr(receiver: Id, selector_name: &str, value: *const c_char) -
     let function: extern "C" fn(Id, Sel, *const c_char) -> Id =
         std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value)
+}
+
+#[cfg(feature = "cubism-core")]
+unsafe fn msg_id_bytes(receiver: Id, selector_name: &str, bytes: *const c_void, len: usize) -> Id {
+    let function: extern "C" fn(Id, Sel, *const c_void, usize) -> Id =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), bytes, len)
+}
+
+unsafe fn msg_id_id(receiver: Id, selector_name: &str, value: Id) -> Id {
+    let function: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), value)
+}
+
+unsafe fn msg_id_ulong_id(
+    receiver: Id,
+    selector_name: &str,
+    options: NSUInteger,
+    reason: Id,
+) -> Id {
+    let function: extern "C" fn(Id, Sel, NSUInteger, Id) -> Id =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), options, reason)
 }
 
 unsafe fn msg_id_rect_ulong_ulong_bool(
@@ -311,7 +728,14 @@ unsafe fn msg_id_rect_ulong_ulong_bool(
 ) -> Id {
     let function: extern "C" fn(Id, Sel, NSRect, NSUInteger, NSUInteger, Bool) -> Id =
         std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), rect, style, backing, defer)
+    function(
+        receiver,
+        selector(selector_name),
+        rect,
+        style,
+        backing,
+        defer,
+    )
 }
 
 unsafe fn msg_id_mask_date_mode_bool(

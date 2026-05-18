@@ -3,4 +3,14 @@ name = "vtube-studio-rs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+cubism-core = ["dep:live2d-cubism-core-sys"]
+metal-renderer = ["cubism-core", "dep:metal"]
+
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+live2d-cubism-core-sys = { version = "0.1", optional = true }
+metal = { version = "0.33.0", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
