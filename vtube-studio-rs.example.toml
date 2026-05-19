@@ -1,0 +1,24 @@
+[diagnostics]
+show = true
+
+[renderer]
+disable_masks = false
+
+[motion]
+# expression = "smile"
+blink_interval = 3.8
+blink_duration = 0.18
+
+[input.mouse]
+enabled = false
+smoothing = 10.0
+
+[input.microphone]
+enabled = false
+gain = 7.0
+noise_gate = 0.025
+smoothing = 18.0
+
+[overrides]
+# mouth_open = 1.0
+# mouth_form = 0.0

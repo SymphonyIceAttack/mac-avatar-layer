@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use crate::config::MicrophoneConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream};
 use std::sync::Arc;
@@ -11,8 +12,8 @@ pub struct MicrophoneInput {
 }
 
 impl MicrophoneInput {
-    pub fn from_env() -> Option<Self> {
-        if !env_bool("VTUBE_RS_ENABLE_MIC") {
+    pub fn from_config(config: &MicrophoneConfig) -> Option<Self> {
+        if !config.enabled {
             return None;
         }
 
@@ -103,10 +104,4 @@ where
     }
 
     (sum / frame_count as f32).sqrt().clamp(0.0, 1.0)
-}
-
-fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF"))
-        .unwrap_or(false)
 }

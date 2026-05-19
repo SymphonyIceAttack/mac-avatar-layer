@@ -1,5 +1,6 @@
 #![cfg(feature = "metal-renderer")]
 
+use crate::config::RendererConfig;
 use crate::cubism::{CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismModelRuntime};
 use crate::live2d_model::Live2dModel;
 use core_graphics_types::geometry::CGSize;
@@ -8,9 +9,10 @@ use metal::foreign_types::ForeignType;
 use metal::{
     Buffer, CommandBufferRef, CommandQueue, CompileOptions, Device, Library, MTLBlendFactor,
     MTLBlendOperation, MTLClearColor, MTLCullMode, MTLIndexType, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLScissorRect, MTLStoreAction,
-    MTLTextureType, MTLTextureUsage, MTLViewport, MetalLayer, NSRange, RenderPassDescriptor,
-    RenderPipelineDescriptor, RenderPipelineState, Texture, TextureDescriptor,
+    MTLPrimitiveType, MTLRegion, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter,
+    MTLSamplerMipFilter, MTLScissorRect, MTLStoreAction, MTLTextureType, MTLTextureUsage,
+    MTLViewport, MTLWinding, MetalLayer, NSRange, RenderPassDescriptor, RenderPipelineDescriptor,
+    RenderPipelineState, SamplerDescriptor, SamplerState, Texture, TextureDescriptor,
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -71,6 +73,8 @@ struct FragmentParams {
     float4 layout_bounds;
     uint mask_channel_index;
     uint3 _padding2;
+    float4 multiply_color;
+    float4 screen_color;
 };
 
 float select_channel(float4 value, uint channel_index) {
@@ -83,10 +87,11 @@ float select_channel(float4 value, uint channel_index) {
 fragment float4 live2d_fragment(VertexOut in [[stage_in]],
                                 texture2d<float> atlas [[texture(0)]],
                                 texture2d<float> mask_texture [[texture(1)]],
+                                sampler atlas_sampler [[sampler(0)]],
+                                sampler mask_sampler [[sampler(1)]],
                                 constant FragmentParams &params [[buffer(0)]]) {
-    constexpr sampler atlas_sampler(filter::linear, address::clamp_to_edge);
-    constexpr sampler mask_sampler(filter::linear, address::clamp_to_edge);
     float4 color = atlas.sample(atlas_sampler, in.uv);
+    color.rgb = min(color.rgb * params.multiply_color.rgb + params.screen_color.rgb * color.a, 1.0);
     color.a *= params.opacity;
     if (params.has_mask != 0) {
         float2 mask_uv = apply_affine(params.draw_x, params.draw_y, in.model_position);
@@ -112,8 +117,8 @@ struct MaskParams {
 
 fragment float4 mask_fragment(VertexOut in [[stage_in]],
                               texture2d<float> atlas [[texture(0)]],
+                              sampler atlas_sampler [[sampler(0)]],
                               constant MaskParams &params [[buffer(0)]]) {
-    constexpr sampler atlas_sampler(filter::linear, address::clamp_to_edge);
     float alpha = atlas.sample(atlas_sampler, in.uv).a * params.opacity;
     if (params.channel_index == 1) { return float4(0.0, alpha, 0.0, 0.0); }
     if (params.channel_index == 2) { return float4(0.0, 0.0, alpha, 0.0); }
@@ -142,6 +147,8 @@ struct FragmentParams {
     layout_bounds: [f32; 4],
     mask_channel_index: u32,
     _padding2: [u32; 3],
+    multiply_color: [f32; 4],
+    screen_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -167,6 +174,8 @@ pub struct MetalRenderer {
     additive_pipeline_state: RenderPipelineState,
     multiplicative_pipeline_state: RenderPipelineState,
     mask_pipeline_state: RenderPipelineState,
+    atlas_sampler: SamplerState,
+    mask_sampler: SamplerState,
     textures: Vec<Texture>,
     white_mask_texture: Texture,
     mask_atlas_texture: Option<Texture>,
@@ -175,10 +184,11 @@ pub struct MetalRenderer {
     vertex_ring: DynamicVertexRing,
     mask_tile_size: u64,
     drawable_size: f64,
+    disable_masks: bool,
 }
 
 impl MetalRenderer {
-    pub fn load(model: &Live2dModel) -> Result<Self, String> {
+    pub fn load(model: &Live2dModel, config: &RendererConfig) -> Result<Self, String> {
         let device = Device::system_default()
             .ok_or_else(|| "Metal device is not available on this Mac".to_string())?;
         let command_queue = device.new_command_queue();
@@ -190,7 +200,9 @@ impl MetalRenderer {
         let multiplicative_pipeline_state =
             create_pipeline_state(&device, &library, PipelineBlendMode::Multiplicative)?;
         let mask_pipeline_state = create_mask_pipeline_state(&device, &library)?;
-        let textures = load_textures(&device, model)?;
+        let atlas_sampler = create_atlas_sampler(&device);
+        let mask_sampler = create_mask_sampler(&device);
+        let textures = load_textures(&device, &command_queue, model)?;
         let white_mask_texture = create_white_mask_texture(&device);
 
         let layer = MetalLayer::new();
@@ -210,6 +222,8 @@ impl MetalRenderer {
             additive_pipeline_state,
             multiplicative_pipeline_state,
             mask_pipeline_state,
+            atlas_sampler,
+            mask_sampler,
             textures,
             white_mask_texture,
             mask_atlas_texture: None,
@@ -218,6 +232,7 @@ impl MetalRenderer {
             vertex_ring: DynamicVertexRing::new(),
             mask_tile_size: 512,
             drawable_size: 512.0,
+            disable_masks: config.disable_masks,
         })
     }
 
@@ -255,7 +270,7 @@ impl MetalRenderer {
                 &draw_items,
                 transform,
             );
-            let mask_contexts = unique_mask_contexts(&draw_items);
+            let mask_contexts = unique_mask_contexts(&draw_items, self.disable_masks);
             let mask_lookup = mask_set_lookup(&mask_contexts);
             let mask_layout =
                 MaskAtlasLayout::for_mask_count(mask_contexts.len(), self.mask_tile_size);
@@ -276,6 +291,7 @@ impl MetalRenderer {
                     &draw_items,
                     &self.drawable_buffers,
                     &self.textures,
+                    &self.atlas_sampler,
                     vertex_buffer,
                     &mask_contexts,
                 )?;
@@ -296,6 +312,8 @@ impl MetalRenderer {
 
             let encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
             encoder.set_cull_mode(MTLCullMode::None);
+            encoder.set_fragment_sampler_state(0, Some(&self.atlas_sampler));
+            encoder.set_fragment_sampler_state(1, Some(&self.mask_sampler));
             let mut state_cache = MainPassStateCache::default();
 
             for item in draw_items {
@@ -343,13 +361,18 @@ impl MetalRenderer {
                     layout_bounds,
                     mask_channel_index: mask_channel,
                     _padding2: [0; 3],
+                    multiply_color: item.drawable.multiply_color,
+                    screen_color: item.drawable.screen_color,
                 };
+                let cull_mode = drawable_cull_mode(&item.drawable);
+                let front_winding = drawable_front_winding(&item.frame, transform);
 
                 state_cache.bind_pipeline(
                     encoder,
                     item.drawable.blend_mode,
                     self.pipeline_state(item.drawable.blend_mode),
                 );
+                state_cache.bind_cull_state(encoder, cull_mode, front_winding);
                 encoder.set_vertex_buffer(0, Some(vertex_buffer), buffers.vertex_offset);
                 state_cache.bind_atlas_texture(encoder, texture);
                 state_cache.bind_mask_texture(encoder, mask_texture);
@@ -680,6 +703,8 @@ impl DynamicVertexRing {
 #[derive(Default)]
 struct MainPassStateCache {
     blend_mode: Option<CubismBlendMode>,
+    cull_mode: Option<MTLCullMode>,
+    front_winding: Option<MTLWinding>,
     atlas_texture: Option<*mut c_void>,
     mask_texture: Option<*mut c_void>,
 }
@@ -697,6 +722,23 @@ impl MainPassStateCache {
 
         encoder.set_render_pipeline_state(pipeline_state);
         self.blend_mode = Some(blend_mode);
+    }
+
+    fn bind_cull_state(
+        &mut self,
+        encoder: &metal::RenderCommandEncoderRef,
+        cull_mode: MTLCullMode,
+        front_winding: MTLWinding,
+    ) {
+        if self.front_winding != Some(front_winding) {
+            encoder.set_front_facing_winding(front_winding);
+            self.front_winding = Some(front_winding);
+        }
+
+        if self.cull_mode != Some(cull_mode) {
+            encoder.set_cull_mode(cull_mode);
+            self.cull_mode = Some(cull_mode);
+        }
     }
 
     fn bind_atlas_texture(&mut self, encoder: &metal::RenderCommandEncoderRef, texture: &Texture) {
@@ -728,6 +770,28 @@ struct FitTransform {
     offset_x: f32,
     offset_y: f32,
     output_size: f32,
+}
+
+impl FitTransform {
+    fn identity() -> Self {
+        Self {
+            min_x: 0.0,
+            min_y: 0.0,
+            scale: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            output_size: 2.0,
+        }
+    }
+
+    fn ndc_position(self, position: [f32; 2]) -> [f32; 2] {
+        let x = self.offset_x + (position[0] - self.min_x) * self.scale;
+        let y = self.output_size - (self.offset_y + (position[1] - self.min_y) * self.scale);
+        [
+            (x / self.output_size) * 2.0 - 1.0,
+            1.0 - (y / self.output_size) * 2.0,
+        ]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -906,13 +970,38 @@ fn create_mask_pipeline_state(
         .map_err(|error| format!("Failed to create Metal mask pipeline: {error}"))
 }
 
-fn load_textures(device: &Device, model: &Live2dModel) -> Result<Vec<Texture>, String> {
+fn create_atlas_sampler(device: &Device) -> SamplerState {
+    let descriptor = SamplerDescriptor::new();
+    descriptor.set_min_filter(MTLSamplerMinMagFilter::Linear);
+    descriptor.set_mag_filter(MTLSamplerMinMagFilter::Linear);
+    descriptor.set_mip_filter(MTLSamplerMipFilter::Linear);
+    descriptor.set_address_mode_s(MTLSamplerAddressMode::ClampToEdge);
+    descriptor.set_address_mode_t(MTLSamplerAddressMode::ClampToEdge);
+    descriptor.set_max_anisotropy(8);
+    device.new_sampler(&descriptor)
+}
+
+fn create_mask_sampler(device: &Device) -> SamplerState {
+    let descriptor = SamplerDescriptor::new();
+    descriptor.set_min_filter(MTLSamplerMinMagFilter::Linear);
+    descriptor.set_mag_filter(MTLSamplerMinMagFilter::Linear);
+    descriptor.set_mip_filter(MTLSamplerMipFilter::NotMipmapped);
+    descriptor.set_address_mode_s(MTLSamplerAddressMode::ClampToEdge);
+    descriptor.set_address_mode_t(MTLSamplerAddressMode::ClampToEdge);
+    device.new_sampler(&descriptor)
+}
+
+fn load_textures(
+    device: &Device,
+    command_queue: &CommandQueue,
+    model: &Live2dModel,
+) -> Result<Vec<Texture>, String> {
     let mut textures = Vec::with_capacity(model.textures.len());
     for texture_path in &model.textures {
         let image = image::open(texture_path)
             .map_err(|error| format!("Failed to load texture {}: {error}", texture_path.display()))?
             .to_rgba8();
-        textures.push(upload_texture(device, &image));
+        textures.push(upload_texture(device, command_queue, &image));
     }
     Ok(textures)
 }
@@ -947,12 +1036,13 @@ fn create_white_mask_texture(device: &Device) -> Texture {
     texture
 }
 
-fn upload_texture(device: &Device, image: &RgbaImage) -> Texture {
+fn upload_texture(device: &Device, command_queue: &CommandQueue, image: &RgbaImage) -> Texture {
     let descriptor = TextureDescriptor::new();
     descriptor.set_texture_type(MTLTextureType::D2);
     descriptor.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
     descriptor.set_width(image.width() as u64);
     descriptor.set_height(image.height() as u64);
+    descriptor.set_mipmap_level_count(mipmap_level_count(image.width(), image.height()));
     descriptor.set_usage(MTLTextureUsage::ShaderRead);
     descriptor.set_resource_options(
         MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
@@ -965,7 +1055,26 @@ fn upload_texture(device: &Device, image: &RgbaImage) -> Texture {
         image.as_raw().as_ptr().cast(),
         (image.width() * 4) as u64,
     );
+    generate_mipmaps(command_queue, &texture);
     texture
+}
+
+fn mipmap_level_count(width: u32, height: u32) -> u64 {
+    let max_dimension = width.max(height).max(1);
+    (u32::BITS - max_dimension.leading_zeros()) as u64
+}
+
+fn generate_mipmaps(command_queue: &CommandQueue, texture: &Texture) {
+    if texture.mipmap_level_count() <= 1 {
+        return;
+    }
+
+    let command_buffer = command_queue.new_command_buffer();
+    let encoder = command_buffer.new_blit_command_encoder();
+    encoder.generate_mipmaps(texture);
+    encoder.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
 }
 
 fn prepare_drawable_buffers(
@@ -1051,6 +1160,7 @@ fn render_mask_atlas(
     draw_items: &[DrawItem],
     drawable_buffers: &[DrawableGpuBuffers],
     textures: &[Texture],
+    atlas_sampler: &SamplerState,
     vertex_buffer: &metal::BufferRef,
     mask_contexts: &[MaskContext],
 ) -> Result<(), String> {
@@ -1067,6 +1177,9 @@ fn render_mask_atlas(
     let encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
     encoder.set_render_pipeline_state(mask_pipeline_state);
     encoder.set_cull_mode(MTLCullMode::None);
+    encoder.set_fragment_sampler_state(0, Some(atlas_sampler));
+    let mut cull_mode = None;
+    let mut front_winding = None;
 
     for context in mask_contexts {
         let mask_vertex_params = MaskVertexParams {
@@ -1119,6 +1232,16 @@ fn render_mask_atlas(
                 channel_index: context.channel.index(),
                 _padding: [0; 2],
             };
+            let next_cull_mode = drawable_cull_mode(&item.drawable);
+            let next_front_winding = drawable_front_winding(&item.frame, FitTransform::identity());
+            if front_winding != Some(next_front_winding) {
+                encoder.set_front_facing_winding(next_front_winding);
+                front_winding = Some(next_front_winding);
+            }
+            if cull_mode != Some(next_cull_mode) {
+                encoder.set_cull_mode(next_cull_mode);
+                cull_mode = Some(next_cull_mode);
+            }
 
             encoder.set_vertex_buffer(0, Some(vertex_buffer), buffers.vertex_offset);
             encoder.set_fragment_texture(0, Some(texture));
@@ -1155,8 +1278,8 @@ fn collect_draw_items(runtime: &CubismModelRuntime) -> Vec<DrawItem> {
         .collect()
 }
 
-fn unique_mask_contexts(items: &[DrawItem]) -> Vec<MaskContext> {
-    if std::env::var_os("VTUBE_RS_DISABLE_MASKS").is_some() {
+fn unique_mask_contexts(items: &[DrawItem], disable_masks: bool) -> Vec<MaskContext> {
+    if disable_masks {
         return Vec::new();
     }
 
@@ -1301,6 +1424,41 @@ fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+fn drawable_cull_mode(drawable: &CubismDrawableInfo) -> MTLCullMode {
+    if drawable.flags.double_sided {
+        MTLCullMode::None
+    } else {
+        MTLCullMode::Back
+    }
+}
+
+fn drawable_front_winding(frame: &CubismDrawableFrame, transform: FitTransform) -> MTLWinding {
+    for triangle in frame.indices.chunks_exact(3) {
+        let Some(a) = frame.positions.get(triangle[0] as usize) else {
+            continue;
+        };
+        let Some(b) = frame.positions.get(triangle[1] as usize) else {
+            continue;
+        };
+        let Some(c) = frame.positions.get(triangle[2] as usize) else {
+            continue;
+        };
+
+        let a = transform.ndc_position(*a);
+        let b = transform.ndc_position(*b);
+        let c = transform.ndc_position(*c);
+        let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if area > f32::EPSILON {
+            return MTLWinding::CounterClockwise;
+        }
+        if area < -f32::EPSILON {
+            return MTLWinding::Clockwise;
+        }
+    }
+
+    MTLWinding::CounterClockwise
+}
+
 fn bounds_for(items: &[DrawItem]) -> Option<Bounds> {
     let mut bounds = Bounds::empty();
     for item in items {
@@ -1324,18 +1482,10 @@ fn metal_vertices(frame: &CubismDrawableFrame, transform: FitTransform) -> Vec<M
         .positions
         .iter()
         .zip(&frame.uvs)
-        .map(|(position, uv)| {
-            let x = transform.offset_x + (position[0] - transform.min_x) * transform.scale;
-            let y = transform.output_size
-                - (transform.offset_y + (position[1] - transform.min_y) * transform.scale);
-            MetalVertex {
-                position: [
-                    (x / transform.output_size) * 2.0 - 1.0,
-                    1.0 - (y / transform.output_size) * 2.0,
-                ],
-                model_position: *position,
-                uv: *uv,
-            }
+        .map(|(position, uv)| MetalVertex {
+            position: transform.ndc_position(*position),
+            model_position: *position,
+            uv: *uv,
         })
         .collect()
 }
@@ -1343,14 +1493,16 @@ fn metal_vertices(frame: &CubismDrawableFrame, transform: FitTransform) -> Vec<M
 #[cfg(test)]
 mod tests {
     use super::MetalRenderer;
-    use crate::{cubism, live2d_model::Live2dModel};
+    use crate::{config::RendererConfig, cubism, live2d_model::Live2dModel};
 
     #[test]
     fn creates_metal_device_and_counts_drawables() {
         let model =
             Live2dModel::load("public/model/0.model3.json").expect("public model should load");
         let runtime = cubism::load_runtime(&model).expect("Cubism runtime should load");
-        let renderer = MetalRenderer::load(&model).expect("Metal renderer should initialize");
+        let config = RendererConfig::default();
+        let renderer =
+            MetalRenderer::load(&model, &config).expect("Metal renderer should initialize");
         let probe = renderer.render_probe(&runtime);
 
         assert!(probe.has_command_queue);

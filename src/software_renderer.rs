@@ -91,6 +91,8 @@ impl SoftwareRenderer {
                         vertex(item.frame.positions[i2], item.frame.uvs[i2], transform),
                     ],
                     item.drawable.opacity,
+                    item.drawable.multiply_color,
+                    item.drawable.screen_color,
                 );
             }
         }
@@ -193,6 +195,8 @@ fn rasterize_triangle(
     texture: &RgbaImage,
     vertices: [Vertex; 3],
     opacity: f32,
+    multiply_color: [f32; 4],
+    screen_color: [f32; 4],
 ) {
     let min_x = vertices
         .iter()
@@ -241,7 +245,13 @@ fn rasterize_triangle(
             let u = w0 * vertices[0].u + w1 * vertices[1].u + w2 * vertices[2].u;
             let v = w0 * vertices[0].v + w1 * vertices[1].v + w2 * vertices[2].v;
             let source = sample(texture, u, v);
-            blend(target.get_pixel_mut(x, y), source, opacity);
+            blend(
+                target.get_pixel_mut(x, y),
+                source,
+                opacity,
+                multiply_color,
+                screen_color,
+            );
         }
     }
 }
@@ -256,7 +266,13 @@ fn sample(texture: &RgbaImage, u: f32, v: f32) -> Rgba<u8> {
     *texture.get_pixel(x, y)
 }
 
-fn blend(target: &mut Rgba<u8>, source: Rgba<u8>, opacity: f32) {
+fn blend(
+    target: &mut Rgba<u8>,
+    source: Rgba<u8>,
+    opacity: f32,
+    multiply_color: [f32; 4],
+    screen_color: [f32; 4],
+) {
     let source_alpha = (source[3] as f32 / 255.0) * opacity.clamp(0.0, 1.0);
     if source_alpha <= 0.0 {
         return;
@@ -269,7 +285,10 @@ fn blend(target: &mut Rgba<u8>, source: Rgba<u8>, opacity: f32) {
     }
 
     for channel in 0..3 {
-        let source_value = source[channel] as f32 / 255.0;
+        let texture_value = source[channel] as f32 / 255.0;
+        let source_value = (texture_value * multiply_color[channel]
+            + screen_color[channel] * (source[3] as f32 / 255.0))
+            .clamp(0.0, 1.0);
         let target_value = target[channel] as f32 / 255.0;
         let out = (source_value * source_alpha
             + target_value * target_alpha * (1.0 - source_alpha))

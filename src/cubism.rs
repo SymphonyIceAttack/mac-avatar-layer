@@ -43,6 +43,10 @@ pub struct CubismDrawableInfo {
     pub draw_order: i32,
     pub render_order: i32,
     pub masks: Vec<i32>,
+    #[allow(dead_code)]
+    pub multiply_color: [f32; 4],
+    #[allow(dead_code)]
+    pub screen_color: [f32; 4],
     pub flags: DrawableFlags,
 }
 
@@ -342,6 +346,10 @@ mod core {
             let mask_counts =
                 unsafe { value_array(sys::csmGetDrawableMaskCounts(self.model), len) };
             let masks = unsafe { ptr_array(sys::csmGetDrawableMasks(self.model), len) };
+            let multiply_colors =
+                unsafe { vector4_array(sys::csmGetDrawableMultiplyColors(self.model), len) };
+            let screen_colors =
+                unsafe { vector4_array(sys::csmGetDrawableScreenColors(self.model), len) };
 
             (0..len)
                 .map(|index| CubismDrawableInfo {
@@ -364,6 +372,14 @@ mod core {
                     masks: unsafe {
                         value_array(masks[index], mask_counts[index].max(0) as usize).to_vec()
                     },
+                    multiply_color: multiply_colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                    screen_color: screen_colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([0.0, 0.0, 0.0, 1.0]),
                     flags: drawable_flags(constant_flags[index], dynamic_flags[index]),
                 })
                 .collect()
@@ -504,6 +520,17 @@ mod core {
         unsafe { slice::from_raw_parts(ptr, len) }
             .iter()
             .map(|point| [point.x, point.y])
+            .collect()
+    }
+
+    unsafe fn vector4_array(ptr: *const sys::csmVector4, len: usize) -> Vec<[f32; 4]> {
+        if ptr.is_null() || len == 0 {
+            return Vec::new();
+        }
+
+        unsafe { slice::from_raw_parts(ptr, len) }
+            .iter()
+            .map(|point| [point.x, point.y, point.z, point.w])
             .collect()
     }
 

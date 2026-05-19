@@ -1,4 +1,5 @@
 /target/
 .DS_Store
 public
+vtube-studio-rs.toml
 CubismSdkForNative*/

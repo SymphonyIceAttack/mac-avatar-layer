@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::audio_input::MicrophoneInput;
+use crate::config::AppConfig;
 use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
@@ -105,6 +106,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
             NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
         );
         let _activity_token = prevent_app_nap()?;
+        let config = AppConfig::load()?;
         let model = Live2dModel::load(model_path)?;
         println!("Loaded {}", model.summary());
         println!("Model root: {}", model.root_dir.display());
@@ -113,22 +115,6 @@ pub fn run(model_path: &str) -> Result<(), String> {
             println!("Texture: {}", texture.display());
         }
         let mut cubism_runtime = cubism::load_runtime(&model)?;
-        if let Ok(value) = std::env::var("VTUBE_RS_MOUTH_OPEN") {
-            if let Ok(value) = value.parse::<f32>() {
-                if cubism_runtime.set_parameter_value("ParamMouthOpenY", value) {
-                    cubism_runtime.update();
-                    println!("Set ParamMouthOpenY to {value:.3}");
-                }
-            }
-        }
-        if let Ok(value) = std::env::var("VTUBE_RS_MOUTH_FORM") {
-            if let Ok(value) = value.parse::<f32>() {
-                if cubism_runtime.set_parameter_value("ParamMouthForm", value) {
-                    cubism_runtime.update();
-                    println!("Set ParamMouthForm to {value:.3}");
-                }
-            }
-        }
         let cubism_summary = cubism_runtime.info().summary();
         println!("{cubism_summary}");
         log_cubism_preview(&cubism_runtime);
@@ -136,7 +122,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
         let root_layer = create_root_layer(window)?;
         #[cfg(feature = "metal-renderer")]
         let mut metal_renderer = {
-            let mut renderer = MetalRenderer::load(&model)?;
+            let mut renderer = MetalRenderer::load(&model, &config.renderer)?;
             let probe = renderer.render_probe(&cubism_runtime);
             println!(
                 "Metal renderer: device '{}' textures {} drawables {} triangles {} additive {} multiply {} masked {} queue {}",
@@ -157,7 +143,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
         let diagnostics_layer = create_diagnostics_layer()?;
         #[cfg(not(feature = "metal-renderer"))]
         msg_void_id(root_layer, "addSublayer:", avatar_layer);
-        if std::env::var_os("VTUBE_RS_HIDE_DIAGNOSTICS").is_none() {
+        if config.diagnostics.show {
             msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
         }
 
@@ -174,8 +160,8 @@ pub fn run(model_path: &str) -> Result<(), String> {
         );
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
-        let mut motion_controller = crate::motion::MotionController::new(&model);
-        let microphone = MicrophoneInput::from_env();
+        let mut motion_controller = crate::motion::MotionController::new(&model, &config);
+        let microphone = MicrophoneInput::from_config(&config.input.microphone);
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
 

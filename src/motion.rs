@@ -1,3 +1,4 @@
+use crate::config::{AppConfig, MicrophoneConfig, MouseConfig};
 use crate::cubism::CubismModelRuntime;
 use crate::live2d_model::Live2dModel;
 use serde::Deserialize;
@@ -28,7 +29,7 @@ pub struct MotionInput {
 }
 
 impl MotionController {
-    pub fn new(model: &Live2dModel) -> Self {
+    pub fn new(model: &Live2dModel, config: &AppConfig) -> Self {
         let eye_blink_ids = model
             .groups
             .iter()
@@ -54,9 +55,9 @@ impl MotionController {
                 }
             });
         let idle_motion = load_idle_motion(model);
-        let expression = load_expression(model);
-        let mouse_driver = MouseDriver::from_env();
-        let mic_driver = MicMouthDriver::from_env();
+        let expression = load_expression(model, config.motion.expression.as_deref());
+        let mouse_driver = MouseDriver::from_config(&config.input.mouse);
+        let mic_driver = MicMouthDriver::from_config(&config.input.microphone);
 
         Self {
             eye_blink_ids,
@@ -67,10 +68,10 @@ impl MotionController {
             physics,
             elapsed: 0.0,
             blink_elapsed: 0.0,
-            blink_interval: env_f32("VTUBE_RS_BLINK_INTERVAL").unwrap_or(3.8).max(0.5),
-            blink_duration: env_f32("VTUBE_RS_BLINK_DURATION").unwrap_or(0.18).max(0.05),
-            mouth_open_override: env_f32("VTUBE_RS_MOUTH_OPEN"),
-            mouth_form_override: env_f32("VTUBE_RS_MOUTH_FORM"),
+            blink_interval: config.motion.blink_interval.max(0.5),
+            blink_duration: config.motion.blink_duration.max(0.05),
+            mouth_open_override: config.overrides.mouth_open,
+            mouth_form_override: config.overrides.mouth_form,
         }
     }
 
@@ -171,8 +172,8 @@ fn load_idle_motion(model: &Live2dModel) -> Option<MotionPlayer> {
     }
 }
 
-fn load_expression(model: &Live2dModel) -> Option<ExpressionRuntime> {
-    let requested = std::env::var("VTUBE_RS_EXPRESSION").ok()?;
+fn load_expression(model: &Live2dModel, requested: Option<&str>) -> Option<ExpressionRuntime> {
+    let requested = requested?;
     let expression = model
         .expressions
         .iter()
@@ -208,16 +209,6 @@ fn load_expression(model: &Live2dModel) -> Option<ExpressionRuntime> {
     }
 }
 
-fn env_f32(name: &str) -> Option<f32> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-fn env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF"))
-        .unwrap_or(false)
-}
-
 fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -242,8 +233,8 @@ struct MouseDriver {
 }
 
 impl MouseDriver {
-    fn from_env() -> Option<Self> {
-        env_bool("VTUBE_RS_ENABLE_MOUSE_TRACKING").then(|| {
+    fn from_config(config: &MouseConfig) -> Option<Self> {
+        config.enabled.then(|| {
             println!("Mouse tracking enabled: driving eye ball and head angle parameters");
             Self {
                 eye_x: 0.0,
@@ -251,9 +242,7 @@ impl MouseDriver {
                 angle_x: 0.0,
                 angle_y: 0.0,
                 angle_z: 0.0,
-                smoothing: env_f32("VTUBE_RS_MOUSE_SMOOTHING")
-                    .unwrap_or(10.0)
-                    .clamp(1.0, 60.0),
+                smoothing: config.smoothing.clamp(1.0, 60.0),
             }
         })
     }
@@ -288,16 +277,12 @@ struct MicMouthDriver {
 }
 
 impl MicMouthDriver {
-    fn from_env() -> Option<Self> {
-        env_bool("VTUBE_RS_ENABLE_MIC").then(|| Self {
+    fn from_config(config: &MicrophoneConfig) -> Option<Self> {
+        config.enabled.then(|| Self {
             value: 0.0,
-            gain: env_f32("VTUBE_RS_MIC_GAIN").unwrap_or(7.0).clamp(0.1, 80.0),
-            noise_gate: env_f32("VTUBE_RS_MIC_NOISE_GATE")
-                .unwrap_or(0.025)
-                .clamp(0.0, 0.5),
-            smoothing: env_f32("VTUBE_RS_MIC_SMOOTHING")
-                .unwrap_or(18.0)
-                .clamp(1.0, 80.0),
+            gain: config.gain.clamp(0.1, 80.0),
+            noise_gate: config.noise_gate.clamp(0.0, 0.5),
+            smoothing: config.smoothing.clamp(1.0, 80.0),
         })
     }
 
