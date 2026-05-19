@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,8 @@ pub struct Live2dModel {
     pub textures: Vec<PathBuf>,
     pub physics: Option<PathBuf>,
     pub display_info: Option<PathBuf>,
+    pub motions: HashMap<String, Vec<ModelMotion>>,
+    pub expressions: Vec<ModelExpression>,
     pub groups: Vec<ModelGroup>,
 }
 
@@ -19,6 +22,19 @@ pub struct ModelGroup {
     pub target: String,
     pub name: String,
     pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelMotion {
+    pub file: PathBuf,
+    pub fade_in_time: Option<f32>,
+    pub fade_out_time: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelExpression {
+    pub name: String,
+    pub file: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +54,25 @@ struct FileReferences {
     textures: Vec<String>,
     physics: Option<String>,
     display_info: Option<String>,
+    #[serde(default)]
+    motions: HashMap<String, Vec<ModelMotionManifest>>,
+    #[serde(default)]
+    expressions: Vec<ModelExpressionManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ModelMotionManifest {
+    file: String,
+    fade_in_time: Option<f32>,
+    fade_out_time: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ModelExpressionManifest {
+    name: String,
+    file: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +120,33 @@ impl Live2dModel {
                 .display_info
                 .as_ref()
                 .map(|display_info| root_dir.join(display_info)),
+            motions: manifest
+                .file_references
+                .motions
+                .into_iter()
+                .map(|(group, motions)| {
+                    (
+                        group,
+                        motions
+                            .into_iter()
+                            .map(|motion| ModelMotion {
+                                file: root_dir.join(motion.file),
+                                fade_in_time: motion.fade_in_time,
+                                fade_out_time: motion.fade_out_time,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            expressions: manifest
+                .file_references
+                .expressions
+                .into_iter()
+                .map(|expression| ModelExpression {
+                    name: expression.name,
+                    file: root_dir.join(expression.file),
+                })
+                .collect(),
             groups: manifest
                 .groups
                 .into_iter()
@@ -150,6 +212,16 @@ impl Live2dModel {
             validate_file("display info", display_info)?;
         }
 
+        for (group, motions) in &self.motions {
+            for motion in motions {
+                validate_file(&format!("motion {group}"), &motion.file)?;
+            }
+        }
+
+        for expression in &self.expressions {
+            validate_file(&format!("expression {}", expression.name), &expression.file)?;
+        }
+
         Ok(())
     }
 }
@@ -176,5 +248,7 @@ mod tests {
         assert_eq!(model.textures.len(), 2);
         assert!(model.physics.is_some());
         assert!(model.display_info.is_some());
+        assert!(model.motions.is_empty());
+        assert!(model.expressions.is_empty());
     }
 }

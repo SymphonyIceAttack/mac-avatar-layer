@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod audio_input;
+#[cfg(target_os = "macos")]
 mod cubism;
 #[cfg(target_os = "macos")]
 mod live2d_model;

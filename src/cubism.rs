@@ -256,6 +256,36 @@ mod core {
             false
         }
 
+        pub fn parameter(&self, id: &str) -> Option<CubismParameterInfo> {
+            let count = unsafe { sys::csmGetParameterCount(self.model) };
+            if count <= 0 {
+                return None;
+            }
+
+            let len = count as usize;
+            let ids = unsafe { ptr_array(sys::csmGetParameterIds(self.model), len) };
+            let mins = unsafe { value_array(sys::csmGetParameterMinimumValues(self.model), len) };
+            let maxes = unsafe { value_array(sys::csmGetParameterMaximumValues(self.model), len) };
+            let defaults =
+                unsafe { value_array(sys::csmGetParameterDefaultValues(self.model), len) };
+            let values = unsafe { value_array(sys::csmGetParameterValues(self.model), len) };
+
+            for index in 0..len {
+                let parameter_id = unsafe { cstr_to_string(ids[index]) };
+                if parameter_id == id {
+                    return Some(CubismParameterInfo {
+                        id: parameter_id,
+                        min: mins[index],
+                        max: maxes[index],
+                        default: defaults[index],
+                        value: values[index],
+                    });
+                }
+            }
+
+            None
+        }
+
         pub fn parameters(&self) -> Vec<CubismParameterInfo> {
             let count = unsafe { sys::csmGetParameterCount(self.model) };
             if count <= 0 {
@@ -514,6 +544,10 @@ mod core {
 
         pub fn set_parameter_value(&mut self, _id: &str, _value: f32) -> bool {
             false
+        }
+
+        pub fn parameter(&self, _id: &str) -> Option<super::CubismParameterInfo> {
+            None
         }
 
         pub fn parameters(&self) -> Vec<super::CubismParameterInfo> {

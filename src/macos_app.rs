@@ -1,10 +1,12 @@
 #![cfg(target_os = "macos")]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use crate::audio_input::MicrophoneInput;
 use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
 use crate::metal_renderer::MetalRenderer;
+use crate::motion::MotionInput;
 #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 use crate::software_renderer::SoftwareRenderer;
 use std::ffi::{CString, c_char, c_double, c_long, c_ulong, c_void};
@@ -173,6 +175,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
         let mut motion_controller = crate::motion::MotionController::new(&model);
+        let microphone = MicrophoneInput::from_env();
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
 
@@ -183,6 +186,10 @@ pub fn run(model_path: &str) -> Result<(), String> {
             motion_controller.apply(
                 &mut cubism_runtime,
                 now.saturating_duration_since(last_frame_at),
+                &MotionInput {
+                    pointer: normalized_mouse_position(),
+                    mouth_level: microphone.as_ref().map(MicrophoneInput::level),
+                },
             );
             last_frame_at = now;
             #[cfg(feature = "metal-renderer")]
@@ -529,6 +536,23 @@ unsafe fn commit_layer_update() {
     msg_void(transaction, "commit");
 }
 
+unsafe fn normalized_mouse_position() -> Option<[f32; 2]> {
+    let mouse = msg_point(class("NSEvent").ok()?, "mouseLocation");
+    let screen = msg_id(class("NSScreen").ok()?, "mainScreen");
+    if screen.is_null() {
+        return None;
+    }
+
+    let frame = msg_rect(screen, "frame");
+    if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
+        return None;
+    }
+
+    let x = ((mouse.x - frame.origin.x) / frame.size.width * 2.0 - 1.0) as f32;
+    let y = ((mouse.y - frame.origin.y) / frame.size.height * 2.0 - 1.0) as f32;
+    Some([x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)])
+}
+
 #[cfg(not(feature = "cubism-core"))]
 unsafe fn draw_avatar_frame(layer: Id, elapsed_seconds: f64) -> Result<(), String> {
     let breathe = (elapsed_seconds * 2.2).sin() * 0.5 + 0.5;
@@ -763,6 +787,17 @@ unsafe fn msg_void_double(receiver: Id, selector_name: &str, value: f64) {
 
 unsafe fn msg_void_rect(receiver: Id, selector_name: &str, rect: NSRect) {
     msg_void_id(receiver, selector_name, rect);
+}
+
+unsafe fn msg_point(receiver: Id, selector_name: &str) -> NSPoint {
+    let function: extern "C" fn(Id, Sel) -> NSPoint =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
+}
+
+unsafe fn msg_rect(receiver: Id, selector_name: &str) -> NSRect {
+    let function: extern "C" fn(Id, Sel) -> NSRect = std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
 }
 
 #[cfg(not(feature = "cubism-core"))]
