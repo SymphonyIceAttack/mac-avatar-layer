@@ -3,6 +3,15 @@ show = true
 
 [renderer]
 disable_masks = false
+high_precision_masks = false
+atlas_mipmaps = false
+debug_texture_mode = "none"
+hidden_drawables = []
+hidden_parts = []
+only_drawables = []
+only_parts = []
+highlight_drawables = []
+highlight_parts = []
 
 [motion]
 # expression = "smile"

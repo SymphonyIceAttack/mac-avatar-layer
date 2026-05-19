@@ -58,12 +58,30 @@ impl Default for DiagnosticsConfig {
 #[serde(default)]
 pub struct RendererConfig {
     pub disable_masks: bool,
+    pub high_precision_masks: bool,
+    pub atlas_mipmaps: bool,
+    pub debug_texture_mode: Option<String>,
+    pub hidden_drawables: Vec<String>,
+    pub hidden_parts: Vec<String>,
+    pub only_drawables: Vec<String>,
+    pub only_parts: Vec<String>,
+    pub highlight_drawables: Vec<String>,
+    pub highlight_parts: Vec<String>,
 }
 
 impl Default for RendererConfig {
     fn default() -> Self {
         Self {
             disable_masks: false,
+            high_precision_masks: false,
+            atlas_mipmaps: false,
+            debug_texture_mode: None,
+            hidden_drawables: Vec::new(),
+            hidden_parts: Vec::new(),
+            only_drawables: Vec::new(),
+            only_parts: Vec::new(),
+            highlight_drawables: Vec::new(),
+            highlight_parts: Vec::new(),
         }
     }
 }
@@ -149,6 +167,15 @@ show = false
 
 [renderer]
 disable_masks = true
+high_precision_masks = true
+atlas_mipmaps = true
+debug_texture_mode = "uv"
+hidden_drawables = ["ArtMeshDebug"]
+hidden_parts = ["PartHidden"]
+only_drawables = ["ArtMeshFocus"]
+only_parts = ["PartFocus"]
+highlight_drawables = ["ArtMeshProbe"]
+highlight_parts = ["PartProbe"]
 
 [motion]
 expression = "smile"
@@ -171,6 +198,15 @@ mouth_open = 0.7
 
         assert!(!config.diagnostics.show);
         assert!(config.renderer.disable_masks);
+        assert!(config.renderer.high_precision_masks);
+        assert!(config.renderer.atlas_mipmaps);
+        assert_eq!(config.renderer.debug_texture_mode.as_deref(), Some("uv"));
+        assert_eq!(config.renderer.hidden_drawables, ["ArtMeshDebug"]);
+        assert_eq!(config.renderer.hidden_parts, ["PartHidden"]);
+        assert_eq!(config.renderer.only_drawables, ["ArtMeshFocus"]);
+        assert_eq!(config.renderer.only_parts, ["PartFocus"]);
+        assert_eq!(config.renderer.highlight_drawables, ["ArtMeshProbe"]);
+        assert_eq!(config.renderer.highlight_parts, ["PartProbe"]);
         assert_eq!(config.motion.expression.as_deref(), Some("smile"));
         assert_eq!(config.motion.blink_interval, 4.2);
         assert_eq!(config.motion.blink_duration, 0.18);

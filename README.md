@@ -21,8 +21,23 @@ motion, expressions, physics, mouse input, and microphone volume.
 - Renders Cubism drawable meshes through Metal with texture atlases, render
   order, normal/additive/multiplicative blending, clipping masks, RGBA mask
   channels, 1/2/4/9 mask layout, explicit mask/draw matrices, per-drawable
-  multiply/screen colors, double-sided culling flags, mipmapped texture
-  atlases, and anisotropic atlas sampling.
+  multiply/screen colors, double-sided culling flags, optional texture-atlas
+  mipmaps/anisotropic sampling, configurable drawable/part hiding, and bucketed
+  Retina mask texture sizing for resize stability.
+- Applies Cubism-style `ppu / physicalMaskWidth` and
+  `ppu / physicalMaskHeight` clipping precision branches when canvas ppu is
+  available.
+- Supports optional high precision masks where each clipping context owns a
+  full-size mask texture and is redrawn immediately before each masked drawable
+  instead of sharing an RGBA atlas tile.
+- Supports multiple shared mask render textures when the clipping context count
+  exceeds one texture's practical capacity.
+- Detects Cubism Core offscreen drawable counts and uses a first-pass Metal
+  offscreen render/composite path for models that need it.
+- Decodes Cubism v5 extended blend modes and uses a first-pass Metal extended
+  blend shader with render-target snapshots.
+- Uses layer edge antialiasing and 4x MSAA when supported to smooth transparent
+  window and avatar mesh edges.
 - Drives parameters through a single `MotionController` update order:
   blink/breath -> idle motion -> expression -> mouse/mic input -> physics ->
   config overrides -> `csmUpdateModel`.
@@ -96,6 +111,18 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
   cargo run --features metal-renderer -- public/model/0.model3.json
 ```
 
+Probe all local models without opening a window:
+
+```bash
+CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
+CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
+  cargo run --features cubism-core -- --probe-models public
+```
+
+This scans every `.model3.json`, initializes Cubism Core, and prints parameter,
+part, drawable, masked drawable, offscreen, and texture counts. Models that use
+offscreen rendering also print owner part and render-order details.
+
 You can also set `LIVE2D_CUBISM_SDK_NATIVE_DIR` to point at a different SDK root.
 
 ## App Configuration
@@ -111,6 +138,15 @@ show = true
 
 [renderer]
 disable_masks = false
+high_precision_masks = false
+atlas_mipmaps = false
+debug_texture_mode = "none"
+hidden_drawables = []
+hidden_parts = []
+only_drawables = []
+only_parts = []
+highlight_drawables = []
+highlight_parts = []
 
 [motion]
 # expression = "smile"
@@ -163,8 +199,7 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 1. Keep README and PRD aligned as capabilities change.
 2. Improve renderer quality: mipmaps, anisotropic filtering, Retina-stable mask
    texture sizing, and transparent edge antialiasing.
-3. Close more Cubism clipping parity: official precision branches, high
-   precision masks, and multi mask render textures.
+3. Validate Cubism clipping parity against more official sample models.
 4. Run a dedicated macOS Space/display reliability pass.
 5. Later, investigate webcam/ARKit tracking and VTube Studio plugin API
    compatibility.

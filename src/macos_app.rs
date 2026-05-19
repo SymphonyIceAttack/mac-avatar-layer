@@ -117,6 +117,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
         let mut cubism_runtime = cubism::load_runtime(&model)?;
         let cubism_summary = cubism_runtime.info().summary();
         println!("{cubism_summary}");
+        log_offscreen_status(cubism_runtime.info());
         log_cubism_preview(&cubism_runtime);
         let window = create_avatar_window()?;
         let root_layer = create_root_layer(window)?;
@@ -125,16 +126,23 @@ pub fn run(model_path: &str) -> Result<(), String> {
             let mut renderer = MetalRenderer::load(&model, &config.renderer)?;
             let probe = renderer.render_probe(&cubism_runtime);
             println!(
-                "Metal renderer: device '{}' textures {} drawables {} triangles {} additive {} multiply {} masked {} queue {}",
+                "Metal renderer: device '{}' textures {} drawables {} triangles {} additive {} multiply {} extended_blend {} masked {} queue {}",
                 probe.device_name,
                 probe.texture_count,
                 probe.drawable_count,
                 probe.triangle_count,
                 probe.additive_count,
                 probe.multiplicative_count,
+                probe.extended_blend_count,
                 probe.masked_count,
                 probe.has_command_queue
             );
+            if probe.extended_blend_count > 0 {
+                println!(
+                    "Metal renderer: first-pass extended Cubism blend shader enabled for {count} objects",
+                    count = probe.extended_blend_count
+                );
+            }
             install_metal_layer(root_layer, &mut renderer)?;
             renderer
         };
@@ -194,6 +202,24 @@ pub fn run(model_path: &str) -> Result<(), String> {
     }
 }
 
+fn log_offscreen_status(info: &cubism::CubismRuntimeInfo) {
+    let Some(count) = info.offscreen_count else {
+        return;
+    };
+    if count <= 0 {
+        return;
+    }
+
+    #[cfg(feature = "metal-renderer")]
+    println!(
+        "Metal renderer: first-pass Cubism offscreen render path enabled for {count} offscreens"
+    );
+    #[cfg(not(feature = "metal-renderer"))]
+    eprintln!(
+        "Renderer warning: model reports {count} Cubism offscreen drawables, but this renderer path does not implement offscreen passes; affected parts may render differently."
+    );
+}
+
 fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
     let parameters = runtime.parameters();
     if !parameters.is_empty() {
@@ -219,12 +245,12 @@ fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
         println!("Cubism drawables: {}", drawables.len());
         for drawable in drawables.iter().take(8) {
             println!(
-                "  drawable #{} {} part {}({}) blend {:?} tex {} vertices {} indices {} opacity {:.3} draw {} render {} masks {} flags visible={} double_sided={} additive={} multiply={} inverted_mask={}",
+                "  drawable #{} {} part {}({}) blend {} tex {} vertices {} indices {} opacity {:.3} draw {} render {} masks {} flags visible={} double_sided={} additive={} multiply={} inverted_mask={}",
                 drawable.index,
                 drawable.id,
                 drawable.parent_part_id.as_deref().unwrap_or("-"),
                 drawable.parent_part_index,
-                drawable.blend_mode,
+                drawable.blend_mode.description(),
                 drawable.texture_index,
                 drawable.vertex_count,
                 drawable.index_count,
@@ -265,6 +291,28 @@ fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
                 frame.positions.len(),
                 frame.uvs.len(),
                 frame.indices.len()
+            );
+        }
+    }
+
+    let offscreens = runtime.offscreens();
+    if !offscreens.is_empty() {
+        let parts = runtime.parts();
+        println!("Cubism offscreens: {}", offscreens.len());
+        for offscreen in offscreens.iter().take(8) {
+            let owner = parts
+                .get(offscreen.owner_part_index.max(0) as usize)
+                .map(|part| format!("{}({})", part.id, part.index))
+                .unwrap_or_else(|| format!("-({})", offscreen.owner_part_index));
+            println!(
+                "  offscreen #{} owner {} render {} blend {} opacity {:.3} masks {:?} inverted_mask={}",
+                offscreen.index,
+                owner,
+                offscreen.render_order,
+                offscreen.blend_mode.description(),
+                offscreen.opacity,
+                offscreen.masks,
+                offscreen.flags.inverted_mask
             );
         }
     }
@@ -407,6 +455,7 @@ unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
     }
 
     msg_void_bool(layer, "setNeedsDisplayOnBoundsChange:", YES);
+    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
     let color = ns_color(0.04, 0.05, 0.07, 0.72)?;
     let cg_color = msg_id(color, "CGColor");
     msg_void_id(layer, "setBackgroundColor:", cg_color);
@@ -432,6 +481,7 @@ unsafe fn create_avatar_layer(model: &Live2dModel) -> Result<Id, String> {
     msg_void_rect(layer, "setFrame:", frame);
     msg_void_double(layer, "setCornerRadius:", 104.0);
     msg_void_bool(layer, "setMasksToBounds:", YES);
+    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
     msg_void_id(layer, "setContentsGravity:", ns_string("resizeAspectFill")?);
 
     if let Some(texture) = model.primary_texture() {
@@ -458,6 +508,7 @@ unsafe fn install_metal_layer(root_layer: Id, renderer: &mut MetalRenderer) -> R
     renderer.set_drawable_size(frame.size.width, frame.size.height);
     msg_void_rect(layer, "setFrame:", frame);
     msg_void_double(layer, "setZPosition:", 1.0);
+    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
     msg_void_id(root_layer, "addSublayer:", layer);
     Ok(())
 }

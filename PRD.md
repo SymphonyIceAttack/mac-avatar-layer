@@ -19,8 +19,20 @@ expression, physics, and tracking input.
 - Metal rendering supports texture upload, drawable meshes, render order,
   normal/additive/multiplicative blend modes, clipping masks, RGBA mask channel
   packing, 1/2/4/9 mask layout, explicit affine mask/draw matrices,
-  per-drawable multiply/screen colors, double-sided culling flags, mipmapped
-  texture atlases, and anisotropic atlas sampling.
+  per-drawable multiply/screen colors, double-sided culling flags, optional
+  texture-atlas mipmaps/anisotropic sampling, configurable drawable/part hiding,
+  and bucketed Retina mask texture sizing for resize stability.
+- Cubism-style `ppu / physicalMaskWidth` and `ppu / physicalMaskHeight`
+  clipping precision branches are applied when canvas ppu is available.
+- Optional high precision masks give each clipping context a full-size mask
+  texture and redraw it immediately before each masked drawable instead of
+  sharing an RGBA atlas tile.
+- Shared atlas clipping supports multiple mask render textures when context
+  count exceeds one texture's practical capacity.
+- Cubism Core offscreen drawable counts are detected, logged, and routed through
+  a first-pass Metal offscreen render/composite path.
+- Layer edge antialiasing and 4x MSAA are enabled when supported to reduce
+  transparent window and avatar mesh edge artifacts.
 - `MotionController` owns per-frame parameter updates in this order:
   1. idle blink and breath
   2. idle `.motion3.json` playback
@@ -40,6 +52,19 @@ expression, physics, and tracking input.
   microphone RMS-driven `ParamMouthOpenY`.
 - `scripts/run-metal.sh` provides a one-command local Metal run path with SDK
   path detection for `public/CubismSdkForNative`.
+- `--probe-models` scans local `.model3.json` files without opening a window and
+  reports parameter, part, drawable, masked drawable, offscreen, and texture
+  counts, plus offscreen owner/render-order details for models that use
+  offscreen rendering.
+- Local SDK sample probe currently loads 9 models successfully. Notable stress
+  cases: `Mao` has 37 masked drawables, which exercises multi shared mask
+  textures; `Ren` has 24 offscreen drawables, which exercises the first-pass
+  offscreen render/composite path.
+- Cubism v5 extended blend modes are decoded in diagnostics as `color + alpha`
+  pairs and routed through a first-pass Metal extended blend shader that samples
+  a render-target snapshot before compositing.
+- Metal startup diagnostics report the number of extended blend objects using
+  the extended blend shader.
 - Runtime diagnostics, renderer debug switches, input drivers, and manual mouth
   overrides are configured before launch from `vtube-studio-rs.toml`.
 
@@ -124,14 +149,13 @@ Status: next major rendering task.
 
 Required outcomes:
 
-- Implement the official `ppu / physicalMaskWidth` and
-  `ppu / physicalMaskHeight` precision branches.
 - Preserve the current RGBA channel packing and 1/2/4/9 layout behavior.
 - Keep explicit `matrix_for_mask` and `matrix_for_draw` structures.
-- Add high precision mask mode as an optional path.
-- Add support for multiple mask render textures when mask count exceeds one
-  texture's practical capacity.
-- Investigate and support offscreen drawables if Cubism Core exposes them.
+- Keep Cubism Core offscreen drawable detection in runtime diagnostics.
+- Continue validating the first-pass Metal offscreen render/composite path
+  against `Ren` and future offscreen-heavy sample models.
+- Refine nested offscreen, offscreen mask, and extended blend parity where
+  official sample comparison reveals differences.
 
 Acceptance criteria:
 
@@ -147,15 +171,24 @@ Status: next visual quality task.
 
 Required outcomes:
 
-- Make mask texture size stable under Retina scale and window resizing.
-- Improve transparent window edge antialiasing.
+- Keep normal, additive, and multiplicative blending visually consistent with
+  Cubism Framework behavior.
+- Keep per-drawable multiply and screen colors enabled for both masked and
+  unmasked drawables.
+- Keep culling, double-sided drawables, inverted masks, and clipped drawables
+  stable across shared atlas, multi-texture atlas, and high precision mask
+  paths.
+- Keep atlas mipmaps optional: disabled by default to avoid atlas island bleed,
+  but available for well-padded model textures.
+- Keep transparent window edges and avatar mesh edges smooth with layer edge
+  antialiasing and MSAA where supported.
 
 Acceptance criteria:
 
 - Additive, multiplicative, normal, masked, and inverted-mask drawables remain
   correct.
 - Texture sampling remains crisp without shimmering at common window sizes.
-- Transparent window corners and avatar edges do not show obvious artifacts.
+- Transparent window corners and avatar edges avoid obvious stair-step artifacts.
 
 ### 6. macOS Space Stability
 
@@ -213,6 +246,7 @@ Status: active.
 
 - Keep README/PRD updated.
 - Keep `scripts/run-metal.sh` as the recommended local run entry.
+- Keep `--probe-models` available for model compatibility checks.
 - Improve missing SDK/model diagnostics.
 - Keep diagnostics overlay visibility controlled before startup rather than by
   runtime hotkeys.
@@ -221,10 +255,10 @@ Status: active.
 
 Status: pending.
 
-- Continue validating per-drawable colors, culling, mipmaps, and anisotropic
-  sampling against more models.
-- Add official clipping precision branches.
-- Add high precision and multi-texture mask paths.
+- Continue validating per-drawable colors, culling, optional mipmaps,
+  anisotropic sampling, bucketed mask texture sizing, and MSAA edge behavior
+  against more models.
+- Validate multi-texture and high precision mask behavior against more models.
 - Improve Retina/window resize behavior.
 
 ### Milestone F: macOS Reliability Pass
@@ -248,6 +282,15 @@ show = true
 
 [renderer]
 disable_masks = false
+high_precision_masks = false
+atlas_mipmaps = false
+debug_texture_mode = "none"
+hidden_drawables = []
+hidden_parts = []
+only_drawables = []
+only_parts = []
+highlight_drawables = []
+highlight_parts = []
 
 [motion]
 # expression = "smile"

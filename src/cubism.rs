@@ -9,6 +9,7 @@ pub struct CubismRuntimeInfo {
     pub parameter_count: Option<i32>,
     pub part_count: Option<i32>,
     pub drawable_count: Option<i32>,
+    pub offscreen_count: Option<i32>,
     pub canvas_size: Option<[f32; 2]>,
     pub pixels_per_unit: Option<f32>,
 }
@@ -50,13 +51,91 @@ pub struct CubismDrawableInfo {
     pub flags: DrawableFlags,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CubismPartInfo {
+    pub index: usize,
+    pub id: String,
+    pub parent_part_index: i32,
+    pub offscreen_index: i32,
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CubismOffscreenInfo {
+    pub index: usize,
+    pub owner_part_index: i32,
+    pub blend_mode: CubismBlendMode,
+    pub opacity: f32,
+    pub render_order: i32,
+    pub masks: Vec<i32>,
+    pub multiply_color: [f32; 4],
+    pub screen_color: [f32; 4],
+    pub flags: DrawableFlags,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CubismBlendMode {
     Normal,
     Additive,
     Multiplicative,
+    Extended { raw: i32, color: i32, alpha: i32 },
     Unknown(i32),
+}
+
+impl CubismBlendMode {
+    pub fn description(self) -> String {
+        match self {
+            Self::Normal => "Normal".to_string(),
+            Self::Additive => "Additive".to_string(),
+            Self::Multiplicative => "Multiplicative".to_string(),
+            Self::Extended { raw, color, alpha } => {
+                format!(
+                    "Extended(raw {raw}, color {}, alpha {})",
+                    color_blend_name(color),
+                    alpha_blend_name(alpha)
+                )
+            }
+            Self::Unknown(raw) => format!("Unknown({raw})"),
+        }
+    }
+}
+
+fn color_blend_name(value: i32) -> &'static str {
+    match value {
+        0 => "Normal",
+        1 => "AddCompatible",
+        2 => "MultiplyCompatible",
+        3 => "Add",
+        4 => "AddGlow",
+        5 => "Darken",
+        6 => "Multiply",
+        7 => "ColorBurn",
+        8 => "LinearBurn",
+        9 => "Lighten",
+        10 => "Screen",
+        11 => "ColorDodge",
+        12 => "Overlay",
+        13 => "SoftLight",
+        14 => "HardLight",
+        15 => "LinearLight",
+        16 => "Hue",
+        17 => "Color",
+        _ => "UnknownColor",
+    }
+}
+
+fn alpha_blend_name(value: i32) -> &'static str {
+    match value {
+        0 => "Over",
+        1 => "Atop",
+        2 => "Out",
+        3 => "ConjointOver",
+        4 => "DisjointOver",
+        _ => "UnknownAlpha",
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -86,6 +165,7 @@ impl CubismRuntimeInfo {
             parameter_count: None,
             part_count: None,
             drawable_count: None,
+            offscreen_count: None,
             canvas_size: None,
             pixels_per_unit: None,
         }
@@ -111,7 +191,7 @@ impl CubismRuntimeInfo {
                     .unwrap_or_else(|| "unknown".to_string());
 
                 format!(
-                    "Cubism Core {} | moc {}/latest {} | params {} | parts {} | drawables {} | canvas {} @ {} ppu",
+                    "Cubism Core {} | moc {}/latest {} | params {} | parts {} | drawables {} | offscreens {} | canvas {} @ {} ppu",
                     self.core_version.as_deref().unwrap_or("unknown"),
                     self.moc_version
                         .map(|version| version.to_string())
@@ -126,6 +206,9 @@ impl CubismRuntimeInfo {
                     self.drawable_count
                         .map(|count| count.to_string())
                         .unwrap_or_else(|| "unknown".to_string()),
+                    self.offscreen_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
                     canvas,
                     ppu,
                 )
@@ -137,8 +220,8 @@ impl CubismRuntimeInfo {
 #[cfg(feature = "cubism-core")]
 mod core {
     use super::{
-        CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismParameterInfo,
-        CubismRuntimeInfo, CubismRuntimeStatus, DrawableFlags,
+        CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismOffscreenInfo,
+        CubismParameterInfo, CubismPartInfo, CubismRuntimeInfo, CubismRuntimeStatus, DrawableFlags,
     };
     use crate::live2d_model::Live2dModel;
     use live2d_cubism_core_sys as sys;
@@ -215,6 +298,7 @@ mod core {
                 parameter_count: Some(unsafe { sys::csmGetParameterCount(model_ptr) }),
                 part_count: Some(unsafe { sys::csmGetPartCount(model_ptr) }),
                 drawable_count: Some(unsafe { sys::csmGetDrawableCount(model_ptr) }),
+                offscreen_count: Some(unsafe { sys::csmGetOffscreenCount(model_ptr) }),
                 canvas_size: Some([canvas_size.x, canvas_size.y]),
                 pixels_per_unit: Some(pixels_per_unit),
             };
@@ -385,6 +469,84 @@ mod core {
                 .collect()
         }
 
+        #[allow(dead_code)]
+        pub fn parts(&self) -> Vec<CubismPartInfo> {
+            let count = unsafe { sys::csmGetPartCount(self.model) };
+            if count <= 0 {
+                return Vec::new();
+            }
+
+            let len = count as usize;
+            let ids = unsafe { ptr_array(sys::csmGetPartIds(self.model), len) };
+            let opacities = unsafe { value_array(sys::csmGetPartOpacities(self.model), len) };
+            let parent_part_indices =
+                unsafe { value_array(sys::csmGetPartParentPartIndices(self.model), len) };
+            let offscreen_indices =
+                unsafe { value_array(sys::csmGetPartOffscreenIndices(self.model), len) };
+
+            (0..len)
+                .map(|index| CubismPartInfo {
+                    index,
+                    id: unsafe { cstr_to_string(ids[index]) },
+                    parent_part_index: *parent_part_indices.get(index).unwrap_or(&-1),
+                    offscreen_index: *offscreen_indices.get(index).unwrap_or(&-1),
+                    opacity: *opacities.get(index).unwrap_or(&1.0),
+                })
+                .collect()
+        }
+
+        #[allow(dead_code)]
+        pub fn offscreens(&self) -> Vec<CubismOffscreenInfo> {
+            let count = unsafe { sys::csmGetOffscreenCount(self.model) };
+            if count <= 0 {
+                return Vec::new();
+            }
+
+            let len = count as usize;
+            let drawable_count = unsafe { sys::csmGetDrawableCount(self.model) }.max(0) as usize;
+            let total_count = drawable_count + len;
+            let render_orders =
+                unsafe { value_array(sys::csmGetRenderOrders(self.model), total_count) };
+            let blend_modes =
+                unsafe { value_array(sys::csmGetOffscreenBlendModes(self.model), len) };
+            let opacities = unsafe { value_array(sys::csmGetOffscreenOpacities(self.model), len) };
+            let owner_indices =
+                unsafe { value_array(sys::csmGetOffscreenOwnerIndices(self.model), len) };
+            let multiply_colors =
+                unsafe { vector4_array(sys::csmGetOffscreenMultiplyColors(self.model), len) };
+            let screen_colors =
+                unsafe { vector4_array(sys::csmGetOffscreenScreenColors(self.model), len) };
+            let mask_counts =
+                unsafe { value_array(sys::csmGetOffscreenMaskCounts(self.model), len) };
+            let masks = unsafe { ptr_array(sys::csmGetOffscreenMasks(self.model), len) };
+            let constant_flags =
+                unsafe { value_array(sys::csmGetOffscreenConstantFlags(self.model), len) };
+
+            (0..len)
+                .map(|index| CubismOffscreenInfo {
+                    index,
+                    owner_part_index: *owner_indices.get(index).unwrap_or(&-1),
+                    blend_mode: cubism_blend_mode(blend_modes[index]),
+                    opacity: opacities[index],
+                    render_order: *render_orders
+                        .get(drawable_count + index)
+                        .unwrap_or(&((drawable_count + index) as i32)),
+                    masks: unsafe {
+                        value_array(masks[index], mask_counts[index].max(0) as usize).to_vec()
+                    },
+                    multiply_color: multiply_colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                    screen_color: screen_colors
+                        .get(index)
+                        .copied()
+                        .unwrap_or([0.0, 0.0, 0.0, 1.0]),
+                    flags: offscreen_flags(constant_flags[index]),
+                })
+                .collect()
+        }
+
         pub fn drawable_frame_by_index(
             &self,
             drawable_index: usize,
@@ -428,12 +590,30 @@ mod core {
         }
     }
 
+    #[allow(dead_code)]
+    fn offscreen_flags(constant: sys::csmFlags) -> DrawableFlags {
+        DrawableFlags {
+            visible: true,
+            double_sided: constant & sys::IS_DOUBLE_SIDED != 0,
+            blend_additive: constant & sys::BLEND_ADDITIVE != 0,
+            blend_multiplicative: constant & sys::BLEND_MULTIPLICATIVE != 0,
+            inverted_mask: constant & sys::IS_INVERTED_MASK != 0,
+        }
+    }
+
     fn cubism_blend_mode(value: i32) -> CubismBlendMode {
-        match value {
-            0 => CubismBlendMode::Normal,
-            1 => CubismBlendMode::Additive,
-            2 => CubismBlendMode::Multiplicative,
-            other => CubismBlendMode::Unknown(other),
+        let color = value & 0xff;
+        let alpha = (value >> 8) & 0xff;
+        match (color, alpha) {
+            (0, 0) => CubismBlendMode::Normal,
+            (1, 0) => CubismBlendMode::Additive,
+            (2, 0) => CubismBlendMode::Multiplicative,
+            (0..=17, 0..=4) => CubismBlendMode::Extended {
+                raw: value,
+                color,
+                alpha,
+            },
+            _ => CubismBlendMode::Unknown(value),
         }
     }
 
@@ -582,6 +762,16 @@ mod core {
         }
 
         pub fn drawables(&self) -> Vec<super::CubismDrawableInfo> {
+            Vec::new()
+        }
+
+        #[allow(dead_code)]
+        pub fn parts(&self) -> Vec<super::CubismPartInfo> {
+            Vec::new()
+        }
+
+        #[allow(dead_code)]
+        pub fn offscreens(&self) -> Vec<super::CubismOffscreenInfo> {
             Vec::new()
         }
 
