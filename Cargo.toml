@@ -6,9 +6,10 @@ edition = "2024"
 [features]
 default = []
 cubism-core = ["dep:live2d-cubism-core-sys"]
-metal-renderer = ["cubism-core", "dep:metal"]
+metal-renderer = ["cubism-core", "dep:core-graphics-types", "dep:metal"]
 
 [dependencies]
+core-graphics-types = { version = "0.2.0", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 live2d-cubism-core-sys = { version = "0.1", optional = true }
 metal = { version = "0.33.0", optional = true }

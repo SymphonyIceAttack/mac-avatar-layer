@@ -6,7 +6,13 @@ mod live2d_model;
 mod macos_app;
 #[cfg(all(target_os = "macos", feature = "metal-renderer"))]
 mod metal_renderer;
-#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+#[cfg(target_os = "macos")]
+mod motion;
+#[cfg(all(
+    target_os = "macos",
+    feature = "cubism-core",
+    not(feature = "metal-renderer")
+))]
 mod software_renderer;
 
 #[cfg(target_os = "macos")]

@@ -103,6 +103,7 @@ impl Live2dModel {
         Ok(model)
     }
 
+    #[cfg(not(feature = "metal-renderer"))]
     pub fn primary_texture(&self) -> Option<&Path> {
         self.textures.first().map(PathBuf::as_path)
     }

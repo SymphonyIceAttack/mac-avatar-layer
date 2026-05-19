@@ -33,13 +33,26 @@ pub struct CubismParameterInfo {
 pub struct CubismDrawableInfo {
     pub index: usize,
     pub id: String,
+    pub parent_part_index: i32,
+    pub parent_part_id: Option<String>,
+    pub blend_mode: CubismBlendMode,
     pub texture_index: i32,
     pub vertex_count: i32,
     pub index_count: i32,
     pub opacity: f32,
     pub draw_order: i32,
     pub render_order: i32,
+    pub masks: Vec<i32>,
     pub flags: DrawableFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CubismBlendMode {
+    Normal,
+    Additive,
+    Multiplicative,
+    Unknown(i32),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -120,8 +133,8 @@ impl CubismRuntimeInfo {
 #[cfg(feature = "cubism-core")]
 mod core {
     use super::{
-        CubismDrawableFrame, CubismDrawableInfo, CubismParameterInfo, CubismRuntimeInfo,
-        CubismRuntimeStatus, DrawableFlags,
+        CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismParameterInfo,
+        CubismRuntimeInfo, CubismRuntimeStatus, DrawableFlags,
     };
     use crate::live2d_model::Live2dModel;
     use live2d_cubism_core_sys as sys;
@@ -220,6 +233,29 @@ mod core {
             }
         }
 
+        pub fn set_parameter_value(&mut self, id: &str, value: f32) -> bool {
+            let count = unsafe { sys::csmGetParameterCount(self.model) };
+            if count <= 0 {
+                return false;
+            }
+
+            let len = count as usize;
+            let ids = unsafe { ptr_array(sys::csmGetParameterIds(self.model), len) };
+            let mins = unsafe { value_array(sys::csmGetParameterMinimumValues(self.model), len) };
+            let maxes = unsafe { value_array(sys::csmGetParameterMaximumValues(self.model), len) };
+            let values =
+                unsafe { slice::from_raw_parts_mut(sys::csmGetParameterValues(self.model), len) };
+
+            for index in 0..len {
+                if unsafe { cstr_to_string(ids[index]) } == id {
+                    values[index] = value.clamp(mins[index], maxes[index]);
+                    return true;
+                }
+            }
+
+            false
+        }
+
         pub fn parameters(&self) -> Vec<CubismParameterInfo> {
             let count = unsafe { sys::csmGetParameterCount(self.model) };
             if count <= 0 {
@@ -253,10 +289,16 @@ mod core {
 
             let len = count as usize;
             let ids = unsafe { ptr_array(sys::csmGetDrawableIds(self.model), len) };
+            let part_count = unsafe { sys::csmGetPartCount(self.model) }.max(0) as usize;
+            let part_ids = unsafe { ptr_array(sys::csmGetPartIds(self.model), part_count) };
+            let parent_part_indices =
+                unsafe { value_array(sys::csmGetDrawableParentPartIndices(self.model), len) };
             let constant_flags =
                 unsafe { value_array(sys::csmGetDrawableConstantFlags(self.model), len) };
             let dynamic_flags =
                 unsafe { value_array(sys::csmGetDrawableDynamicFlags(self.model), len) };
+            let blend_modes =
+                unsafe { value_array(sys::csmGetDrawableBlendModes(self.model), len) };
             let texture_indices =
                 unsafe { value_array(sys::csmGetDrawableTextureIndices(self.model), len) };
             let vertex_counts =
@@ -267,17 +309,31 @@ mod core {
             let draw_orders =
                 unsafe { value_array(sys::csmGetDrawableDrawOrders(self.model), len) };
             let render_orders = unsafe { value_array(sys::csmGetRenderOrders(self.model), len) };
+            let mask_counts =
+                unsafe { value_array(sys::csmGetDrawableMaskCounts(self.model), len) };
+            let masks = unsafe { ptr_array(sys::csmGetDrawableMasks(self.model), len) };
 
             (0..len)
                 .map(|index| CubismDrawableInfo {
                     index,
                     id: unsafe { cstr_to_string(ids[index]) },
+                    parent_part_index: *parent_part_indices.get(index).unwrap_or(&-1),
+                    parent_part_id: parent_part_indices.get(index).and_then(|part_index| {
+                        (*part_index >= 0)
+                            .then_some(*part_index as usize)
+                            .filter(|part_index| *part_index < part_count)
+                            .map(|part_index| unsafe { cstr_to_string(part_ids[part_index]) })
+                    }),
+                    blend_mode: cubism_blend_mode(blend_modes[index]),
                     texture_index: texture_indices[index],
                     vertex_count: vertex_counts[index],
                     index_count: index_counts[index],
                     opacity: opacities[index],
                     draw_order: draw_orders[index],
-                    render_order: render_orders[index],
+                    render_order: *render_orders.get(index).unwrap_or(&(index as i32)),
+                    masks: unsafe {
+                        value_array(masks[index], mask_counts[index].max(0) as usize).to_vec()
+                    },
                     flags: drawable_flags(constant_flags[index], dynamic_flags[index]),
                 })
                 .collect()
@@ -323,6 +379,15 @@ mod core {
             blend_additive: constant & sys::BLEND_ADDITIVE != 0,
             blend_multiplicative: constant & sys::BLEND_MULTIPLICATIVE != 0,
             inverted_mask: constant & sys::IS_INVERTED_MASK != 0,
+        }
+    }
+
+    fn cubism_blend_mode(value: i32) -> CubismBlendMode {
+        match value {
+            0 => CubismBlendMode::Normal,
+            1 => CubismBlendMode::Additive,
+            2 => CubismBlendMode::Multiplicative,
+            other => CubismBlendMode::Unknown(other),
         }
     }
 
@@ -446,6 +511,10 @@ mod core {
         }
 
         pub fn update(&mut self) {}
+
+        pub fn set_parameter_value(&mut self, _id: &str, _value: f32) -> bool {
+            false
+        }
 
         pub fn parameters(&self) -> Vec<super::CubismParameterInfo> {
             Vec::new()

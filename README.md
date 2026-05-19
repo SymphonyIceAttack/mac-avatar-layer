@@ -25,6 +25,8 @@ plugin APIs, and scene editing can sit on top after this behavior is proven.
 - With `cubism-core` enabled, renders a first proof-of-life frame through a CPU
   software rasterizer using Cubism drawable positions, UVs, indices, render
   order, opacity, and texture atlases.
+- With `metal-renderer` enabled, attaches a `CAMetalLayer` to the avatar window
+  and draws Cubism drawables through a Metal pipeline.
 - Draws a small animated Core Animation placeholder layer as the first avatar
   stand-in when Cubism Core is not enabled.
 
@@ -64,15 +66,16 @@ You can pass a different Cubism manifest path as the first argument:
 cargo run -- public/model/0.model3.json
 ```
 
-For now, the app validates the Cubism files and displays the first texture
-atlas as a placeholder. Rendering the real `.moc3` mesh/deformer data requires
-the Live2D Cubism runtime, which is the next integration layer.
+By default, the app validates the Cubism files and displays the first texture
+atlas as a placeholder. With `cubism-core`, it evaluates `.moc3` drawables
+through Live2D Cubism Core. With `metal-renderer`, it also draws those drawable
+meshes through Metal.
 
-In other words, the current implementation has connected the model resource
-entry point and can display the texture atlas, but it is not yet a complete
-Live2D `.moc3` mesh renderer. Making the avatar actually move requires
-integrating the Live2D Cubism Native runtime, then driving the model with
-`.moc3`, texture atlases, physics, and parameter updates.
+This is still not a complete VTube Studio replacement. The current renderer has
+the resource entry point, Cubism Core model evaluation, texture atlas upload,
+and basic drawable mesh rendering. The next layer is proper Live2D rendering
+behavior: masks, additive/multiply blend modes, physics-driven parameters,
+motion/expression playback, and tracking input.
 
 ## Live2D Cubism Core
 
@@ -113,15 +116,18 @@ With `cubism-core` enabled, the app loads the `.moc3`, validates consistency,
 initializes a `csmModel`, calls `csmUpdateModel` each frame, and reports Core
 version, moc version, parameter count, part count, drawable count, and canvas
 info in the diagnostics overlay. The Rust wrapper also exposes parameter and
-drawable metadata plus drawable frame buffers for a future renderer. Actual
-mesh drawing now has a CPU proof-of-life path, but this is not the final
-renderer. The app still needs a Metal or wgpu renderer for correct high
-performance rendering, masks, blend modes, and real-time use.
+drawable metadata plus drawable frame buffers.
 
-The `metal-renderer` feature adds the first Metal backend skeleton. It creates
-a Metal device and command queue, then probes Cubism drawable and triangle
-counts against the loaded model. It does not yet replace the CPU rasterizer or
-attach a `CAMetalLayer`.
+The `metal-renderer` feature replaces the CPU proof-of-life display path with a
+real `CAMetalLayer`. It uploads the texture atlases to Metal textures, compiles
+shader pipelines, sorts drawables by render order, and draws indexed triangle
+meshes from Cubism's updated vertex/UV/index buffers. Normal, additive, and
+multiplicative drawable blend modes now use separate Metal pipeline states.
+Masked drawables render their Cubism clipping masks into tiles in a reusable
+offscreen Metal mask atlas before the main pass samples the relevant tile.
+Dynamic drawable vertices are written into a small ring of shared Metal buffers
+each frame, while drawable index buffers are cached and reused by both the mask
+pass and the main pass.
 
 ```bash
 CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
@@ -129,8 +135,8 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
   cargo run --features metal-renderer -- public/model/0.model3.json
 ```
 
-The `.gitignore` excludes `CubismSdkForNative*/` so a locally downloaded SDK is
-not accidentally committed.
+The `.gitignore` excludes `public/` and `CubismSdkForNative*/` so model files
+and a locally downloaded SDK are not accidentally committed.
 
 Reference: Live2D's Core API documentation describes Cubism Core as a C API for
 handling `.moc3` models. It calculates model data such as vertex information;
@@ -175,10 +181,8 @@ This prototype separates the first critical pieces:
 
 ## Next Milestones
 
-1. Attach a `CAMetalLayer` to the avatar window and render Cubism drawables
-   through Metal.
-2. Add mask buffers, blend modes, texture upload, and high-performance drawable
-   batching.
-3. Add explicit active Space transition detection and structured trace output.
-4. Add camera/face-tracking input as a separate thread with timestamped frames.
+1. Batch compatible drawables and reduce pipeline/texture state churn.
+2. Drive parameters from physics, motions, expressions, and tracking input.
+3. Add motion/expression loading and a first idle animation driver.
+4. Add explicit active Space transition detection and structured trace output.
 5. Implement the VTube Studio plugin WebSocket API compatibility layer.

@@ -5,9 +5,10 @@ use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
 use crate::metal_renderer::MetalRenderer;
-#[cfg(feature = "cubism-core")]
+#[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 use crate::software_renderer::SoftwareRenderer;
 use std::ffi::{CString, c_char, c_double, c_long, c_ulong, c_void};
+#[cfg(not(feature = "metal-renderer"))]
 use std::path::Path;
 use std::ptr;
 use std::thread;
@@ -70,7 +71,7 @@ unsafe extern "C" {}
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}
 
-#[cfg(feature = "cubism-core")]
+#[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGColorSpaceCreateDeviceRGB() -> Id;
@@ -110,18 +111,53 @@ pub fn run(model_path: &str) -> Result<(), String> {
             println!("Texture: {}", texture.display());
         }
         let mut cubism_runtime = cubism::load_runtime(&model)?;
+        if let Ok(value) = std::env::var("VTUBE_RS_MOUTH_OPEN") {
+            if let Ok(value) = value.parse::<f32>() {
+                if cubism_runtime.set_parameter_value("ParamMouthOpenY", value) {
+                    cubism_runtime.update();
+                    println!("Set ParamMouthOpenY to {value:.3}");
+                }
+            }
+        }
+        if let Ok(value) = std::env::var("VTUBE_RS_MOUTH_FORM") {
+            if let Ok(value) = value.parse::<f32>() {
+                if cubism_runtime.set_parameter_value("ParamMouthForm", value) {
+                    cubism_runtime.update();
+                    println!("Set ParamMouthForm to {value:.3}");
+                }
+            }
+        }
         let cubism_summary = cubism_runtime.info().summary();
         println!("{cubism_summary}");
         log_cubism_preview(&cubism_runtime);
-        #[cfg(feature = "metal-renderer")]
-        log_metal_probe(&model, &cubism_runtime)?;
-
         let window = create_avatar_window()?;
         let root_layer = create_root_layer(window)?;
+        #[cfg(feature = "metal-renderer")]
+        let mut metal_renderer = {
+            let mut renderer = MetalRenderer::load(&model)?;
+            let probe = renderer.render_probe(&cubism_runtime);
+            println!(
+                "Metal renderer: device '{}' textures {} drawables {} triangles {} additive {} multiply {} masked {} queue {}",
+                probe.device_name,
+                probe.texture_count,
+                probe.drawable_count,
+                probe.triangle_count,
+                probe.additive_count,
+                probe.multiplicative_count,
+                probe.masked_count,
+                probe.has_command_queue
+            );
+            install_metal_layer(root_layer, &mut renderer)?;
+            renderer
+        };
+        #[cfg(not(feature = "metal-renderer"))]
         let avatar_layer = create_avatar_layer(&model)?;
         let diagnostics_layer = create_diagnostics_layer()?;
+        #[cfg(not(feature = "metal-renderer"))]
         msg_void_id(root_layer, "addSublayer:", avatar_layer);
-        msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
+        if std::env::var_os("VTUBE_RS_HIDE_DIAGNOSTICS").is_none() {
+            msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
+        }
 
         msg_void_id(window, "makeKeyAndOrderFront:", NIL);
         msg_void(window, "orderFrontRegardless");
@@ -134,15 +170,24 @@ pub fn run(model_path: &str) -> Result<(), String> {
             model.summary(),
             cubism_summary,
         );
-        #[cfg(feature = "cubism-core")]
+        #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
+        let mut motion_controller = crate::motion::MotionController::new(&model);
         let started_at = Instant::now();
+        let mut last_frame_at = started_at;
 
         loop {
             drain_pending_events(app, run_loop_mode);
             begin_immediate_layer_update();
-            cubism_runtime.update();
-            #[cfg(feature = "cubism-core")]
+            let now = Instant::now();
+            motion_controller.apply(
+                &mut cubism_runtime,
+                now.saturating_duration_since(last_frame_at),
+            );
+            last_frame_at = now;
+            #[cfg(feature = "metal-renderer")]
+            metal_renderer.render(&cubism_runtime)?;
+            #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
             {
                 let rgba = software_renderer.render(&cubism_runtime);
                 set_layer_bitmap(avatar_layer, rgba, 512, 512)?;
@@ -156,24 +201,6 @@ pub fn run(model_path: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(feature = "metal-renderer")]
-fn log_metal_probe(
-    model: &Live2dModel,
-    runtime: &cubism::CubismModelRuntime,
-) -> Result<(), String> {
-    let renderer = MetalRenderer::load(model)?;
-    let probe = renderer.render_probe(runtime);
-    println!(
-        "Metal renderer probe: device '{}' textures {} drawables {} triangles {} queue {}",
-        probe.device_name,
-        probe.texture_count,
-        probe.drawable_count,
-        probe.triangle_count,
-        probe.has_command_queue
-    );
-    Ok(())
-}
-
 fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
     let parameters = runtime.parameters();
     if !parameters.is_empty() {
@@ -184,6 +211,14 @@ fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
                 parameter.id, parameter.value, parameter.default, parameter.min, parameter.max
             );
         }
+        for parameter in parameters.iter().filter(|parameter| {
+            matches!(parameter.id.as_str(), "ParamMouthForm" | "ParamMouthOpenY")
+        }) {
+            println!(
+                "  mouth param {} value {:.3} default {:.3} range [{:.3}, {:.3}]",
+                parameter.id, parameter.value, parameter.default, parameter.min, parameter.max
+            );
+        }
     }
 
     let drawables = runtime.drawables();
@@ -191,19 +226,42 @@ fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
         println!("Cubism drawables: {}", drawables.len());
         for drawable in drawables.iter().take(8) {
             println!(
-                "  drawable #{} {} tex {} vertices {} indices {} opacity {:.3} draw {} render {} flags visible={} double_sided={} additive={} multiply={} inverted_mask={}",
+                "  drawable #{} {} part {}({}) blend {:?} tex {} vertices {} indices {} opacity {:.3} draw {} render {} masks {} flags visible={} double_sided={} additive={} multiply={} inverted_mask={}",
                 drawable.index,
                 drawable.id,
+                drawable.parent_part_id.as_deref().unwrap_or("-"),
+                drawable.parent_part_index,
+                drawable.blend_mode,
                 drawable.texture_index,
                 drawable.vertex_count,
                 drawable.index_count,
                 drawable.opacity,
                 drawable.draw_order,
                 drawable.render_order,
+                drawable.masks.len(),
                 drawable.flags.visible,
                 drawable.flags.double_sided,
                 drawable.flags.blend_additive,
                 drawable.flags.blend_multiplicative,
+                drawable.flags.inverted_mask
+            );
+        }
+
+        for drawable in drawables.iter().filter(|drawable| {
+            matches!(drawable.parent_part_id.as_deref(), Some("Part6" | "Part9"))
+        }) {
+            println!(
+                "  mouth drawable #{} {} part {}({}) tex {} opacity {:.3} draw {} render {} masks {:?} visible={} inverted_mask={}",
+                drawable.index,
+                drawable.id,
+                drawable.parent_part_id.as_deref().unwrap_or("-"),
+                drawable.parent_part_index,
+                drawable.texture_index,
+                drawable.opacity,
+                drawable.draw_order,
+                drawable.render_order,
+                drawable.masks,
+                drawable.flags.visible,
                 drawable.flags.inverted_mask
             );
         }
@@ -219,7 +277,7 @@ fn log_cubism_preview(runtime: &cubism::CubismModelRuntime) {
     }
 }
 
-#[cfg(feature = "cubism-core")]
+#[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 unsafe fn set_layer_bitmap(
     layer: Id,
     rgba: &[u8],
@@ -364,6 +422,7 @@ unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
     Ok(layer)
 }
 
+#[cfg(not(feature = "metal-renderer"))]
 unsafe fn create_avatar_layer(model: &Live2dModel) -> Result<Id, String> {
     let layer = msg_id(class("CALayer")?, "layer");
     if layer.is_null() {
@@ -387,6 +446,27 @@ unsafe fn create_avatar_layer(model: &Live2dModel) -> Result<Id, String> {
     }
 
     Ok(layer)
+}
+
+#[cfg(feature = "metal-renderer")]
+unsafe fn install_metal_layer(root_layer: Id, renderer: &mut MetalRenderer) -> Result<(), String> {
+    let layer = renderer.layer_ptr();
+    if layer.is_null() {
+        return Err("CAMetalLayer allocation returned nil".to_string());
+    }
+
+    let frame = NSRect {
+        origin: NSPoint { x: 36.0, y: 92.0 },
+        size: NSSize {
+            width: 288.0,
+            height: 288.0,
+        },
+    };
+    renderer.set_drawable_size(frame.size.width, frame.size.height);
+    msg_void_rect(layer, "setFrame:", frame);
+    msg_void_double(layer, "setZPosition:", 1.0);
+    msg_void_id(root_layer, "addSublayer:", layer);
+    Ok(())
 }
 
 unsafe fn create_diagnostics_layer() -> Result<Id, String> {
@@ -419,6 +499,7 @@ unsafe fn create_diagnostics_layer() -> Result<Id, String> {
     Ok(layer)
 }
 
+#[cfg(not(feature = "metal-renderer"))]
 unsafe fn set_layer_image(layer: Id, path: &Path) -> Result<(), String> {
     let path_string = path
         .to_str()
@@ -695,13 +776,14 @@ unsafe fn msg_id_cstr(receiver: Id, selector_name: &str, value: *const c_char) -
     function(receiver, selector(selector_name), value)
 }
 
-#[cfg(feature = "cubism-core")]
+#[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 unsafe fn msg_id_bytes(receiver: Id, selector_name: &str, bytes: *const c_void, len: usize) -> Id {
     let function: extern "C" fn(Id, Sel, *const c_void, usize) -> Id =
         std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), bytes, len)
 }
 
+#[cfg(not(feature = "metal-renderer"))]
 unsafe fn msg_id_id(receiver: Id, selector_name: &str, value: Id) -> Id {
     let function: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value)
