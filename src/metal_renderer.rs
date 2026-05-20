@@ -506,6 +506,21 @@ impl MetalRenderer {
         self.layer.as_ptr().cast()
     }
 
+    pub fn set_contents_scale(&mut self, contents_scale: f64) {
+        let contents_scale = contents_scale.max(1.0);
+        if (self.contents_scale - contents_scale).abs() >= 0.01 {
+            println!(
+                "renderer_event=contents_scale_changed old={:.2} new={:.2}",
+                self.contents_scale, contents_scale
+            );
+            self.contents_scale = contents_scale;
+            self.layer.set_contents_scale(contents_scale);
+            let logical_size = self.drawable_size;
+            self.drawable_size = 0.0;
+            self.set_drawable_size(logical_size, logical_size);
+        }
+    }
+
     pub fn set_drawable_size(&mut self, width: f64, height: f64) {
         let logical_size = width.max(1.0).min(height.max(1.0));
         let physical_size = (logical_size * self.contents_scale).round().max(1.0);
@@ -643,6 +658,7 @@ impl MetalRenderer {
                     &offscreen_items,
                     &runtime.parts(),
                     vertex_buffer,
+                    transform,
                     &mask_contexts,
                     &mask_lookup,
                 )?;
@@ -1060,6 +1076,7 @@ impl MetalRenderer {
         offscreen_items: &[OffscreenItem],
         parts: &[CubismPartInfo],
         vertex_buffer: &metal::BufferRef,
+        transform: FitTransform,
         mask_contexts: &[MaskContext],
         mask_lookup: &HashMap<Vec<i32>, usize>,
     ) -> Result<(), String> {
@@ -1067,6 +1084,8 @@ impl MetalRenderer {
         let draw_lookup = draw_item_lookup(draw_items);
         let mut active_offscreens = Vec::<usize>::new();
         let mut target_initialized = TargetInitialization::new(offscreen_items.len());
+        let composite_quad_vertex_buffer =
+            create_composite_quad_vertex_buffer(&self.device, transform);
 
         clear_render_target(command_buffer, drawable_texture)?;
         target_initialized.main = true;
@@ -1090,6 +1109,7 @@ impl MetalRenderer {
                             active_offscreens.last().copied(),
                             drawable_texture,
                             offscreen_items,
+                            &composite_quad_vertex_buffer,
                             mask_contexts,
                             mask_lookup,
                             &mut target_initialized,
@@ -1123,6 +1143,7 @@ impl MetalRenderer {
                             active_offscreens.last().copied(),
                             drawable_texture,
                             offscreen_items,
+                            &composite_quad_vertex_buffer,
                             mask_contexts,
                             mask_lookup,
                             &mut target_initialized,
@@ -1140,6 +1161,7 @@ impl MetalRenderer {
                 active_offscreens.last().copied(),
                 drawable_texture,
                 offscreen_items,
+                &composite_quad_vertex_buffer,
                 mask_contexts,
                 mask_lookup,
                 &mut target_initialized,
@@ -1147,6 +1169,15 @@ impl MetalRenderer {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn offscreen_plan_for_test(
+        draw_items: &[DrawItem],
+        offscreen_items: &[OffscreenItem],
+        parts: &[CubismPartInfo],
+    ) -> Vec<OffscreenPlanEvent> {
+        offscreen_plan(draw_items, offscreen_items, parts)
     }
 
     fn draw_item_to_target(
@@ -1253,6 +1284,7 @@ impl MetalRenderer {
         parent_target: Option<usize>,
         drawable_texture: &metal::TextureRef,
         offscreen_items: &[OffscreenItem],
+        composite_quad_vertex_buffer: &metal::BufferRef,
         mask_contexts: &[MaskContext],
         mask_lookup: &HashMap<Vec<i32>, usize>,
         target_initialized: &mut TargetInitialization,
@@ -1270,6 +1302,8 @@ impl MetalRenderer {
         if offscreen.opacity <= 0.0 {
             return Ok(());
         }
+        let mask_index = mask_lookup.get(&offscreen.masks).copied();
+        let mask_context = mask_index.and_then(|index| mask_contexts.get(index));
         let extended_blend = matches!(offscreen.blend_mode, CubismBlendMode::Extended { .. });
         if extended_blend {
             if !target_initialized.is_initialized(parent_target) {
@@ -1297,15 +1331,18 @@ impl MetalRenderer {
         encoder.set_render_pipeline_state(self.pipeline_state(offscreen.blend_mode));
         encoder.set_cull_mode(MTLCullMode::None);
         encoder.set_front_facing_winding(MTLWinding::CounterClockwise);
-        encoder.set_vertex_buffer(0, Some(&self.quad_vertex_buffer), 0);
+        let quad_vertex_buffer = if mask_context.is_some() {
+            composite_quad_vertex_buffer
+        } else {
+            &self.quad_vertex_buffer
+        };
+        encoder.set_vertex_buffer(0, Some(quad_vertex_buffer), 0);
         encoder.set_fragment_texture(0, Some(offscreen_texture));
         if extended_blend {
             if let Some(snapshot) = self.blend_snapshot_texture.as_ref() {
                 encoder.set_fragment_texture(2, Some(snapshot));
             }
         }
-        let mask_index = mask_lookup.get(&offscreen.masks).copied();
-        let mask_context = mask_index.and_then(|index| mask_contexts.get(index));
         let mask_texture = mask_index
             .and_then(|index| {
                 mask_contexts
@@ -1483,10 +1520,25 @@ struct OffscreenFallbackDiagnostics {
     max_offscreen_depth: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenderObject {
     Drawable(usize),
     Offscreen(usize),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OffscreenPlanEvent {
+    Begin(usize),
+    Snapshot(Option<usize>),
+    Draw {
+        drawable_index: usize,
+        target: Option<usize>,
+    },
+    Flush {
+        offscreen_index: usize,
+        parent_target: Option<usize>,
+    },
 }
 
 struct TargetInitialization {
@@ -1905,6 +1957,14 @@ impl FitTransform {
             1.0 - (y / self.output_size) * 2.0,
         ]
     }
+
+    fn model_position_from_ndc(self, position: [f32; 2]) -> [f32; 2] {
+        let x = ((position[0] + 1.0) * 0.5 * self.output_size - self.offset_x) / self.scale
+            + self.min_x;
+        let y = ((position[1] + 1.0) * 0.5 * self.output_size - self.offset_y) / self.scale
+            + self.min_y;
+        [x, y]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2250,28 +2310,7 @@ fn create_white_mask_texture(device: &Device) -> Texture {
 }
 
 fn create_quad_buffers(device: &Device) -> (Buffer, Buffer) {
-    let vertices = [
-        MetalVertex {
-            position: [-1.0, -1.0],
-            model_position: [-1.0, -1.0],
-            uv: [0.0, 0.0],
-        },
-        MetalVertex {
-            position: [1.0, -1.0],
-            model_position: [1.0, -1.0],
-            uv: [1.0, 0.0],
-        },
-        MetalVertex {
-            position: [-1.0, 1.0],
-            model_position: [-1.0, 1.0],
-            uv: [0.0, 1.0],
-        },
-        MetalVertex {
-            position: [1.0, 1.0],
-            model_position: [1.0, 1.0],
-            uv: [1.0, 1.0],
-        },
-    ];
+    let vertices = fullscreen_quad_vertices(FitTransform::identity());
     let indices = [0_u16, 1, 2, 2, 1, 3];
     let vertex_buffer = device.new_buffer_with_data(
         vertices.as_ptr().cast(),
@@ -2284,6 +2323,40 @@ fn create_quad_buffers(device: &Device) -> (Buffer, Buffer) {
         MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
     );
     (vertex_buffer, index_buffer)
+}
+
+fn create_composite_quad_vertex_buffer(device: &Device, transform: FitTransform) -> Buffer {
+    let vertices = fullscreen_quad_vertices(transform);
+    device.new_buffer_with_data(
+        vertices.as_ptr().cast(),
+        std::mem::size_of_val(&vertices) as u64,
+        MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+    )
+}
+
+fn fullscreen_quad_vertices(transform: FitTransform) -> [MetalVertex; 4] {
+    [
+        MetalVertex {
+            position: [-1.0, -1.0],
+            model_position: transform.model_position_from_ndc([-1.0, -1.0]),
+            uv: [0.0, 0.0],
+        },
+        MetalVertex {
+            position: [1.0, -1.0],
+            model_position: transform.model_position_from_ndc([1.0, -1.0]),
+            uv: [1.0, 0.0],
+        },
+        MetalVertex {
+            position: [-1.0, 1.0],
+            model_position: transform.model_position_from_ndc([-1.0, 1.0]),
+            uv: [0.0, 1.0],
+        },
+        MetalVertex {
+            position: [1.0, 1.0],
+            model_position: transform.model_position_from_ndc([1.0, 1.0]),
+            uv: [1.0, 1.0],
+        },
+    ]
 }
 
 fn upload_texture(
@@ -2831,15 +2904,119 @@ fn render_objects(draw_items: &[DrawItem], offscreen_items: &[OffscreenItem]) ->
                 RenderObject::Drawable(item.drawable.index),
             )
         })
-        .chain(offscreen_items.iter().map(|item| {
-            (
-                item.offscreen.render_order,
-                RenderObject::Offscreen(item.offscreen.index),
-            )
-        }))
+        .chain(
+            offscreen_items
+                .iter()
+                .enumerate()
+                .map(|(item_index, item)| {
+                    (
+                        item.offscreen.render_order,
+                        RenderObject::Offscreen(item_index),
+                    )
+                }),
+        )
         .collect::<Vec<_>>();
     objects.sort_by_key(|(render_order, _)| *render_order);
     objects.into_iter().map(|(_, object)| object).collect()
+}
+
+#[cfg(test)]
+fn offscreen_plan(
+    draw_items: &[DrawItem],
+    offscreen_items: &[OffscreenItem],
+    parts: &[CubismPartInfo],
+) -> Vec<OffscreenPlanEvent> {
+    let mut events = Vec::new();
+    let mut objects = render_objects(draw_items, offscreen_items);
+    let draw_lookup = draw_item_lookup(draw_items);
+    let mut active_offscreens = Vec::<usize>::new();
+
+    for object in objects.drain(..) {
+        match object {
+            RenderObject::Drawable(drawable_index) => {
+                let Some(item_index) = draw_lookup.get(&drawable_index).copied() else {
+                    continue;
+                };
+                while active_offscreens.last().is_some_and(|offscreen_index| {
+                    !part_is_descendant_of(
+                        draw_items[item_index].drawable.parent_part_index,
+                        offscreen_items[*offscreen_index].offscreen.owner_part_index,
+                        parts,
+                    )
+                }) {
+                    let offscreen_index = active_offscreens.pop().expect("checked by last");
+                    let parent_target = active_offscreens.last().copied();
+                    if matches!(
+                        offscreen_items[offscreen_index].offscreen.blend_mode,
+                        CubismBlendMode::Extended { .. }
+                    ) && offscreen_items[offscreen_index].offscreen.opacity > 0.0
+                    {
+                        events.push(OffscreenPlanEvent::Snapshot(parent_target));
+                    }
+                    events.push(OffscreenPlanEvent::Flush {
+                        offscreen_index,
+                        parent_target,
+                    });
+                }
+                let target = active_offscreens.last().copied();
+                if matches!(
+                    draw_items[item_index].drawable.blend_mode,
+                    CubismBlendMode::Extended { .. }
+                ) && draw_items[item_index].drawable.flags.visible
+                    && draw_items[item_index].drawable.opacity > 0.0
+                {
+                    events.push(OffscreenPlanEvent::Snapshot(target));
+                }
+                events.push(OffscreenPlanEvent::Draw {
+                    drawable_index,
+                    target,
+                });
+            }
+            RenderObject::Offscreen(offscreen_index) => {
+                let owner_part = offscreen_items[offscreen_index].offscreen.owner_part_index;
+                while active_offscreens.last().is_some_and(|active_index| {
+                    !part_is_descendant_of(
+                        owner_part,
+                        offscreen_items[*active_index].offscreen.owner_part_index,
+                        parts,
+                    )
+                }) {
+                    let offscreen_index = active_offscreens.pop().expect("checked by last");
+                    let parent_target = active_offscreens.last().copied();
+                    if matches!(
+                        offscreen_items[offscreen_index].offscreen.blend_mode,
+                        CubismBlendMode::Extended { .. }
+                    ) && offscreen_items[offscreen_index].offscreen.opacity > 0.0
+                    {
+                        events.push(OffscreenPlanEvent::Snapshot(parent_target));
+                    }
+                    events.push(OffscreenPlanEvent::Flush {
+                        offscreen_index,
+                        parent_target,
+                    });
+                }
+                active_offscreens.push(offscreen_index);
+                events.push(OffscreenPlanEvent::Begin(offscreen_index));
+            }
+        }
+    }
+
+    while let Some(offscreen_index) = active_offscreens.pop() {
+        let parent_target = active_offscreens.last().copied();
+        if matches!(
+            offscreen_items[offscreen_index].offscreen.blend_mode,
+            CubismBlendMode::Extended { .. }
+        ) && offscreen_items[offscreen_index].offscreen.opacity > 0.0
+        {
+            events.push(OffscreenPlanEvent::Snapshot(parent_target));
+        }
+        events.push(OffscreenPlanEvent::Flush {
+            offscreen_index,
+            parent_target,
+        });
+    }
+
+    events
 }
 
 fn draw_item_lookup(draw_items: &[DrawItem]) -> HashMap<usize, usize> {
@@ -2930,6 +3107,18 @@ fn set_fragment_params_for_offscreen(
     offscreen: &CubismOffscreenInfo,
     mask_context: Option<&MaskContext>,
 ) {
+    let fragment_params = offscreen_fragment_params(offscreen, mask_context);
+    encoder.set_fragment_bytes(
+        0,
+        std::mem::size_of::<FragmentParams>() as u64,
+        (&raw const fragment_params).cast(),
+    );
+}
+
+fn offscreen_fragment_params(
+    offscreen: &CubismOffscreenInfo,
+    mask_context: Option<&MaskContext>,
+) -> FragmentParams {
     let draw_matrix = mask_context
         .map(|context| context.matrix_for_draw)
         .unwrap_or_else(Affine2::identity);
@@ -2939,7 +3128,7 @@ fn set_fragment_params_for_offscreen(
     let mask_channel = mask_context
         .map(|context| context.channel.index())
         .unwrap_or_else(|| MaskChannel::Red.index());
-    let fragment_params = FragmentParams {
+    FragmentParams {
         opacity: offscreen.opacity.clamp(0.0, 1.0),
         has_mask: u32::from(mask_context.is_some()),
         inverted_mask: u32::from(offscreen.flags.inverted_mask),
@@ -2956,12 +3145,7 @@ fn set_fragment_params_for_offscreen(
         _padding3: [0; 2],
         debug_mode: 0,
         _padding4: [0; 3],
-    };
-    encoder.set_fragment_bytes(
-        0,
-        std::mem::size_of::<FragmentParams>() as u64,
-        (&raw const fragment_params).cast(),
-    );
+    }
 }
 
 fn debug_texture_mode(value: Option<&str>) -> u32 {
@@ -3300,10 +3484,12 @@ fn metal_vertices(frame: &CubismDrawableFrame, transform: FitTransform) -> Vec<M
 #[cfg(test)]
 mod tests {
     use super::{
-        Affine2, Bounds, DrawItem, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel, MaskContext,
-        MaskPlacement, MetalRenderer, OffscreenItem, assign_high_precision_mask_layouts,
-        assign_mask_layouts, framework_color_blend_mode, mask_render_texture_count,
-        offscreen_fallback_diagnostics, part_is_descendant_of, stable_mask_texture_size,
+        Affine2, Bounds, DrawItem, FitTransform, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel,
+        MaskContext, MaskPlacement, MetalRenderer, OffscreenItem,
+        assign_high_precision_mask_layouts, assign_mask_layouts, framework_color_blend_mode,
+        fullscreen_quad_vertices, mask_render_texture_count, offscreen_fallback_diagnostics,
+        offscreen_fragment_params, part_is_descendant_of, stable_mask_texture_size,
+        unique_mask_contexts,
     };
     use crate::cubism::CubismPartInfo;
     use crate::{config::RendererConfig, cubism, live2d_model::Live2dModel};
@@ -3383,7 +3569,10 @@ mod tests {
                     masks: Vec::new(),
                     multiply_color: [1.0; 4],
                     screen_color: [0.0, 0.0, 0.0, 1.0],
-                    flags: cubism::DrawableFlags::default(),
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
                 },
             },
             OffscreenItem {
@@ -3400,7 +3589,10 @@ mod tests {
                     masks: vec![3],
                     multiply_color: [1.0; 4],
                     screen_color: [0.0, 0.0, 0.0, 1.0],
-                    flags: cubism::DrawableFlags::default(),
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
                 },
             },
         ];
@@ -3436,6 +3628,344 @@ mod tests {
         assert_eq!(diagnostics.masked_extended_drawable_count, 1);
         assert_eq!(diagnostics.nested_offscreen_count, 1);
         assert_eq!(diagnostics.max_offscreen_depth, 2);
+    }
+
+    #[test]
+    fn render_objects_use_offscreen_item_indices_not_core_indices() {
+        let draw_items = Vec::new();
+        let offscreen_items = vec![
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 42,
+                    owner_part_index: 0,
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    opacity: 1.0,
+                    render_order: 20,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
+                },
+            },
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 99,
+                    owner_part_index: 1,
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    opacity: 1.0,
+                    render_order: 10,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
+                },
+            },
+        ];
+
+        assert_eq!(
+            super::render_objects(&draw_items, &offscreen_items),
+            vec![
+                super::RenderObject::Offscreen(1),
+                super::RenderObject::Offscreen(0)
+            ]
+        );
+    }
+
+    #[test]
+    fn offscreen_plan_flushes_nested_children_before_parents() {
+        let parts = vec![
+            CubismPartInfo {
+                index: 0,
+                id: "root".to_string(),
+                parent_part_index: -1,
+                offscreen_index: 0,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 1,
+                id: "child".to_string(),
+                parent_part_index: 0,
+                offscreen_index: 1,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 2,
+                id: "leaf".to_string(),
+                parent_part_index: 1,
+                offscreen_index: -1,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 3,
+                id: "sibling".to_string(),
+                parent_part_index: 0,
+                offscreen_index: -1,
+                opacity: 1.0,
+            },
+        ];
+        let offscreen_items = vec![
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 10,
+                    owner_part_index: 0,
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    opacity: 1.0,
+                    render_order: 0,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 20,
+                    owner_part_index: 1,
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    opacity: 1.0,
+                    render_order: 1,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+        ];
+        let draw_items = vec![
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 0,
+                    id: "leaf_draw".to_string(),
+                    parent_part_index: 2,
+                    parent_part_id: Some("leaf".to_string()),
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    texture_index: 0,
+                    vertex_count: 0,
+                    index_count: 0,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 2,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                },
+            },
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 1,
+                    id: "sibling_draw".to_string(),
+                    parent_part_index: 3,
+                    parent_part_id: Some("sibling".to_string()),
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    texture_index: 0,
+                    vertex_count: 0,
+                    index_count: 0,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 3,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                },
+            },
+        ];
+
+        assert_eq!(
+            MetalRenderer::offscreen_plan_for_test(&draw_items, &offscreen_items, &parts),
+            vec![
+                super::OffscreenPlanEvent::Begin(0),
+                super::OffscreenPlanEvent::Begin(1),
+                super::OffscreenPlanEvent::Draw {
+                    drawable_index: 0,
+                    target: Some(1),
+                },
+                super::OffscreenPlanEvent::Flush {
+                    offscreen_index: 1,
+                    parent_target: Some(0),
+                },
+                super::OffscreenPlanEvent::Draw {
+                    drawable_index: 1,
+                    target: Some(0),
+                },
+                super::OffscreenPlanEvent::Flush {
+                    offscreen_index: 0,
+                    parent_target: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn offscreen_plan_snapshots_extended_blends_before_their_target_changes() {
+        let parts = vec![
+            CubismPartInfo {
+                index: 0,
+                id: "root".to_string(),
+                parent_part_index: -1,
+                offscreen_index: 0,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 1,
+                id: "child".to_string(),
+                parent_part_index: 0,
+                offscreen_index: 1,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 2,
+                id: "leaf".to_string(),
+                parent_part_index: 1,
+                offscreen_index: -1,
+                opacity: 1.0,
+            },
+        ];
+        let offscreen_items = vec![
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 10,
+                    owner_part_index: 0,
+                    blend_mode: cubism::CubismBlendMode::Extended {
+                        raw: 256,
+                        color: 0,
+                        alpha: 1,
+                    },
+                    opacity: 1.0,
+                    render_order: 0,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 20,
+                    owner_part_index: 1,
+                    blend_mode: cubism::CubismBlendMode::Extended {
+                        raw: 262,
+                        color: 6,
+                        alpha: 1,
+                    },
+                    opacity: 1.0,
+                    render_order: 1,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+        ];
+        let draw_items = vec![
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 0,
+                    id: "leaf_extended".to_string(),
+                    parent_part_index: 2,
+                    parent_part_id: Some("leaf".to_string()),
+                    blend_mode: cubism::CubismBlendMode::Extended {
+                        raw: 6,
+                        color: 6,
+                        alpha: 0,
+                    },
+                    texture_index: 0,
+                    vertex_count: 0,
+                    index_count: 0,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 2,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                },
+            },
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 1,
+                    id: "main_extended".to_string(),
+                    parent_part_index: -1,
+                    parent_part_id: None,
+                    blend_mode: cubism::CubismBlendMode::Extended {
+                        raw: 256,
+                        color: 0,
+                        alpha: 1,
+                    },
+                    texture_index: 0,
+                    vertex_count: 0,
+                    index_count: 0,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 3,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags {
+                        visible: true,
+                        ..cubism::DrawableFlags::default()
+                    },
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                },
+            },
+        ];
+
+        assert_eq!(
+            MetalRenderer::offscreen_plan_for_test(&draw_items, &offscreen_items, &parts),
+            vec![
+                super::OffscreenPlanEvent::Begin(0),
+                super::OffscreenPlanEvent::Begin(1),
+                super::OffscreenPlanEvent::Snapshot(Some(1)),
+                super::OffscreenPlanEvent::Draw {
+                    drawable_index: 0,
+                    target: Some(1),
+                },
+                super::OffscreenPlanEvent::Snapshot(Some(0)),
+                super::OffscreenPlanEvent::Flush {
+                    offscreen_index: 1,
+                    parent_target: Some(0),
+                },
+                super::OffscreenPlanEvent::Snapshot(None),
+                super::OffscreenPlanEvent::Flush {
+                    offscreen_index: 0,
+                    parent_target: None,
+                },
+                super::OffscreenPlanEvent::Snapshot(None),
+                super::OffscreenPlanEvent::Draw {
+                    drawable_index: 1,
+                    target: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3499,6 +4029,137 @@ mod tests {
         assert_eq!(placement.bounds.max_y, 10.5);
         assert!((placement.scale_x - 0.25 / 11.0).abs() < 0.0001);
         assert!((placement.scale_y - 0.25 / 11.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn fit_transform_round_trips_model_and_ndc_positions() {
+        let transform = FitTransform {
+            min_x: -10.0,
+            min_y: 20.0,
+            scale: 4.0,
+            offset_x: 30.0,
+            offset_y: 40.0,
+            output_size: 512.0,
+        };
+        let model_position = [15.0, 45.0];
+        let ndc = transform.ndc_position(model_position);
+        let restored = transform.model_position_from_ndc(ndc);
+
+        assert!((restored[0] - model_position[0]).abs() < 0.0001);
+        assert!((restored[1] - model_position[1]).abs() < 0.0001);
+    }
+
+    #[test]
+    fn fullscreen_quad_model_positions_follow_inverse_fit_transform() {
+        let transform = FitTransform {
+            min_x: 10.0,
+            min_y: 20.0,
+            scale: 2.0,
+            offset_x: 100.0,
+            offset_y: 80.0,
+            output_size: 400.0,
+        };
+        let vertices = fullscreen_quad_vertices(transform);
+
+        for vertex in vertices {
+            assert_eq!(
+                transform.ndc_position(vertex.model_position),
+                vertex.position
+            );
+        }
+    }
+
+    #[test]
+    fn masked_offscreen_reuses_drawable_mask_context_and_fragment_matrix() {
+        let visible = cubism::DrawableFlags {
+            visible: true,
+            ..cubism::DrawableFlags::default()
+        };
+        let draw_items = vec![
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 7,
+                    id: "mask".to_string(),
+                    parent_part_index: 0,
+                    parent_part_id: Some("mask_part".to_string()),
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    texture_index: 0,
+                    vertex_count: 3,
+                    index_count: 3,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 0,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: visible,
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: vec![[10.0, 20.0], [20.0, 20.0], [10.0, 30.0]],
+                    uvs: vec![[0.0, 0.0]; 3],
+                    indices: vec![0, 1, 2],
+                },
+            },
+            DrawItem {
+                drawable: cubism::CubismDrawableInfo {
+                    index: 8,
+                    id: "masked_drawable".to_string(),
+                    parent_part_index: 1,
+                    parent_part_id: Some("masked_part".to_string()),
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    texture_index: 0,
+                    vertex_count: 0,
+                    index_count: 0,
+                    opacity: 1.0,
+                    draw_order: 0,
+                    render_order: 1,
+                    masks: vec![7],
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: visible,
+                },
+                frame: cubism::CubismDrawableFrame {
+                    positions: Vec::new(),
+                    uvs: Vec::new(),
+                    indices: Vec::new(),
+                },
+            },
+        ];
+        let offscreen = cubism::CubismOffscreenInfo {
+            index: 42,
+            owner_part_index: 2,
+            blend_mode: cubism::CubismBlendMode::Normal,
+            opacity: 0.75,
+            render_order: 2,
+            masks: vec![7],
+            multiply_color: [1.0; 4],
+            screen_color: [0.0, 0.0, 0.0, 1.0],
+            flags: visible,
+        };
+        let offscreen_items = vec![OffscreenItem {
+            offscreen: offscreen.clone(),
+        }];
+
+        let contexts = unique_mask_contexts(
+            &draw_items,
+            &offscreen_items,
+            false,
+            1024,
+            Some(10.0),
+            false,
+        );
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].masks, vec![7]);
+        assert_eq!(contexts[0].bounds.min_x, 10.0);
+        assert_eq!(contexts[0].bounds.max_y, 30.0);
+
+        let params = offscreen_fragment_params(&offscreen, Some(&contexts[0]));
+        assert_eq!(params.has_mask, 1);
+        assert_eq!(params.mask_channel_index, contexts[0].channel.index());
+        assert_eq!(params.layout_bounds, contexts[0].shader_layout_bounds());
+        assert_eq!(params.draw_x, contexts[0].matrix_for_draw.x);
+        assert_eq!(params.draw_y, contexts[0].matrix_for_draw.y);
     }
 
     #[test]

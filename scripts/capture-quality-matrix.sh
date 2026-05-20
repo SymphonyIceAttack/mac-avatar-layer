@@ -84,4 +84,4 @@ for model in "${MODELS[@]}"; do
 done
 
 echo "Quality matrix screenshots: $OUTPUT_DIR"
-echo "Render regression report: $("$ROOT_DIR/scripts/render-regression-report.sh")"
+"$ROOT_DIR/scripts/render-regression-report-safe.sh"

@@ -22,6 +22,9 @@ expression, physics, and tracking input.
   per-drawable multiply/screen colors, double-sided culling flags, optional
   texture-atlas mipmaps/anisotropic sampling, configurable drawable/part hiding,
   and bucketed Retina mask texture sizing for resize stability.
+- The Metal layer frame, `contentsScale`, drawable size, mask textures,
+  offscreen textures, and MSAA texture are synchronized from the current AppKit
+  window bounds/backing scale before each render.
 - Cubism-style `ppu / physicalMaskWidth` and `ppu / physicalMaskHeight`
   clipping precision branches are applied when canvas ppu is available.
 - Optional high precision masks give each clipping context a full-size mask
@@ -37,12 +40,25 @@ expression, physics, and tracking input.
   count exceeds one texture's practical capacity.
 - Cubism Core offscreen drawable counts are detected, logged, and routed through
   a first-pass Metal offscreen render/composite path.
+- The offscreen compositor uses local offscreen item indices instead of assuming
+  Cubism Core offscreen indices are contiguous, and nested flush order is
+  covered by unit tests.
+- Extended blend snapshot timing is covered by unit tests for nested offscreen
+  draw targets, parent offscreen composites, and main-target composites.
+- Masked offscreen composites use fullscreen quad vertices whose
+  `model_position` values are recovered through the inverse `FitTransform`, so
+  offscreen mask sampling receives model-space coordinates instead of screen
+  NDC coordinates.
 - Metal renderer lifecycle events are logged with `renderer_event=...` records
   for startup, drawable size changes, mask/offscreen/MSAA texture changes,
   drawable availability, AppKit active/visible/occlusion state changes, long
   frame gaps, and inferred display wake events.
 - Space/display reliability runs write machine logs to `target/space-test/*.log`
   and Markdown checklist reports to `target/space-test/*.md`.
+- First Space reliability baseline passed on 2026-05-20 using
+  `target/space-test/space-test-20260520-191559.md`: startup guards,
+  drawable recovery, and display wake checks passed; two long-frame gaps were
+  recorded as transition signals.
 - Texture sampling quality can be compared with
   `scripts/capture-quality-matrix.sh`, which captures mipmaps off/on for the
   default model plus `Mao` and `Ren`.
@@ -50,6 +66,21 @@ expression, physics, and tracking input.
   Markdown index for latest screenshots, manual visual checks, model risk
   probe output, automatic review focus, renderer fallback events, and recent
   renderer events.
+- The render regression report embeds thumbnail previews and grouped contact
+  sheets so visual triage can start from the Markdown report before opening
+  individual PNG files.
+- Render regression report generation now runs through a bounded safe wrapper,
+  and `scripts/capture-full-matrix.sh` chains the standard visual matrices with
+  cleanup between steps and a single report generation at the end.
+- `scripts/capture-rice-stress.sh` captures the official `Rice` sample in
+  shared, high-precision, and no-mask modes when the SDK sample is available.
+  Rice is treated as an optional stress model for additive, inverted-mask, and
+  translucent-drawable coverage, and `scripts/capture-rice-candidate.sh`
+  remains as a compatibility alias for the earlier candidate workflow.
+- `scripts/ren-offscreen-audit.sh` writes
+  `target/render-regression/ren-offscreen-audit.md`, a focused Ren audit for
+  nested offscreens, masked offscreens, extended offscreens, and extended
+  drawables before changing the offscreen compositor.
 - Project-generated `target/` artifacts are cleaned automatically by the local
   run/capture scripts; `scripts/clean-target.sh --all` also removes Cargo build
   outputs when a full cleanup is needed.
@@ -87,6 +118,10 @@ expression, physics, and tracking input.
 - `scripts/probe-risk-models.sh` wraps the probe with SDK path auto-detection
   and writes `target/render-regression/probe.txt`; the render regression report
   embeds this output so each screenshot sweep carries the model risk context.
+- `scripts/sample-compatibility-sweep.sh` scans the official SDK sample
+  resources and writes `target/render-regression/compatibility-sweep.md`, a
+  ranked compatibility report for deciding whether more stress models should be
+  added to screenshot matrices.
 - Local SDK sample probe currently loads 9 models successfully. Notable stress
   cases: `Mao` has 37 masked drawables, which exercises multi shared mask
   textures; `Ren` has 24 offscreen drawables, which exercises the first-pass
@@ -134,6 +169,8 @@ Required outcomes:
 Remaining work:
 
 - Add broader compatibility tests against more official SDK sample models.
+- Keep the official SDK sample compatibility sweep available as the first pass
+  before adding new visual regression fixtures.
 - Add better diagnostics for unsupported motion segment data.
 - Add expression fade-in/fade-out if needed by later UI controls.
 
@@ -190,9 +227,15 @@ Required outcomes:
 
 - Preserve the current RGBA channel packing and 1/2/4/9 layout behavior.
 - Keep explicit `matrix_for_mask` and `matrix_for_draw` structures.
+- Keep masked offscreen composites using inverse-fit model positions for mask
+  matrix sampling.
 - Keep Cubism Core offscreen drawable detection in runtime diagnostics.
 - Continue validating the first-pass Metal offscreen render/composite path
   against `Ren` and future offscreen-heavy sample models.
+- Keep nested offscreen flush order covered by tests: child offscreens flush
+  into their parent targets before parent targets flush upward.
+- Keep extended blend snapshot timing covered by tests before changing snapshot
+  texture copies or compositor ordering.
 - Refine nested offscreen, offscreen mask, and extended blend parity where
   official sample comparison reveals differences.
 
@@ -231,7 +274,7 @@ Acceptance criteria:
 
 ### 6. macOS Space Stability
 
-Status: dedicated reliability pass pending.
+Status: first reliability pass done.
 
 Required outcomes:
 
@@ -251,6 +294,15 @@ Acceptance criteria:
 - FPS recovers after transitions.
 - No duplicate app windows remain after reruns.
 - Display sleep/wake does not permanently blank the avatar.
+
+Baseline:
+
+- `target/space-test/space-test-20260520-191559.md`
+- Automatic assessment: startup guards PASS, drawable recovery PASS, display
+  wake PASS, long frame gaps INFO.
+- Event counts: `window_occlusion_changed=20`, `app_active_changed=11`,
+  `long_frame_gap=2`, `next_drawable_unavailable=0`,
+  `display_wake_inferred=0`.
 
 ## Milestone Plan
 
@@ -296,13 +348,28 @@ Status: active.
   high-precision-mask, and no-mask visual comparison.
 - Keep `scripts/capture-offscreen-matrix.sh` available for the `Ren` offscreen
   and extended blend visual comparison.
+- Keep `scripts/ren-offscreen-audit.sh` available as the first review step
+  before changing nested offscreen, offscreen mask, or extended blend
+  compositing behavior.
+- Keep `scripts/capture-rice-stress.sh` available as an optional stress sweep
+  for additive, inverted-mask, and translucent-drawable risks.
+- Keep `scripts/capture-rice-candidate.sh` as a compatibility alias for the
+  older candidate workflow.
 - Keep `scripts/capture-quality-matrix.sh` available for mipmap/anisotropic
   sampling comparisons on the default model, `Mao`, and `Ren`.
+- Keep `scripts/capture-full-matrix.sh` available as the preferred full visual
+  regression entry: clean generated artifacts once, run the standard matrices,
+  clean stale renderer processes between steps, and generate one final report.
 - Keep `scripts/probe-risk-models.sh` available for regenerating the model risk
   probe included in the render regression report.
+- Keep `scripts/sample-compatibility-sweep.sh` available for official sample
+  compatibility triage.
 - Keep `scripts/render-regression-report.sh` available as the common Markdown
   index for render regression screenshots, model risk probe output, and
   automatic review focus.
+- Keep `scripts/render-regression-report-safe.sh` available for bounded report
+  generation from capture scripts; use `VTUBE_RS_SKIP_REPORT=1` when chaining
+  captures manually.
 - Keep `scripts/clean-target.sh` available for generated artifact cleanup and
   optional full Cargo target cleanup.
 - Keep `scripts/run-space-test.sh` available for repeatable macOS Space and
@@ -321,6 +388,12 @@ Status: pending.
   against more models.
 - Validate multi-texture and high precision mask behavior against high-risk
   models found by `--probe-models`, especially `Mao` and `Ren`.
+- Use `target/render-regression/compatibility-sweep.md` to decide whether a
+  new official sample model should join the screenshot matrix.
+- Treat `Rice` as an optional stress model in the full matrix when the SDK
+  sample is present. It specifically covers additive, inverted-mask, and
+  translucent-drawable risk not fully covered by `Mao` or `Ren`, and should be
+  skipped automatically when the sample is missing.
 - Use the `Mao` mask matrix screenshots as the first visual gate for clipping
   changes.
 - Use the `Ren` offscreen matrix screenshots as the first visual gate for
@@ -328,6 +401,9 @@ Status: pending.
 - Keep Ren risk probe details visible in `target/render-regression/report.md`,
   especially masked extended drawables, extended offscreens, and masked
   offscreens.
+- Keep `target/render-regression/ren-offscreen-audit.md` as the focused Ren
+  parity report for offscreen render order, nested depth, masks, and extended
+  blend distribution.
 - Keep high precision mask fallback events visible in
   `target/render-regression/report.md`, especially offscreen mask and nested
   offscreen counts.
@@ -336,15 +412,18 @@ Status: pending.
 - Use `target/render-regression/report.md` as the standard visual review index.
 - Keep the report's Review Focus section as the first place to inspect after a
   matrix run.
-- Improve Retina/window resize behavior.
+- Keep the report's Visual Contact Sheet as the fastest first pass for spotting
+  clipping, offscreen, optional Rice stress, and mipmap regressions.
+- Keep Retina/window resize behavior covered by Metal layer geometry sync,
+  backing-scale sync, and capture logs.
 
 ### Milestone F: macOS Reliability Pass
 
-Status: pending.
+Status: first pass done.
 
-- Build a repeatable Space-switch test checklist.
-- Use `scripts/run-space-test.sh` for display sleep/wake recovery testing and
-  event summaries/reports.
+- Keep the repeatable Space-switch checklist and Markdown report workflow.
+- Use `scripts/run-space-test.sh` for future display sleep/wake recovery testing
+  and event summaries/reports.
 - Extend structured renderer lifecycle logging as new macOS failure cases are
   found.
 - Continue reducing duplicate process/window issues during development.

@@ -40,6 +40,12 @@ const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: NSUInteger = 1 << 8;
 const NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED: NSUInteger = 1 << 15;
 const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: NSUInteger = 0x00ff_ffff;
 const TARGET_FPS: f64 = 60.0;
+#[cfg(feature = "metal-renderer")]
+const AVATAR_HORIZONTAL_MARGIN: CGFloat = 36.0;
+#[cfg(feature = "metal-renderer")]
+const AVATAR_BOTTOM_RESERVED: CGFloat = 92.0;
+#[cfg(feature = "metal-renderer")]
+const AVATAR_TOP_RESERVED: CGFloat = 100.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -195,6 +201,8 @@ pub fn run(model_path: &str) -> Result<(), String> {
                 },
             );
             last_frame_at = now;
+            #[cfg(feature = "metal-renderer")]
+            sync_metal_layer_geometry(window, root_layer, &mut metal_renderer)?;
             #[cfg(feature = "metal-renderer")]
             metal_renderer.render(&cubism_runtime)?;
             #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
@@ -512,19 +520,51 @@ unsafe fn install_metal_layer(root_layer: Id, renderer: &mut MetalRenderer) -> R
         return Err("CAMetalLayer allocation returned nil".to_string());
     }
 
-    let frame = NSRect {
-        origin: NSPoint { x: 36.0, y: 92.0 },
-        size: NSSize {
-            width: 288.0,
-            height: 288.0,
-        },
-    };
+    let frame = avatar_frame_for_bounds(msg_rect(root_layer, "bounds"));
     renderer.set_drawable_size(frame.size.width, frame.size.height);
     msg_void_rect(layer, "setFrame:", frame);
     msg_void_double(layer, "setZPosition:", 1.0);
     msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
     msg_void_id(root_layer, "addSublayer:", layer);
     Ok(())
+}
+
+#[cfg(feature = "metal-renderer")]
+unsafe fn sync_metal_layer_geometry(
+    window: Id,
+    root_layer: Id,
+    renderer: &mut MetalRenderer,
+) -> Result<(), String> {
+    let layer = renderer.layer_ptr();
+    if layer.is_null() {
+        return Err("CAMetalLayer pointer became nil".to_string());
+    }
+
+    let contents_scale = msg_double(window, "backingScaleFactor").max(1.0);
+    let frame = avatar_frame_for_bounds(msg_rect(root_layer, "bounds"));
+    msg_void_rect(layer, "setFrame:", frame);
+    msg_void_double(layer, "setContentsScale:", contents_scale);
+    renderer.set_contents_scale(contents_scale);
+    renderer.set_drawable_size(frame.size.width, frame.size.height);
+    Ok(())
+}
+
+#[cfg(feature = "metal-renderer")]
+fn avatar_frame_for_bounds(bounds: NSRect) -> NSRect {
+    let available_width = (bounds.size.width - AVATAR_HORIZONTAL_MARGIN * 2.0).max(1.0);
+    let available_height =
+        (bounds.size.height - AVATAR_BOTTOM_RESERVED - AVATAR_TOP_RESERVED).max(1.0);
+    let size = available_width.min(available_height).max(1.0);
+    let x = bounds.origin.x + ((bounds.size.width - size) * 0.5).max(0.0);
+    let y = bounds.origin.y + AVATAR_BOTTOM_RESERVED.min((bounds.size.height - size).max(0.0));
+
+    NSRect {
+        origin: NSPoint { x, y },
+        size: NSSize {
+            width: size,
+            height: size,
+        },
+    }
 }
 
 unsafe fn create_diagnostics_layer() -> Result<Id, String> {
@@ -959,6 +999,13 @@ unsafe fn msg_ulong(receiver: Id, selector_name: &str) -> NSUInteger {
     function(receiver, selector(selector_name))
 }
 
+#[cfg(feature = "metal-renderer")]
+unsafe fn msg_double(receiver: Id, selector_name: &str) -> CGFloat {
+    let function: extern "C" fn(Id, Sel) -> CGFloat =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
+}
+
 unsafe fn msg_void(receiver: Id, selector_name: &str) {
     let function: extern "C" fn(Id, Sel) = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name));
@@ -1079,4 +1126,41 @@ unsafe fn msg_id_double_double_double_double(
     let function: extern "C" fn(Id, Sel, f64, f64, f64, f64) -> Id =
         std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), red, green, blue, alpha)
+}
+
+#[cfg(all(test, feature = "metal-renderer"))]
+mod tests {
+    use super::{NSPoint, NSRect, NSSize, avatar_frame_for_bounds};
+
+    #[test]
+    fn avatar_frame_matches_default_window_layout() {
+        let frame = avatar_frame_for_bounds(NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: 360.0,
+                height: 480.0,
+            },
+        });
+
+        assert_eq!(frame.origin.x, 36.0);
+        assert_eq!(frame.origin.y, 92.0);
+        assert_eq!(frame.size.width, 288.0);
+        assert_eq!(frame.size.height, 288.0);
+    }
+
+    #[test]
+    fn avatar_frame_stays_positive_for_small_windows() {
+        let frame = avatar_frame_for_bounds(NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: 120.0,
+                height: 120.0,
+            },
+        });
+
+        assert!(frame.origin.x >= 0.0);
+        assert!(frame.origin.y >= 0.0);
+        assert!(frame.size.width >= 1.0);
+        assert_eq!(frame.size.width, frame.size.height);
+    }
 }

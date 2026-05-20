@@ -69,4 +69,4 @@ capture_mode "high-precision" "false" "true"
 capture_mode "no-mask" "true" "false"
 
 echo "Mask matrix screenshots: $OUTPUT_DIR"
-echo "Render regression report: $("$ROOT_DIR/scripts/render-regression-report.sh")"
+"$ROOT_DIR/scripts/render-regression-report-safe.sh"

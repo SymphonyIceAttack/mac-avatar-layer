@@ -281,7 +281,7 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
     let parts = runtime.parts();
     let offscreens = runtime.offscreens();
     let texture_cache = load_probe_textures(model);
-    let risk = summarize_render_risk(&drawables, &offscreens, model.textures.len());
+    let risk = summarize_render_risk(&drawables, &offscreens, &parts, model.textures.len());
     Ok(ModelProbeSummary {
         parameter_count: info.parameter_count.unwrap_or(0),
         part_count: info.part_count.unwrap_or(0),
@@ -302,10 +302,12 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
                     .get(offscreen.owner_part_index.max(0) as usize)
                     .map(|part| format!("{}({})", part.id, part.index))
                     .unwrap_or_else(|| format!("-({})", offscreen.owner_part_index));
+                let depth = offscreen_depth(offscreen.owner_part_index, &offscreens, &parts);
                 format!(
-                    "offscreen #{} owner {} render {} blend {} opacity {:.3} multiply {:?} screen {:?} masks {} inverted_mask={}",
+                    "offscreen #{} owner {} depth {} render {} blend {} opacity {:.3} multiply {:?} screen {:?} masks {} inverted_mask={}",
                     offscreen.index,
                     owner,
+                    depth,
                     offscreen.render_order,
                     offscreen.blend_mode.description(),
                     offscreen.opacity,
@@ -343,7 +345,6 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
             .chain(
                 drawables
                     .iter()
-                    .filter(|drawable| drawable.opacity > 0.001)
                     .filter(|drawable| {
                         drawable.blend_mode != cubism::CubismBlendMode::Normal
                             || drawable.multiply_color != [1.0, 1.0, 1.0, 1.0]
@@ -380,6 +381,8 @@ struct RenderRiskSummary {
     masked_extended_drawable_count: usize,
     extended_offscreen_count: usize,
     masked_offscreen_count: usize,
+    nested_offscreen_count: usize,
+    max_offscreen_depth: usize,
     inverted_mask_count: usize,
     details: Vec<String>,
 }
@@ -388,6 +391,7 @@ struct RenderRiskSummary {
 fn summarize_render_risk(
     drawables: &[cubism::CubismDrawableInfo],
     offscreens: &[cubism::CubismOffscreenInfo],
+    parts: &[cubism::CubismPartInfo],
     texture_count: usize,
 ) -> RenderRiskSummary {
     let masked_extended_drawable_count = drawables
@@ -413,6 +417,12 @@ fn summarize_render_risk(
         .iter()
         .filter(|offscreen| !offscreen.masks.is_empty())
         .count();
+    let offscreen_depths = offscreens
+        .iter()
+        .map(|offscreen| offscreen_depth(offscreen.owner_part_index, offscreens, parts))
+        .collect::<Vec<_>>();
+    let nested_offscreen_count = offscreen_depths.iter().filter(|depth| **depth > 1).count();
+    let max_offscreen_depth = offscreen_depths.into_iter().max().unwrap_or(0);
 
     let mut summary = RenderRiskSummary {
         masked_drawable_count: drawables
@@ -454,6 +464,8 @@ fn summarize_render_risk(
         masked_extended_drawable_count,
         extended_offscreen_count,
         masked_offscreen_count,
+        nested_offscreen_count,
+        max_offscreen_depth,
         inverted_mask_count: drawables
             .iter()
             .filter(|drawable| drawable.flags.inverted_mask)
@@ -524,6 +536,12 @@ fn summarize_render_risk(
             summary.extended_offscreen_count
         ));
     }
+    if summary.nested_offscreen_count > 0 {
+        summary.details.push(format!(
+            "risk nested offscreens: {} object(s), max depth {}",
+            summary.nested_offscreen_count, summary.max_offscreen_depth
+        ));
+    }
     if summary.inverted_mask_count > 0 {
         summary.details.push(format!(
             "risk inverted masks: {} object(s)",
@@ -541,6 +559,42 @@ fn summarize_render_risk(
     }
 
     summary
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn offscreen_depth(
+    owner_part_index: i32,
+    offscreens: &[cubism::CubismOffscreenInfo],
+    parts: &[cubism::CubismPartInfo],
+) -> usize {
+    let ancestor_count = offscreens
+        .iter()
+        .filter(|ancestor| {
+            ancestor.owner_part_index != owner_part_index
+                && part_is_descendant_of(owner_part_index, ancestor.owner_part_index, parts)
+        })
+        .count();
+    ancestor_count + 1
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn part_is_descendant_of(
+    mut part_index: i32,
+    ancestor_part_index: i32,
+    parts: &[cubism::CubismPartInfo],
+) -> bool {
+    let mut guard = 0;
+    while part_index >= 0 && guard <= parts.len() {
+        if part_index == ancestor_part_index {
+            return true;
+        }
+        let Some(part) = parts.get(part_index as usize) else {
+            return false;
+        };
+        part_index = part.parent_part_index;
+        guard += 1;
+    }
+    false
 }
 
 #[cfg(all(target_os = "macos", feature = "cubism-core"))]

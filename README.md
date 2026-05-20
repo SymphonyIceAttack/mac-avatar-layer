@@ -24,6 +24,9 @@ motion, expressions, physics, mouse input, and microphone volume.
   multiply/screen colors, double-sided culling flags, optional texture-atlas
   mipmaps/anisotropic sampling, configurable drawable/part hiding, and bucketed
   Retina mask texture sizing for resize stability.
+- Synchronizes the Metal layer frame, `contentsScale`, drawable size, mask
+  textures, offscreen textures, and MSAA texture against the current AppKit
+  window bounds/backing scale before each render.
 - Applies Cubism-style `ppu / physicalMaskWidth` and
   `ppu / physicalMaskHeight` clipping precision branches when canvas ppu is
   available.
@@ -115,6 +118,7 @@ Probe all local models without opening a window:
 
 ```bash
 ./scripts/probe-risk-models.sh
+./scripts/sample-compatibility-sweep.sh
 
 CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
 CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
@@ -130,6 +134,10 @@ objects, extended blends, masked extended drawables, extended offscreens,
 masked offscreens, or inverted masks. The script writes
 `target/render-regression/probe.txt`, and the render regression report embeds
 that probe output.
+`sample-compatibility-sweep.sh` scans the official SDK sample resources and
+writes `target/render-regression/compatibility-sweep.md`, which ranks models by
+risk shape and recommends whether the screenshot matrix needs another stress
+model beyond `Mao` and `Ren`.
 
 You can also set `LIVE2D_CUBISM_SDK_NATIVE_DIR` to point at a different SDK root.
 
@@ -141,7 +149,11 @@ Capture a cropped Metal renderer screenshot for visual regression checks:
 ./scripts/capture-risk-models.sh
 ./scripts/capture-mask-matrix.sh
 ./scripts/capture-offscreen-matrix.sh
+./scripts/ren-offscreen-audit.sh
+./scripts/capture-rice-candidate.sh
+./scripts/capture-rice-stress.sh
 ./scripts/capture-quality-matrix.sh
+./scripts/capture-full-matrix.sh
 ```
 
 Screenshots are written to `target/render-regression/`. The script reuses the
@@ -158,6 +170,16 @@ no-mask modes under `target/render-regression/mask-matrix/`, then restores the
 previous `vtube-studio-rs.toml`.
 `capture-offscreen-matrix.sh` does the same for the `Ren` offscreen/extended
 blend stress model under `target/render-regression/offscreen-matrix/`.
+`ren-offscreen-audit.sh` writes
+`target/render-regression/ren-offscreen-audit.md`, a focused report for Ren's
+nested offscreen, masked offscreen, extended offscreen, and extended drawable
+distribution before changing the offscreen compositor.
+`capture-rice-stress.sh` captures `Rice` in shared, high-precision, and
+no-mask modes under `target/render-regression/rice-candidate/` when the SDK
+sample is available. Rice is an optional stress model in the full matrix: it
+covers additive, inverted-mask, and translucent-drawable risks, and is skipped
+automatically when the local SDK sample is missing. `capture-rice-candidate.sh`
+remains as a compatibility alias for the earlier candidate workflow.
 Offscreen models currently fall back from high-precision masks to shared masks;
 the overlay marks this as `mask shared(offscreen)`.
 The corresponding `high_precision_mask_fallback` renderer event includes
@@ -166,10 +188,18 @@ nested offscreen, and maximum offscreen depth counts.
 `capture-quality-matrix.sh` captures the default model plus `Mao` and `Ren`
 with texture atlas mipmaps off/on under `target/render-regression/quality-matrix/`
 so texture shimmer and atlas island bleed can be compared.
-Each capture script refreshes `target/render-regression/report.md`, a Markdown
-index with latest screenshot paths, manual review checklist, model risk probe
-output, automatic review focus, renderer fallback events, and recent renderer
-events from capture logs.
+Each capture script refreshes `target/render-regression/report.md` through a
+bounded report wrapper. Set `VTUBE_RS_SKIP_REPORT=1` when chaining several
+capture scripts and generate the report once at the end.
+`capture-full-matrix.sh` is the preferred complete visual sweep: it cleans
+generated render artifacts once, runs the risk, mask, offscreen, optional Rice
+stress, and quality matrices with report generation skipped inside each step,
+performs process cleanup between steps, and then writes one final Markdown
+report.
+The report is a Markdown index with latest screenshot paths, manual review
+checklist, embedded thumbnail previews/contact sheet, model risk probe output,
+automatic review focus, renderer fallback events, and recent renderer events
+from capture logs.
 Generated test artifacts under `target/render-regression/` and
 `target/space-test/` are cleaned automatically before these scripts run. Set
 `VTUBE_RS_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
@@ -180,7 +210,8 @@ Metal renderer lifecycle logs use `renderer_event=...` records so Space-switch
 and sleep/wake testing can be checked from the terminal. Useful events include
 `instance_guard_acquired`, `app_nap_guard_started`, `window_configured`,
 `app_active_changed`, `window_visible_changed`, `window_occlusion_changed`,
-`metal_initialized`, `drawable_size_changed`, `mask_tile_size_changed`,
+`metal_initialized`, `contents_scale_changed`, `drawable_size_changed`,
+`mask_tile_size_changed`,
 `mask_atlas_resized`, `offscreen_texture_size_changed`,
 `next_drawable_unavailable`, `next_drawable_recovered`, `long_frame_gap`, and
 `display_wake_inferred`.
@@ -270,12 +301,16 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
    Use the automatic assessment table to decide whether the next fix should
    focus on CAMetalLayer recovery, window behavior, or normal transition stalls.
 
+Current baseline: `target/space-test/space-test-20260520-191559.md` passed
+startup guard, drawable recovery, and display wake automatic checks. It logged
+two long-frame gaps as Space transition signals and no drawable loss.
+
 ## Next Milestones
 
 1. Keep README and PRD aligned as capabilities change.
 2. Improve renderer quality: validate mipmaps/anisotropic filtering, refine
    Retina-stable mask texture sizing, and transparent edge antialiasing.
 3. Validate Cubism clipping parity against more official sample models.
-4. Run a dedicated macOS Space/display reliability pass.
+4. Continue macOS Space/display reliability passes as new failure cases appear.
 5. Later, investigate webcam/ARKit tracking and VTube Studio plugin API
    compatibility.

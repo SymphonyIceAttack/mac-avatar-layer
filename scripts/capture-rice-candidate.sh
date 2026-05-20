@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL_PATH="${1:-public/CubismSdkForNative/Samples/Resources/Ren/Ren.model3.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/target/render-regression/offscreen-matrix}"
+MODEL_PATH="${1:-public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json}"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/target/render-regression/rice-candidate}"
 CONFIG_PATH="$ROOT_DIR/vtube-studio-rs.toml"
 EXAMPLE_CONFIG_PATH="$ROOT_DIR/vtube-studio-rs.example.toml"
 BACKUP_PATH="$(mktemp "${TMPDIR:-/tmp}/vtube-studio-rs.toml.XXXXXX")"
@@ -51,7 +51,7 @@ capture_mode() {
   latest_path="$OUTPUT_DIR/latest-${model_name}-${label}.png"
 
   set_renderer_mode "$disable_masks" "$high_precision_masks"
-  echo "Capturing ${model_name} offscreen ${label}"
+  echo "Capturing ${model_name} stress ${label}"
   output_path="$(OUTPUT_DIR="$OUTPUT_DIR" "$ROOT_DIR/scripts/capture-metal.sh" "$MODEL_PATH")"
   cp "$output_path" "$latest_path"
   echo "  $output_path"
@@ -64,9 +64,16 @@ if [[ "${VTUBE_RS_SKIP_TARGET_CLEAN:-0}" != "1" ]]; then
   mkdir -p "$OUTPUT_DIR"
 fi
 
+if [[ ! -f "$ROOT_DIR/$MODEL_PATH" && ! -f "$MODEL_PATH" ]]; then
+  echo "Missing optional Rice stress model: $MODEL_PATH" >&2
+  exit 1
+fi
+
+"$ROOT_DIR/scripts/probe-risk-models.sh" "$MODEL_PATH"
+
 capture_mode "shared" "false" "false"
 capture_mode "high-precision" "false" "true"
 capture_mode "no-mask" "true" "false"
 
-echo "Offscreen matrix screenshots: $OUTPUT_DIR"
+echo "Rice stress screenshots: $OUTPUT_DIR"
 "$ROOT_DIR/scripts/render-regression-report-safe.sh"
