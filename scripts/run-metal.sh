@@ -7,6 +7,7 @@ SDK_ROOT="${LIVE2D_CUBISM_SDK_NATIVE_DIR:-$ROOT_DIR/public/CubismSdkForNative}"
 
 if [[ "${RUN_METAL_KILL_OLD:-1}" != "0" ]]; then
   pkill -f "$ROOT_DIR/target/debug/vtube-studio-rs" 2>/dev/null || true
+  rm -f "$ROOT_DIR/target/vtube-studio-rs.pid"
 fi
 
 if [[ -z "${CUBISM_CORE_INCLUDE_DIR:-}" ]]; then

@@ -120,10 +120,50 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 ```
 
 This scans every `.model3.json`, initializes Cubism Core, and prints parameter,
-part, drawable, masked drawable, offscreen, and texture counts. Models that use
-offscreen rendering also print owner part and render-order details.
+part, drawable, masked drawable, maximum mask, blend-mode, inverted-mask, and
+offscreen counts. It also labels each model `risk:low`, `risk:medium`, or
+`risk:high` for renderer compatibility triage. High-risk models print the
+specific reason, such as dense clipping, many masked drawables, offscreen
+objects, extended blends, or inverted masks.
 
 You can also set `LIVE2D_CUBISM_SDK_NATIVE_DIR` to point at a different SDK root.
+
+Capture a cropped Metal renderer screenshot for visual regression checks:
+
+```bash
+./scripts/capture-metal.sh public/CubismSdkForNative/Samples/Resources/Mao/Mao.model3.json
+./scripts/capture-metal.sh public/CubismSdkForNative/Samples/Resources/Ren/Ren.model3.json
+./scripts/capture-risk-models.sh
+./scripts/capture-mask-matrix.sh
+./scripts/capture-offscreen-matrix.sh
+```
+
+Screenshots are written to `target/render-regression/`. The script reuses the
+same SDK auto-detection as `run-metal.sh`, waits for the app window, captures
+only that window, and closes the launched process. `capture-risk-models.sh`
+captures the local model plus the SDK `Mao` and `Ren` stress models, preserving
+timestamped screenshots and refreshing `latest-*.png` copies for quick visual
+comparison after renderer changes. Set `WAIT_SECONDS` if a machine needs longer
+for the first build/startup, or `POST_WINDOW_WAIT_SECONDS` if the screenshot
+should wait longer for diagnostics and motion to settle after the window appears.
+`capture-mask-matrix.sh` temporarily switches the local renderer config and
+captures the `Mao` stress model in shared-mask, high-precision-mask, and
+no-mask modes under `target/render-regression/mask-matrix/`, then restores the
+previous `vtube-studio-rs.toml`.
+`capture-offscreen-matrix.sh` does the same for the `Ren` offscreen/extended
+blend stress model under `target/render-regression/offscreen-matrix/`.
+Offscreen models currently fall back from high-precision masks to shared masks;
+the overlay marks this as `mask shared(offscreen)`.
+
+Metal renderer lifecycle logs use `renderer_event=...` records so Space-switch
+and sleep/wake testing can be checked from the terminal. Useful events include
+`instance_guard_acquired`, `app_nap_guard_started`, `window_configured`,
+`metal_initialized`, `drawable_size_changed`, `mask_tile_size_changed`,
+`mask_atlas_resized`, `offscreen_texture_size_changed`,
+`next_drawable_unavailable`, `next_drawable_recovered`, and `long_frame_gap`.
+The app prevents duplicate local avatar instances with
+`target/vtube-studio-rs.pid`; set `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only
+when intentionally debugging multiple windows.
 
 ## App Configuration
 
@@ -185,14 +225,20 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 
 ## Manual Space Test
 
-1. Run `./scripts/run-metal.sh`.
+1. Run `./scripts/run-space-test.sh`.
 2. Move the avatar window where it remains visible.
 3. Switch between macOS Desktops/Spaces several times.
 4. Watch the diagnostics overlay:
    - `Frames` should keep increasing.
    - `FPS` should recover to roughly 60.
    - `Frame delta max` and `Slow frames` show transition stalls.
-5. Check the terminal for `Long frame gap` lines.
+5. Confirm startup logs include `renderer_event=app_nap_guard_started` and
+   `renderer_event=window_configured`.
+6. Check the terminal for `renderer_event=long_frame_gap` lines and any
+   `renderer_event=next_drawable_unavailable` / `next_drawable_recovered`
+   pairs.
+7. Press `Ctrl-C` in the terminal. The script prints an event summary and saves
+   the full log under `target/space-test/`.
 
 ## Next Milestones
 

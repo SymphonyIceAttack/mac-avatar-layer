@@ -120,11 +120,16 @@ pub fn run(model_path: &str) -> Result<(), String> {
         log_offscreen_status(cubism_runtime.info());
         log_cubism_preview(&cubism_runtime);
         let window = create_avatar_window()?;
+        println!("renderer_event=window_created kind=avatar");
         let root_layer = create_root_layer(window)?;
+        #[allow(unused_mut)]
+        let mut renderer_diagnostics = RendererDiagnostics::from_config(&config.renderer)
+            .with_offscreen_count(cubism_runtime.info().offscreen_count);
         #[cfg(feature = "metal-renderer")]
         let mut metal_renderer = {
             let mut renderer = MetalRenderer::load(&model, &config.renderer)?;
             let probe = renderer.render_probe(&cubism_runtime);
+            renderer_diagnostics.apply_metal_probe(&probe);
             println!(
                 "Metal renderer: device '{}' textures {} drawables {} triangles {} additive {} multiply {} extended_blend {} masked {} queue {}",
                 probe.device_name,
@@ -165,6 +170,7 @@ pub fn run(model_path: &str) -> Result<(), String> {
             frame_clock.frame_duration(),
             model.summary(),
             cubism_summary,
+            renderer_diagnostics,
         );
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
@@ -400,6 +406,7 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
         return Err("beginActivityWithOptions returned nil".to_string());
     }
 
+    println!("renderer_event=app_nap_guard_started");
     Ok(token)
 }
 
@@ -435,6 +442,10 @@ unsafe fn create_avatar_window() -> Result<Id, String> {
     msg_void_bool(window, "setReleasedWhenClosed:", NO);
     msg_void_int(window, "setLevel:", NS_FLOATING_WINDOW_LEVEL);
     msg_void_ulong(window, "setCollectionBehavior:", behavior);
+    println!(
+        "renderer_event=window_configured level={} collection_behavior={}",
+        NS_FLOATING_WINDOW_LEVEL, behavior
+    );
 
     let clear = ns_color(0.0, 0.0, 0.0, 0.0)?;
     msg_void_id(window, "setBackgroundColor:", clear);
@@ -663,6 +674,7 @@ struct Diagnostics {
     target_frame_duration: Duration,
     model_summary: String,
     cubism_summary: String,
+    renderer_summary: String,
     total_frames: u64,
     slow_frames: u64,
     frames_since_report: u64,
@@ -673,13 +685,86 @@ struct Diagnostics {
     last_report: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct RendererDiagnostics {
+    mask_mode: String,
+    debug_texture_mode: String,
+    atlas_mipmaps: bool,
+    hidden_count: usize,
+    only_count: usize,
+    highlight_count: usize,
+    offscreen_count: usize,
+    extended_blend_count: usize,
+}
+
+impl RendererDiagnostics {
+    fn from_config(config: &crate::config::RendererConfig) -> Self {
+        let mask_mode = if config.disable_masks {
+            "disabled"
+        } else if config.high_precision_masks {
+            "high_precision"
+        } else {
+            "shared"
+        }
+        .to_string();
+        Self {
+            mask_mode,
+            debug_texture_mode: config
+                .debug_texture_mode
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("none")
+                .to_string(),
+            atlas_mipmaps: config.atlas_mipmaps,
+            hidden_count: config.hidden_drawables.len() + config.hidden_parts.len(),
+            only_count: config.only_drawables.len() + config.only_parts.len(),
+            highlight_count: config.highlight_drawables.len() + config.highlight_parts.len(),
+            offscreen_count: 0,
+            extended_blend_count: 0,
+        }
+    }
+
+    #[cfg(feature = "metal-renderer")]
+    fn apply_metal_probe(&mut self, probe: &crate::metal_renderer::MetalRenderProbe) {
+        self.extended_blend_count = probe.extended_blend_count;
+    }
+
+    fn with_offscreen_count(mut self, offscreen_count: Option<i32>) -> Self {
+        self.offscreen_count = offscreen_count.unwrap_or(0).max(0) as usize;
+        if self.offscreen_count > 0 && self.mask_mode == "high_precision" {
+            self.mask_mode = "shared(offscreen)".to_string();
+        }
+        self
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "Renderer: mask {} | offscreen {} | ext blend {} | debug {} | mipmaps {} | filters h/o/hi {}/{}/{}",
+            self.mask_mode,
+            self.offscreen_count,
+            self.extended_blend_count,
+            self.debug_texture_mode,
+            if self.atlas_mipmaps { "on" } else { "off" },
+            self.hidden_count,
+            self.only_count,
+            self.highlight_count
+        )
+    }
+}
+
 impl Diagnostics {
-    fn new(target_frame_duration: Duration, model_summary: String, cubism_summary: String) -> Self {
+    fn new(
+        target_frame_duration: Duration,
+        model_summary: String,
+        cubism_summary: String,
+        renderer_diagnostics: RendererDiagnostics,
+    ) -> Self {
         let now = Instant::now();
         Self {
             target_frame_duration,
             model_summary,
             cubism_summary,
+            renderer_summary: renderer_diagnostics.summary(),
             total_frames: 0,
             slow_frames: 0,
             frames_since_report: 0,
@@ -708,7 +793,7 @@ impl Diagnostics {
 
             if interval >= Duration::from_millis(250) {
                 println!(
-                    "Long frame gap: {:.1} ms after {:.1}s uptime. This often indicates a Space switch or OS throttling.",
+                    "renderer_event=long_frame_gap gap_ms={:.1} uptime_s={:.1}",
                     duration_ms(interval),
                     now.duration_since(started_at).as_secs_f64(),
                 );
@@ -729,9 +814,10 @@ impl Diagnostics {
             self.interval_sum_since_report / self.intervals_since_report as u32
         };
         let text = format!(
-            "Model: {}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
+            "Model: {}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
             self.model_summary,
             self.cubism_summary,
+            self.renderer_summary,
             fps,
             TARGET_FPS,
             duration_ms(avg_interval),

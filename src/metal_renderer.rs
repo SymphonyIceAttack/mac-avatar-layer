@@ -18,6 +18,7 @@ use metal::{
     RenderPassDescriptor, RenderPipelineDescriptor, RenderPipelineState, SamplerDescriptor,
     SamplerState, Texture, TextureDescriptor,
 };
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
@@ -309,6 +310,8 @@ pub struct MetalRenderer {
     highlight_drawables: HashSet<String>,
     highlight_parts: HashSet<String>,
     debug_texture_mode: u32,
+    next_drawable_unavailable: Cell<bool>,
+    reported_offscreen_mask_fallback: bool,
 }
 
 impl MetalRenderer {
@@ -336,6 +339,16 @@ impl MetalRenderer {
         let textures = load_textures(&device, &command_queue, model, config.atlas_mipmaps)?;
         let white_mask_texture = create_white_mask_texture(&device);
         let (quad_vertex_buffer, quad_index_buffer) = create_quad_buffers(&device);
+        println!(
+            "renderer_event=metal_initialized device=\"{}\" textures={} sample_count={} masks_disabled={} high_precision_masks={} mipmaps={} debug_texture_mode={}",
+            device.name(),
+            textures.len(),
+            sample_count,
+            config.disable_masks,
+            config.high_precision_masks,
+            config.atlas_mipmaps,
+            config.debug_texture_mode.as_deref().unwrap_or("none")
+        );
 
         let layer = MetalLayer::new();
         layer.set_device(&device);
@@ -387,6 +400,8 @@ impl MetalRenderer {
             highlight_drawables: config.highlight_drawables.iter().cloned().collect(),
             highlight_parts: config.highlight_parts.iter().cloned().collect(),
             debug_texture_mode: debug_texture_mode(config.debug_texture_mode.as_deref()),
+            next_drawable_unavailable: Cell::new(false),
+            reported_offscreen_mask_fallback: false,
         })
     }
 
@@ -398,10 +413,22 @@ impl MetalRenderer {
         let logical_size = width.max(1.0).min(height.max(1.0));
         let physical_size = (logical_size * self.contents_scale).round().max(1.0);
         let physical_size_u64 = physical_size as u64;
+        if (self.drawable_size - logical_size).abs() >= f64::EPSILON
+            || self.physical_drawable_size != [physical_size_u64, physical_size_u64]
+        {
+            println!(
+                "renderer_event=drawable_size_changed logical={logical_size:.1} physical={} contents_scale={:.2}",
+                physical_size_u64, self.contents_scale
+            );
+        }
         self.drawable_size = logical_size;
         self.physical_drawable_size = [physical_size_u64, physical_size_u64];
         let mask_tile_size = stable_mask_texture_size(physical_size_u64);
         if self.mask_tile_size != mask_tile_size {
+            println!(
+                "renderer_event=mask_tile_size_changed old={} new={} physical={}",
+                self.mask_tile_size, mask_tile_size, physical_size_u64
+            );
             self.mask_tile_size = mask_tile_size;
             self.mask_atlas_textures.clear();
             self.mask_atlas_layout = None;
@@ -426,6 +453,17 @@ impl MetalRenderer {
 
         if let Some(transform) = transform {
             let offscreen_items = collect_offscreen_items(runtime);
+            let use_high_precision_masks = self.high_precision_masks && offscreen_items.is_empty();
+            if self.high_precision_masks
+                && !offscreen_items.is_empty()
+                && !self.reported_offscreen_mask_fallback
+            {
+                println!(
+                    "renderer_event=high_precision_mask_fallback reason=offscreen offscreen_count={}",
+                    offscreen_items.len()
+                );
+                self.reported_offscreen_mask_fallback = true;
+            }
             prepare_drawable_buffers(
                 &self.device,
                 &mut self.vertex_ring,
@@ -439,30 +477,32 @@ impl MetalRenderer {
                 self.disable_masks,
                 self.mask_tile_size,
                 runtime.info().pixels_per_unit,
-                self.high_precision_masks,
+                use_high_precision_masks,
             );
             let mask_lookup = mask_set_lookup(&mask_contexts);
             let mask_layout =
                 MaskAtlasLayout::for_mask_count(mask_contexts.len(), self.mask_tile_size);
-            if self.high_precision_masks {
+            if use_high_precision_masks {
                 self.ensure_high_precision_mask_textures(mask_contexts.len());
             } else {
                 self.ensure_mask_atlas(&mask_layout);
             }
-            if !offscreen_items.is_empty() && !self.high_precision_masks {
+            if !offscreen_items.is_empty() {
                 self.ensure_offscreen_textures(offscreen_items.len());
                 self.ensure_blend_snapshot_texture();
             }
             self.ensure_msaa_texture();
             let Some(drawable) = self.layer.next_drawable() else {
+                self.log_next_drawable_unavailable();
                 return Ok(());
             };
+            self.log_next_drawable_available();
             let command_buffer = self.command_queue.new_command_buffer();
             let vertex_buffer = self
                 .vertex_ring
                 .current_buffer()
                 .ok_or_else(|| "Metal vertex ring did not allocate an active buffer".to_string())?;
-            if !mask_contexts.is_empty() && !self.high_precision_masks {
+            if !mask_contexts.is_empty() && !use_high_precision_masks {
                 render_mask_atlases(
                     command_buffer,
                     &self.mask_pipeline_state,
@@ -476,7 +516,7 @@ impl MetalRenderer {
                     &mask_contexts,
                 )?;
             }
-            if self.high_precision_masks {
+            if use_high_precision_masks {
                 self.render_high_precision_drawables(
                     command_buffer,
                     drawable.texture(),
@@ -547,7 +587,7 @@ impl MetalRenderer {
                     continue;
                 }
                 let mask_index = mask_lookup.get(&item.drawable.masks).copied();
-                let mask_texture = if self.high_precision_masks {
+                let mask_texture = if use_high_precision_masks {
                     mask_index
                         .and_then(|index| self.high_precision_mask_textures.get(index))
                         .unwrap_or(&self.white_mask_texture)
@@ -598,8 +638,10 @@ impl MetalRenderer {
             command_buffer.commit();
         } else {
             let Some(drawable) = self.layer.next_drawable() else {
+                self.log_next_drawable_unavailable();
                 return Ok(());
             };
+            self.log_next_drawable_available();
             let command_buffer = self.command_queue.new_command_buffer();
             let render_pass_descriptor = RenderPassDescriptor::new();
             let color_attachment = render_pass_descriptor
@@ -711,6 +753,9 @@ impl MetalRenderer {
 
     fn ensure_mask_atlas(&mut self, layout: &MaskAtlasLayout) {
         if layout.mask_count == 0 {
+            if !self.mask_atlas_textures.is_empty() {
+                println!("renderer_event=mask_atlas_cleared");
+            }
             self.mask_atlas_textures.clear();
             self.mask_atlas_layout = Some(*layout);
             return;
@@ -724,27 +769,43 @@ impl MetalRenderer {
             self.mask_atlas_textures = (0..layout.render_texture_count)
                 .map(|_| create_mask_texture(&self.device, layout.texture_size))
                 .collect();
+            println!(
+                "renderer_event=mask_atlas_resized contexts={} textures={} texture_size={}",
+                layout.mask_count, layout.render_texture_count, layout.texture_size
+            );
         } else if self.mask_atlas_textures.len() != layout.render_texture_count {
             self.mask_atlas_textures
                 .resize_with(layout.render_texture_count, || {
                     create_mask_texture(&self.device, layout.texture_size)
                 });
+            println!(
+                "renderer_event=mask_atlas_texture_count_changed contexts={} textures={} texture_size={}",
+                layout.mask_count, layout.render_texture_count, layout.texture_size
+            );
         }
         self.mask_atlas_layout = Some(*layout);
     }
 
     fn ensure_high_precision_mask_textures(&mut self, mask_count: usize) {
         if mask_count == 0 {
+            if !self.high_precision_mask_textures.is_empty() {
+                println!("renderer_event=high_precision_mask_textures_cleared");
+            }
             self.high_precision_mask_textures.clear();
             self.high_precision_mask_texture_size = 0;
             return;
         }
 
         if self.high_precision_mask_texture_size != self.mask_tile_size {
+            println!(
+                "renderer_event=high_precision_mask_texture_size_changed old={} new={} contexts={}",
+                self.high_precision_mask_texture_size, self.mask_tile_size, mask_count
+            );
             self.high_precision_mask_textures.clear();
             self.high_precision_mask_texture_size = self.mask_tile_size;
         }
 
+        let previous_count = self.high_precision_mask_textures.len();
         if self.high_precision_mask_textures.len() < mask_count {
             self.high_precision_mask_textures.extend(
                 (self.high_precision_mask_textures.len()..mask_count).map(|_| {
@@ -754,10 +815,21 @@ impl MetalRenderer {
         } else if self.high_precision_mask_textures.len() > mask_count {
             self.high_precision_mask_textures.truncate(mask_count);
         }
+        if self.high_precision_mask_textures.len() != previous_count {
+            println!(
+                "renderer_event=high_precision_mask_texture_count_changed old={} new={} texture_size={}",
+                previous_count,
+                self.high_precision_mask_textures.len(),
+                self.high_precision_mask_texture_size
+            );
+        }
     }
 
     fn ensure_msaa_texture(&mut self) {
         if self.sample_count <= 1 {
+            if self.msaa_color_texture.is_some() {
+                println!("renderer_event=msaa_texture_cleared");
+            }
             self.msaa_color_texture = None;
             self.msaa_texture_size = [0, 0];
             return;
@@ -778,11 +850,18 @@ impl MetalRenderer {
                 self.sample_count,
             ));
             self.msaa_texture_size = [width, height];
+            println!(
+                "renderer_event=msaa_texture_resized width={} height={} sample_count={}",
+                width, height, self.sample_count
+            );
         }
     }
 
     fn ensure_offscreen_textures(&mut self, offscreen_count: usize) {
         if offscreen_count == 0 {
+            if !self.offscreen_textures.is_empty() {
+                println!("renderer_event=offscreen_textures_cleared");
+            }
             self.offscreen_textures.clear();
             self.offscreen_texture_size = [0, 0];
             return;
@@ -792,10 +871,19 @@ impl MetalRenderer {
         let width = width.max(1);
         let height = height.max(1);
         if self.offscreen_texture_size != [width, height] {
+            println!(
+                "renderer_event=offscreen_texture_size_changed old={}x{} new={}x{} count={}",
+                self.offscreen_texture_size[0],
+                self.offscreen_texture_size[1],
+                width,
+                height,
+                offscreen_count
+            );
             self.offscreen_textures.clear();
             self.offscreen_texture_size = [width, height];
         }
 
+        let previous_count = self.offscreen_textures.len();
         if self.offscreen_textures.len() < offscreen_count {
             self.offscreen_textures.extend(
                 (self.offscreen_textures.len()..offscreen_count)
@@ -804,6 +892,15 @@ impl MetalRenderer {
         } else if self.offscreen_textures.len() > offscreen_count {
             self.offscreen_textures.truncate(offscreen_count);
         }
+        if self.offscreen_textures.len() != previous_count {
+            println!(
+                "renderer_event=offscreen_texture_count_changed old={} new={} size={}x{}",
+                previous_count,
+                self.offscreen_textures.len(),
+                width,
+                height
+            );
+        }
     }
 
     fn ensure_blend_snapshot_texture(&mut self) {
@@ -811,13 +908,43 @@ impl MetalRenderer {
         let width = width.max(1);
         let height = height.max(1);
         if self.blend_snapshot_texture_size != [width, height] {
+            println!(
+                "renderer_event=blend_snapshot_texture_size_changed old={}x{} new={}x{}",
+                self.blend_snapshot_texture_size[0],
+                self.blend_snapshot_texture_size[1],
+                width,
+                height
+            );
             self.blend_snapshot_texture = None;
             self.blend_snapshot_texture_size = [width, height];
         }
         if self.blend_snapshot_texture.is_none() {
             self.blend_snapshot_texture =
                 Some(create_blend_snapshot_texture(&self.device, width, height));
+            println!(
+                "renderer_event=blend_snapshot_texture_created width={} height={}",
+                width, height
+            );
         }
+    }
+
+    fn log_next_drawable_unavailable(&self) {
+        if self.next_drawable_unavailable.get() {
+            return;
+        }
+        self.next_drawable_unavailable.set(true);
+        println!(
+            "renderer_event=next_drawable_unavailable physical={}x{}",
+            self.physical_drawable_size[0], self.physical_drawable_size[1]
+        );
+    }
+
+    fn log_next_drawable_available(&self) {
+        if !self.next_drawable_unavailable.get() {
+            return;
+        }
+        self.next_drawable_unavailable.set(false);
+        println!("renderer_event=next_drawable_recovered");
     }
 
     fn render_with_offscreens(

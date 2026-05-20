@@ -27,10 +27,19 @@ expression, physics, and tracking input.
 - Optional high precision masks give each clipping context a full-size mask
   texture and redraw it immediately before each masked drawable instead of
   sharing an RGBA atlas tile.
+- Models with Cubism offscreen drawables currently fall back from high precision
+  masks to the shared mask path so offscreen render/composite remains enabled;
+  diagnostics show this as `mask shared(offscreen)`.
 - Shared atlas clipping supports multiple mask render textures when context
   count exceeds one texture's practical capacity.
 - Cubism Core offscreen drawable counts are detected, logged, and routed through
   a first-pass Metal offscreen render/composite path.
+- Metal renderer lifecycle events are logged with `renderer_event=...` records
+  for startup, drawable size changes, mask/offscreen/MSAA texture changes,
+  drawable availability, and long frame gaps.
+- App startup now uses a local PID guard under `target/vtube-studio-rs.pid` to
+  prevent duplicate avatar windows during development; set
+  `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only for deliberate debugging.
 - Layer edge antialiasing and 4x MSAA are enabled when supported to reduce
   transparent window and avatar mesh edge artifacts.
 - `MotionController` owns per-frame parameter updates in this order:
@@ -53,9 +62,11 @@ expression, physics, and tracking input.
 - `scripts/run-metal.sh` provides a one-command local Metal run path with SDK
   path detection for `public/CubismSdkForNative`.
 - `--probe-models` scans local `.model3.json` files without opening a window and
-  reports parameter, part, drawable, masked drawable, offscreen, and texture
-  counts, plus offscreen owner/render-order details for models that use
-  offscreen rendering.
+  reports parameter, part, drawable, masked drawable, maximum mask, blend-mode,
+  inverted-mask, and offscreen counts. It labels models as `risk:low`,
+  `risk:medium`, or `risk:high` for renderer compatibility triage, and prints
+  specific risk reasons such as dense clipping, many masked drawables, offscreen
+  objects, extended blends, or inverted masks.
 - Local SDK sample probe currently loads 9 models successfully. Notable stress
   cases: `Mao` has 37 masked drawables, which exercises multi shared mask
   textures; `Ren` has 24 offscreen drawables, which exercises the first-pass
@@ -247,6 +258,17 @@ Status: active.
 - Keep README/PRD updated.
 - Keep `scripts/run-metal.sh` as the recommended local run entry.
 - Keep `--probe-models` available for model compatibility checks.
+- Keep `scripts/capture-metal.sh` available for cropped renderer screenshots of
+  high-risk models.
+- Keep `scripts/capture-risk-models.sh` available as the standard local visual
+  regression sweep for the default model, `Mao`, and `Ren`.
+- Keep `scripts/capture-mask-matrix.sh` available for the `Mao` shared-mask,
+  high-precision-mask, and no-mask visual comparison.
+- Keep `scripts/capture-offscreen-matrix.sh` available for the `Ren` offscreen
+  and extended blend visual comparison.
+- Keep `scripts/run-space-test.sh` available for repeatable macOS Space and
+  display sleep/wake reliability checks with an end-of-run renderer event
+  summary.
 - Improve missing SDK/model diagnostics.
 - Keep diagnostics overlay visibility controlled before startup rather than by
   runtime hotkeys.
@@ -258,7 +280,12 @@ Status: pending.
 - Continue validating per-drawable colors, culling, optional mipmaps,
   anisotropic sampling, bucketed mask texture sizing, and MSAA edge behavior
   against more models.
-- Validate multi-texture and high precision mask behavior against more models.
+- Validate multi-texture and high precision mask behavior against high-risk
+  models found by `--probe-models`, especially `Mao` and `Ren`.
+- Use the `Mao` mask matrix screenshots as the first visual gate for clipping
+  changes.
+- Use the `Ren` offscreen matrix screenshots as the first visual gate for
+  offscreen and extended blend changes.
 - Improve Retina/window resize behavior.
 
 ### Milestone F: macOS Reliability Pass
@@ -266,9 +293,11 @@ Status: pending.
 Status: pending.
 
 - Build a repeatable Space-switch test checklist.
-- Add display sleep/wake recovery testing.
-- Add structured renderer lifecycle logging.
-- Reduce duplicate process/window issues during development.
+- Use `scripts/run-space-test.sh` for display sleep/wake recovery testing and
+  event summaries.
+- Extend structured renderer lifecycle logging as new macOS failure cases are
+  found.
+- Continue reducing duplicate process/window issues during development.
 
 ## Debug Controls
 
