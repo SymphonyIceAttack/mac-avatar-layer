@@ -15,6 +15,23 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR"
+if [[ "${VTUBE_RS_SKIP_TARGET_CLEAN:-0}" != "1" ]]; then
+  "$ROOT_DIR/scripts/clean-target.sh" --generated
+  mkdir -p "$OUTPUT_DIR"
+fi
+
+PROBE_MODELS=()
+for model in "${MODELS[@]}"; do
+  if [[ -f "$ROOT_DIR/$model" || -f "$model" ]]; then
+    PROBE_MODELS+=("$model")
+  fi
+done
+
+if [[ "${#PROBE_MODELS[@]}" -gt 0 ]]; then
+  "$ROOT_DIR/scripts/probe-risk-models.sh" "${PROBE_MODELS[@]}"
+else
+  echo "Skipping model probe because no configured models were found." >&2
+fi
 
 for model in "${MODELS[@]}"; do
   if [[ ! -f "$ROOT_DIR/$model" && ! -f "$model" ]]; then
@@ -32,3 +49,4 @@ for model in "${MODELS[@]}"; do
 done
 
 echo "Render regression screenshots: $OUTPUT_DIR"
+echo "Render regression report: $("$ROOT_DIR/scripts/render-regression-report.sh")"

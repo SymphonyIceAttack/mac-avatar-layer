@@ -137,12 +137,107 @@ fragment float4 live2d_fragment(VertexOut in [[stage_in]],
     return color;
 }
 
+float extended_luma(float3 color) {
+    return 0.30 * color.r + 0.59 * color.g + 0.11 * color.b;
+}
+
+float extended_saturation(float3 color) {
+    return max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+}
+
+float3 extended_clip_color(float3 color) {
+    float luma = extended_luma(color);
+    float max_value = max(color.r, max(color.g, color.b));
+    float min_value = min(color.r, min(color.g, color.b));
+    float3 output = color;
+    if (min_value < 0.0) {
+        output = luma + (output - luma) * luma / (luma - min_value);
+    }
+    if (max_value > 1.0) {
+        output = luma + (output - luma) * (1.0 - luma) / (max_value - luma);
+    }
+    return output;
+}
+
+float3 extended_set_luma(float3 color, float luma) {
+    return extended_clip_color(color + (luma - extended_luma(color)));
+}
+
+float3 extended_set_saturation(float3 color, float saturation) {
+    float max_value = max(color.r, max(color.g, color.b));
+    float min_value = min(color.r, min(color.g, color.b));
+    float med_value = color.r + color.g + color.b - max_value - min_value;
+    float output_max = min_value < max_value ? saturation : 0.0;
+    float output_med = min_value < max_value ? (med_value - min_value) * saturation / (max_value - min_value) : 0.0;
+    float output_min = 0.0;
+
+    if (color.r == max_value) {
+        return color.b < color.g
+            ? float3(output_max, output_med, output_min)
+            : float3(output_max, output_min, output_med);
+    }
+    if (color.g == max_value) {
+        return color.r < color.b
+            ? float3(output_min, output_max, output_med)
+            : float3(output_med, output_max, output_min);
+    }
+    return color.g < color.r
+        ? float3(output_med, output_min, output_max)
+        : float3(output_min, output_med, output_max);
+}
+
 float3 extended_color_blend(float3 source, float3 destination, uint mode) {
-    if (mode == 1 || mode == 3) { return min(source + destination, 1.0); }
-    if (mode == 2 || mode == 6) { return source * destination; }
-    if (mode == 5) { return min(source, destination); }
-    if (mode == 9) { return max(source, destination); }
-    if (mode == 10) { return source + destination - source * destination; }
+    if (mode == 1) { return min(source + destination, 1.0); }
+    if (mode == 2) { return source + destination; }
+    if (mode == 3) { return min(source, destination); }
+    if (mode == 4) { return source * destination; }
+    if (mode == 5) {
+        return float3(
+            destination.r >= 0.999999 ? 1.0 : (source.r <= 0.000001 ? 0.0 : 1.0 - min(1.0, (1.0 - destination.r) / source.r)),
+            destination.g >= 0.999999 ? 1.0 : (source.g <= 0.000001 ? 0.0 : 1.0 - min(1.0, (1.0 - destination.g) / source.g)),
+            destination.b >= 0.999999 ? 1.0 : (source.b <= 0.000001 ? 0.0 : 1.0 - min(1.0, (1.0 - destination.b) / source.b))
+        );
+    }
+    if (mode == 6) { return max(float3(0.0), source + destination - 1.0); }
+    if (mode == 7) { return max(source, destination); }
+    if (mode == 8) { return source + destination - source * destination; }
+    if (mode == 9) {
+        return float3(
+            destination.r <= 0.0 ? 0.0 : (source.r >= 1.0 ? 1.0 : min(1.0, destination.r / (1.0 - source.r))),
+            destination.g <= 0.0 ? 0.0 : (source.g >= 1.0 ? 1.0 : min(1.0, destination.g / (1.0 - source.g))),
+            destination.b <= 0.0 ? 0.0 : (source.b >= 1.0 ? 1.0 : min(1.0, destination.b / (1.0 - source.b)))
+        );
+    }
+    if (mode == 10) {
+        float3 mul = 2.0 * source * destination;
+        float3 scr = 1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
+        return select(scr, mul, destination < 0.5);
+    }
+    if (mode == 11) {
+        float3 val1 = destination - (1.0 - 2.0 * source) * destination * (1.0 - destination);
+        float3 val2 = destination + (2.0 * source - 1.0) * destination * ((16.0 * destination - 12.0) * destination + 3.0);
+        float3 val3 = destination + (2.0 * source - 1.0) * (sqrt(destination) - destination);
+        return select(select(val3, val2, destination <= 0.25), val1, source <= 0.5);
+    }
+    if (mode == 12) {
+        float3 mul = 2.0 * source * destination;
+        float3 scr = 1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
+        return select(scr, mul, source < 0.5);
+    }
+    if (mode == 13) {
+        float3 burn = max(float3(0.0), 2.0 * source + destination - 1.0);
+        float3 dodge = min(float3(1.0), 2.0 * (source - 0.5) + destination);
+        return select(dodge, burn, source < 0.5);
+    }
+    if (mode == 14) {
+        return extended_set_luma(
+            extended_set_saturation(source, extended_saturation(destination)),
+            extended_luma(destination)
+        );
+    }
+    if (mode == 15) {
+        return extended_set_luma(source, extended_luma(destination));
+    }
     return source;
 }
 
@@ -154,24 +249,26 @@ float4 overlap_rgba(float3 color, float3 source, float3 destination, float3 para
 }
 
 float4 extended_alpha_blend(float3 color, float4 source, float4 destination, uint mode) {
+    float3 straight_source = source.a > 0.00001 ? source.rgb / source.a : float3(0.0);
+    float3 straight_destination = destination.a > 0.00001 ? destination.rgb / destination.a : float3(0.0);
     if (mode == 1) {
         float3 parameter = float3(source.a * destination.a, 0.0, destination.a * (1.0 - source.a));
-        return overlap_rgba(color, source.rgb, destination.rgb, parameter);
+        return overlap_rgba(color, straight_source, straight_destination, parameter);
     }
     if (mode == 2) {
         float3 parameter = float3(0.0, 0.0, destination.a * (1.0 - source.a));
-        return overlap_rgba(color, source.rgb, destination.rgb, parameter);
+        return overlap_rgba(color, straight_source, straight_destination, parameter);
     }
     if (mode == 3) {
         float3 parameter = float3(min(source.a, destination.a), max(source.a - destination.a, 0.0), max(destination.a - source.a, 0.0));
-        return overlap_rgba(color, source.rgb, destination.rgb, parameter);
+        return overlap_rgba(color, straight_source, straight_destination, parameter);
     }
     if (mode == 4) {
         float3 parameter = float3(max(source.a + destination.a - 1.0, 0.0), min(source.a, 1.0 - destination.a), min(destination.a, 1.0 - source.a));
-        return overlap_rgba(color, source.rgb, destination.rgb, parameter);
+        return overlap_rgba(color, straight_source, straight_destination, parameter);
     }
     float3 parameter = float3(source.a * destination.a, source.a * (1.0 - destination.a), destination.a * (1.0 - source.a));
-    return overlap_rgba(color, source.rgb, destination.rgb, parameter);
+    return overlap_rgba(color, straight_source, straight_destination, parameter);
 }
 
 fragment float4 live2d_extended_fragment(VertexOut in [[stage_in]],
@@ -458,9 +555,17 @@ impl MetalRenderer {
                 && !offscreen_items.is_empty()
                 && !self.reported_offscreen_mask_fallback
             {
+                let parts = runtime.parts();
+                let diagnostics =
+                    offscreen_fallback_diagnostics(&draw_items, &offscreen_items, &parts);
                 println!(
-                    "renderer_event=high_precision_mask_fallback reason=offscreen offscreen_count={}",
-                    offscreen_items.len()
+                    "renderer_event=high_precision_mask_fallback reason=offscreen offscreen_count={} masked_offscreen_count={} extended_offscreen_count={} masked_extended_drawable_count={} nested_offscreen_count={} max_offscreen_depth={}",
+                    diagnostics.offscreen_count,
+                    diagnostics.masked_offscreen_count,
+                    diagnostics.extended_offscreen_count,
+                    diagnostics.masked_extended_drawable_count,
+                    diagnostics.nested_offscreen_count,
+                    diagnostics.max_offscreen_depth
                 );
                 self.reported_offscreen_mask_fallback = true;
             }
@@ -1366,6 +1471,16 @@ struct DrawItem {
 
 struct OffscreenItem {
     offscreen: CubismOffscreenInfo,
+}
+
+#[derive(Debug, Default)]
+struct OffscreenFallbackDiagnostics {
+    offscreen_count: usize,
+    masked_offscreen_count: usize,
+    extended_offscreen_count: usize,
+    masked_extended_drawable_count: usize,
+    nested_offscreen_count: usize,
+    max_offscreen_depth: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -2660,6 +2775,53 @@ fn collect_offscreen_items(runtime: &CubismModelRuntime) -> Vec<OffscreenItem> {
         .collect()
 }
 
+fn offscreen_fallback_diagnostics(
+    draw_items: &[DrawItem],
+    offscreen_items: &[OffscreenItem],
+    parts: &[CubismPartInfo],
+) -> OffscreenFallbackDiagnostics {
+    let mut diagnostics = OffscreenFallbackDiagnostics {
+        offscreen_count: offscreen_items.len(),
+        masked_offscreen_count: offscreen_items
+            .iter()
+            .filter(|item| !item.offscreen.masks.is_empty())
+            .count(),
+        extended_offscreen_count: offscreen_items
+            .iter()
+            .filter(|item| matches!(item.offscreen.blend_mode, CubismBlendMode::Extended { .. }))
+            .count(),
+        masked_extended_drawable_count: draw_items
+            .iter()
+            .filter(|item| {
+                !item.drawable.masks.is_empty()
+                    && matches!(item.drawable.blend_mode, CubismBlendMode::Extended { .. })
+            })
+            .count(),
+        nested_offscreen_count: 0,
+        max_offscreen_depth: 0,
+    };
+
+    for item in offscreen_items {
+        let depth = offscreen_items
+            .iter()
+            .filter(|ancestor| {
+                ancestor.offscreen.index != item.offscreen.index
+                    && part_is_descendant_of(
+                        item.offscreen.owner_part_index,
+                        ancestor.offscreen.owner_part_index,
+                        parts,
+                    )
+            })
+            .count();
+        if depth > 0 {
+            diagnostics.nested_offscreen_count += 1;
+        }
+        diagnostics.max_offscreen_depth = diagnostics.max_offscreen_depth.max(depth + 1);
+    }
+
+    diagnostics
+}
+
 fn render_objects(draw_items: &[DrawItem], offscreen_items: &[OffscreenItem]) -> Vec<RenderObject> {
     let mut objects = draw_items
         .iter()
@@ -2813,10 +2975,32 @@ fn debug_texture_mode(value: Option<&str>) -> u32 {
 
 fn blend_color(blend_mode: CubismBlendMode) -> u32 {
     match blend_mode {
-        CubismBlendMode::Extended { color, .. } => color.max(0) as u32,
+        CubismBlendMode::Extended { color, .. } => framework_color_blend_mode(color),
         CubismBlendMode::Additive => 1,
-        CubismBlendMode::Multiplicative => 2,
+        CubismBlendMode::Multiplicative => 4,
         CubismBlendMode::Normal | CubismBlendMode::Unknown(_) => 0,
+    }
+}
+
+fn framework_color_blend_mode(color: i32) -> u32 {
+    match color {
+        0 => 0,
+        1 | 3 => 1,
+        2 | 6 => 4,
+        4 => 2,
+        5 => 3,
+        7 => 5,
+        8 => 6,
+        9 => 7,
+        10 => 8,
+        11 => 9,
+        12 => 10,
+        13 => 11,
+        14 => 12,
+        15 => 13,
+        16 => 14,
+        17 => 15,
+        _ => 0,
     }
 }
 
@@ -3116,9 +3300,10 @@ fn metal_vertices(frame: &CubismDrawableFrame, transform: FitTransform) -> Vec<M
 #[cfg(test)]
 mod tests {
     use super::{
-        Affine2, Bounds, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel, MaskContext,
-        MaskPlacement, MetalRenderer, assign_high_precision_mask_layouts, assign_mask_layouts,
-        mask_render_texture_count, part_is_descendant_of, stable_mask_texture_size,
+        Affine2, Bounds, DrawItem, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel, MaskContext,
+        MaskPlacement, MetalRenderer, OffscreenItem, assign_high_precision_mask_layouts,
+        assign_mask_layouts, framework_color_blend_mode, mask_render_texture_count,
+        offscreen_fallback_diagnostics, part_is_descendant_of, stable_mask_texture_size,
     };
     use crate::cubism::CubismPartInfo;
     use crate::{config::RendererConfig, cubism, live2d_model::Live2dModel};
@@ -3141,6 +3326,116 @@ mod tests {
         assert!(probe.additive_count + probe.multiplicative_count <= probe.drawable_count);
         assert!(probe.extended_blend_count <= probe.drawable_count + runtime.offscreens().len());
         assert!(probe.masked_count <= probe.drawable_count);
+    }
+
+    #[test]
+    fn framework_color_blend_mode_maps_core_values() {
+        assert_eq!(framework_color_blend_mode(0), 0);
+        assert_eq!(framework_color_blend_mode(1), 1);
+        assert_eq!(framework_color_blend_mode(2), 4);
+        assert_eq!(framework_color_blend_mode(3), 1);
+        assert_eq!(framework_color_blend_mode(4), 2);
+        assert_eq!(framework_color_blend_mode(5), 3);
+        assert_eq!(framework_color_blend_mode(6), 4);
+        assert_eq!(framework_color_blend_mode(10), 8);
+        assert_eq!(framework_color_blend_mode(16), 14);
+        assert_eq!(framework_color_blend_mode(17), 15);
+    }
+
+    #[test]
+    fn offscreen_fallback_diagnostics_counts_risky_combinations() {
+        let draw_items = vec![DrawItem {
+            drawable: cubism::CubismDrawableInfo {
+                index: 0,
+                id: "draw".to_string(),
+                parent_part_index: 2,
+                parent_part_id: Some("child".to_string()),
+                blend_mode: cubism::CubismBlendMode::Extended {
+                    raw: 6,
+                    color: 6,
+                    alpha: 0,
+                },
+                texture_index: 0,
+                vertex_count: 0,
+                index_count: 0,
+                opacity: 1.0,
+                draw_order: 0,
+                render_order: 0,
+                masks: vec![1, 2],
+                multiply_color: [1.0; 4],
+                screen_color: [0.0, 0.0, 0.0, 1.0],
+                flags: cubism::DrawableFlags::default(),
+            },
+            frame: cubism::CubismDrawableFrame {
+                positions: Vec::new(),
+                uvs: Vec::new(),
+                indices: Vec::new(),
+            },
+        }];
+        let offscreen_items = vec![
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 0,
+                    owner_part_index: 0,
+                    blend_mode: cubism::CubismBlendMode::Normal,
+                    opacity: 1.0,
+                    render_order: 0,
+                    masks: Vec::new(),
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+            OffscreenItem {
+                offscreen: cubism::CubismOffscreenInfo {
+                    index: 1,
+                    owner_part_index: 1,
+                    blend_mode: cubism::CubismBlendMode::Extended {
+                        raw: 256,
+                        color: 0,
+                        alpha: 1,
+                    },
+                    opacity: 1.0,
+                    render_order: 1,
+                    masks: vec![3],
+                    multiply_color: [1.0; 4],
+                    screen_color: [0.0, 0.0, 0.0, 1.0],
+                    flags: cubism::DrawableFlags::default(),
+                },
+            },
+        ];
+        let parts = vec![
+            CubismPartInfo {
+                index: 0,
+                id: "root".to_string(),
+                parent_part_index: -1,
+                offscreen_index: 0,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 1,
+                id: "child".to_string(),
+                parent_part_index: 0,
+                offscreen_index: 1,
+                opacity: 1.0,
+            },
+            CubismPartInfo {
+                index: 2,
+                id: "grandchild".to_string(),
+                parent_part_index: 1,
+                offscreen_index: -1,
+                opacity: 1.0,
+            },
+        ];
+
+        let diagnostics = offscreen_fallback_diagnostics(&draw_items, &offscreen_items, &parts);
+
+        assert_eq!(diagnostics.offscreen_count, 2);
+        assert_eq!(diagnostics.masked_offscreen_count, 1);
+        assert_eq!(diagnostics.extended_offscreen_count, 1);
+        assert_eq!(diagnostics.masked_extended_drawable_count, 1);
+        assert_eq!(diagnostics.nested_offscreen_count, 1);
+        assert_eq!(diagnostics.max_offscreen_depth, 2);
     }
 
     #[test]

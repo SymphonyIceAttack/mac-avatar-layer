@@ -296,7 +296,7 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
         risk_details: risk.details,
         offscreen_details: offscreens
             .iter()
-            .take(12)
+            .take(32)
             .map(|offscreen| {
                 let owner = parts
                     .get(offscreen.owner_part_index.max(0) as usize)
@@ -377,6 +377,9 @@ struct RenderRiskSummary {
     additive_count: usize,
     multiplicative_count: usize,
     extended_blend_count: usize,
+    masked_extended_drawable_count: usize,
+    extended_offscreen_count: usize,
+    masked_offscreen_count: usize,
     inverted_mask_count: usize,
     details: Vec<String>,
 }
@@ -387,6 +390,30 @@ fn summarize_render_risk(
     offscreens: &[cubism::CubismOffscreenInfo],
     texture_count: usize,
 ) -> RenderRiskSummary {
+    let masked_extended_drawable_count = drawables
+        .iter()
+        .filter(|drawable| {
+            !drawable.masks.is_empty()
+                && matches!(
+                    drawable.blend_mode,
+                    cubism::CubismBlendMode::Extended { .. }
+                )
+        })
+        .count();
+    let extended_offscreen_count = offscreens
+        .iter()
+        .filter(|offscreen| {
+            matches!(
+                offscreen.blend_mode,
+                cubism::CubismBlendMode::Extended { .. }
+            )
+        })
+        .count();
+    let masked_offscreen_count = offscreens
+        .iter()
+        .filter(|offscreen| !offscreen.masks.is_empty())
+        .count();
+
     let mut summary = RenderRiskSummary {
         masked_drawable_count: drawables
             .iter()
@@ -424,6 +451,9 @@ fn summarize_render_risk(
                     )
                 })
                 .count(),
+        masked_extended_drawable_count,
+        extended_offscreen_count,
+        masked_offscreen_count,
         inverted_mask_count: drawables
             .iter()
             .filter(|drawable| drawable.flags.inverted_mask)
@@ -470,10 +500,28 @@ fn summarize_render_risk(
             offscreens.len()
         ));
     }
+    if summary.masked_offscreen_count > 0 {
+        summary.details.push(format!(
+            "risk masked offscreens: {} require clipping during offscreen draws",
+            summary.masked_offscreen_count
+        ));
+    }
     if summary.extended_blend_count > 0 {
         summary.details.push(format!(
             "risk extended blend objects: {} use snapshot compositing",
             summary.extended_blend_count
+        ));
+    }
+    if summary.masked_extended_drawable_count > 0 {
+        summary.details.push(format!(
+            "risk masked extended drawables: {} require mask + snapshot compositing",
+            summary.masked_extended_drawable_count
+        ));
+    }
+    if summary.extended_offscreen_count > 0 {
+        summary.details.push(format!(
+            "risk extended offscreens: {} require offscreen snapshot compositing",
+            summary.extended_offscreen_count
         ));
     }
     if summary.inverted_mask_count > 0 {

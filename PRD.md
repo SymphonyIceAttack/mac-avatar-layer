@@ -30,13 +30,29 @@ expression, physics, and tracking input.
 - Models with Cubism offscreen drawables currently fall back from high precision
   masks to the shared mask path so offscreen render/composite remains enabled;
   diagnostics show this as `mask shared(offscreen)`.
+- High precision mask fallback logs include offscreen, masked offscreen,
+  extended offscreen, masked extended drawable, nested offscreen, and maximum
+  offscreen depth counts so the fallback cause is reviewable from capture logs.
 - Shared atlas clipping supports multiple mask render textures when context
   count exceeds one texture's practical capacity.
 - Cubism Core offscreen drawable counts are detected, logged, and routed through
   a first-pass Metal offscreen render/composite path.
 - Metal renderer lifecycle events are logged with `renderer_event=...` records
   for startup, drawable size changes, mask/offscreen/MSAA texture changes,
-  drawable availability, and long frame gaps.
+  drawable availability, AppKit active/visible/occlusion state changes, long
+  frame gaps, and inferred display wake events.
+- Space/display reliability runs write machine logs to `target/space-test/*.log`
+  and Markdown checklist reports to `target/space-test/*.md`.
+- Texture sampling quality can be compared with
+  `scripts/capture-quality-matrix.sh`, which captures mipmaps off/on for the
+  default model plus `Mao` and `Ren`.
+- Render regression captures refresh `target/render-regression/report.md`, a
+  Markdown index for latest screenshots, manual visual checks, model risk
+  probe output, automatic review focus, renderer fallback events, and recent
+  renderer events.
+- Project-generated `target/` artifacts are cleaned automatically by the local
+  run/capture scripts; `scripts/clean-target.sh --all` also removes Cargo build
+  outputs when a full cleanup is needed.
 - App startup now uses a local PID guard under `target/vtube-studio-rs.pid` to
   prevent duplicate avatar windows during development; set
   `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only for deliberate debugging.
@@ -66,7 +82,11 @@ expression, physics, and tracking input.
   inverted-mask, and offscreen counts. It labels models as `risk:low`,
   `risk:medium`, or `risk:high` for renderer compatibility triage, and prints
   specific risk reasons such as dense clipping, many masked drawables, offscreen
-  objects, extended blends, or inverted masks.
+  objects, extended blends, masked extended drawables, extended offscreens,
+  masked offscreens, or inverted masks.
+- `scripts/probe-risk-models.sh` wraps the probe with SDK path auto-detection
+  and writes `target/render-regression/probe.txt`; the render regression report
+  embeds this output so each screenshot sweep carries the model risk context.
 - Local SDK sample probe currently loads 9 models successfully. Notable stress
   cases: `Mao` has 37 masked drawables, which exercises multi shared mask
   textures; `Ren` has 24 offscreen drawables, which exercises the first-pass
@@ -74,6 +94,14 @@ expression, physics, and tracking input.
 - Cubism v5 extended blend modes are decoded in diagnostics as `color + alpha`
   pairs and routed through a first-pass Metal extended blend shader that samples
   a render-target snapshot before compositing.
+- Extended alpha compositing now converts snapshot source/destination colors
+  back to straight color before applying Over/Atop/Out/Conjoint/Disjoint
+  parameters, then writes premultiplied output. This keeps Ren-style extended
+  shadow and draw-order composites closer to Cubism Framework behavior.
+- Extended color blend ids are mapped from Cubism Core raw color types to the
+  Framework shader enum before entering Metal, including AddGlow, Darken,
+  Multiply, ColorBurn, LinearBurn, Lighten, Screen, ColorDodge, Overlay,
+  SoftLight, HardLight, LinearLight, Hue, and Color.
 - Metal startup diagnostics report the number of extended blend objects using
   the extended blend shader.
 - Runtime diagnostics, renderer debug switches, input drivers, and manual mouth
@@ -214,6 +242,8 @@ Required outcomes:
   and `fullScreenAuxiliary`.
 - Detect and recover from Metal layer/device issues after display sleep/wake.
 - Add structured trace output for long frame gaps and Space/display transitions.
+- Log AppKit active, window visibility, and window occlusion state changes while
+  running reliability tests.
 
 Acceptance criteria:
 
@@ -266,9 +296,18 @@ Status: active.
   high-precision-mask, and no-mask visual comparison.
 - Keep `scripts/capture-offscreen-matrix.sh` available for the `Ren` offscreen
   and extended blend visual comparison.
+- Keep `scripts/capture-quality-matrix.sh` available for mipmap/anisotropic
+  sampling comparisons on the default model, `Mao`, and `Ren`.
+- Keep `scripts/probe-risk-models.sh` available for regenerating the model risk
+  probe included in the render regression report.
+- Keep `scripts/render-regression-report.sh` available as the common Markdown
+  index for render regression screenshots, model risk probe output, and
+  automatic review focus.
+- Keep `scripts/clean-target.sh` available for generated artifact cleanup and
+  optional full Cargo target cleanup.
 - Keep `scripts/run-space-test.sh` available for repeatable macOS Space and
   display sleep/wake reliability checks with an end-of-run renderer event
-  summary.
+  summary and Markdown report.
 - Improve missing SDK/model diagnostics.
 - Keep diagnostics overlay visibility controlled before startup rather than by
   runtime hotkeys.
@@ -286,6 +325,17 @@ Status: pending.
   changes.
 - Use the `Ren` offscreen matrix screenshots as the first visual gate for
   offscreen and extended blend changes.
+- Keep Ren risk probe details visible in `target/render-regression/report.md`,
+  especially masked extended drawables, extended offscreens, and masked
+  offscreens.
+- Keep high precision mask fallback events visible in
+  `target/render-regression/report.md`, especially offscreen mask and nested
+  offscreen counts.
+- Use the quality matrix screenshots as the first visual gate for optional
+  mipmaps/anisotropic sampling changes.
+- Use `target/render-regression/report.md` as the standard visual review index.
+- Keep the report's Review Focus section as the first place to inspect after a
+  matrix run.
 - Improve Retina/window resize behavior.
 
 ### Milestone F: macOS Reliability Pass
@@ -294,7 +344,7 @@ Status: pending.
 
 - Build a repeatable Space-switch test checklist.
 - Use `scripts/run-space-test.sh` for display sleep/wake recovery testing and
-  event summaries.
+  event summaries/reports.
 - Extend structured renderer lifecycle logging as new macOS failure cases are
   found.
 - Continue reducing duplicate process/window issues during development.

@@ -114,6 +114,8 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 Probe all local models without opening a window:
 
 ```bash
+./scripts/probe-risk-models.sh
+
 CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
 CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
   cargo run --features cubism-core -- --probe-models public
@@ -124,7 +126,10 @@ part, drawable, masked drawable, maximum mask, blend-mode, inverted-mask, and
 offscreen counts. It also labels each model `risk:low`, `risk:medium`, or
 `risk:high` for renderer compatibility triage. High-risk models print the
 specific reason, such as dense clipping, many masked drawables, offscreen
-objects, extended blends, or inverted masks.
+objects, extended blends, masked extended drawables, extended offscreens,
+masked offscreens, or inverted masks. The script writes
+`target/render-regression/probe.txt`, and the render regression report embeds
+that probe output.
 
 You can also set `LIVE2D_CUBISM_SDK_NATIVE_DIR` to point at a different SDK root.
 
@@ -136,6 +141,7 @@ Capture a cropped Metal renderer screenshot for visual regression checks:
 ./scripts/capture-risk-models.sh
 ./scripts/capture-mask-matrix.sh
 ./scripts/capture-offscreen-matrix.sh
+./scripts/capture-quality-matrix.sh
 ```
 
 Screenshots are written to `target/render-regression/`. The script reuses the
@@ -154,16 +160,35 @@ previous `vtube-studio-rs.toml`.
 blend stress model under `target/render-regression/offscreen-matrix/`.
 Offscreen models currently fall back from high-precision masks to shared masks;
 the overlay marks this as `mask shared(offscreen)`.
+The corresponding `high_precision_mask_fallback` renderer event includes
+offscreen, masked offscreen, extended offscreen, masked extended drawable,
+nested offscreen, and maximum offscreen depth counts.
+`capture-quality-matrix.sh` captures the default model plus `Mao` and `Ren`
+with texture atlas mipmaps off/on under `target/render-regression/quality-matrix/`
+so texture shimmer and atlas island bleed can be compared.
+Each capture script refreshes `target/render-regression/report.md`, a Markdown
+index with latest screenshot paths, manual review checklist, model risk probe
+output, automatic review focus, renderer fallback events, and recent renderer
+events from capture logs.
+Generated test artifacts under `target/render-regression/` and
+`target/space-test/` are cleaned automatically before these scripts run. Set
+`VTUBE_RS_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
+Run `./scripts/clean-target.sh --all` when you also want to remove Cargo build
+outputs.
 
 Metal renderer lifecycle logs use `renderer_event=...` records so Space-switch
 and sleep/wake testing can be checked from the terminal. Useful events include
 `instance_guard_acquired`, `app_nap_guard_started`, `window_configured`,
+`app_active_changed`, `window_visible_changed`, `window_occlusion_changed`,
 `metal_initialized`, `drawable_size_changed`, `mask_tile_size_changed`,
 `mask_atlas_resized`, `offscreen_texture_size_changed`,
-`next_drawable_unavailable`, `next_drawable_recovered`, and `long_frame_gap`.
+`next_drawable_unavailable`, `next_drawable_recovered`, `long_frame_gap`, and
+`display_wake_inferred`.
 The app prevents duplicate local avatar instances with
 `target/vtube-studio-rs.pid`; set `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only
 when intentionally debugging multiple windows.
+`scripts/run-space-test.sh` writes machine logs to `target/space-test/*.log`
+and a Markdown checklist/report to `target/space-test/*.md`.
 
 ## App Configuration
 
@@ -237,14 +262,19 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 6. Check the terminal for `renderer_event=long_frame_gap` lines and any
    `renderer_event=next_drawable_unavailable` / `next_drawable_recovered`
    pairs.
-7. Press `Ctrl-C` in the terminal. The script prints an event summary and saves
-   the full log under `target/space-test/`.
+7. After display sleep/wake, check whether `renderer_event=display_wake_inferred`
+   appears and whether FPS/Frames recover afterward.
+8. Press `Ctrl-C` in the terminal. The script prints an event summary and saves
+   the full log plus a Markdown report under `target/space-test/`.
+9. Open the generated `space-test-*.md` report and fill in the manual checklist.
+   Use the automatic assessment table to decide whether the next fix should
+   focus on CAMetalLayer recovery, window behavior, or normal transition stalls.
 
 ## Next Milestones
 
 1. Keep README and PRD aligned as capabilities change.
-2. Improve renderer quality: mipmaps, anisotropic filtering, Retina-stable mask
-   texture sizing, and transparent edge antialiasing.
+2. Improve renderer quality: validate mipmaps/anisotropic filtering, refine
+   Retina-stable mask texture sizing, and transparent edge antialiasing.
 3. Validate Cubism clipping parity against more official sample models.
 4. Run a dedicated macOS Space/display reliability pass.
 5. Later, investigate webcam/ARKit tracking and VTube Studio plugin API

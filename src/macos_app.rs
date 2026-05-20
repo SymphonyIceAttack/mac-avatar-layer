@@ -178,9 +178,12 @@ pub fn run(model_path: &str) -> Result<(), String> {
         let microphone = MicrophoneInput::from_config(&config.input.microphone);
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
+        let mut lifecycle_monitor = AppLifecycleMonitor::new();
+        lifecycle_monitor.poll(app, window, started_at);
 
         loop {
             drain_pending_events(app, run_loop_mode);
+            lifecycle_monitor.poll(app, window, started_at);
             begin_immediate_layer_update();
             let now = Instant::now();
             motion_controller.apply(
@@ -685,6 +688,62 @@ struct Diagnostics {
     last_report: Instant,
 }
 
+struct AppLifecycleMonitor {
+    last_poll: Instant,
+    app_active: Option<bool>,
+    window_visible: Option<bool>,
+    window_occlusion_state: Option<NSUInteger>,
+}
+
+impl AppLifecycleMonitor {
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    fn new() -> Self {
+        Self {
+            last_poll: Instant::now() - Self::POLL_INTERVAL,
+            app_active: None,
+            window_visible: None,
+            window_occlusion_state: None,
+        }
+    }
+
+    unsafe fn poll(&mut self, app: Id, window: Id, started_at: Instant) {
+        let now = Instant::now();
+        if now.duration_since(self.last_poll) < Self::POLL_INTERVAL {
+            return;
+        }
+        self.last_poll = now;
+        let uptime = now.duration_since(started_at).as_secs_f64();
+
+        let app_active = msg_bool(app, "isActive");
+        if self.app_active != Some(app_active) {
+            println!(
+                "renderer_event=app_active_changed active={} uptime_s={uptime:.1}",
+                app_active
+            );
+            self.app_active = Some(app_active);
+        }
+
+        let window_visible = msg_bool(window, "isVisible");
+        if self.window_visible != Some(window_visible) {
+            println!(
+                "renderer_event=window_visible_changed visible={} uptime_s={uptime:.1}",
+                window_visible
+            );
+            self.window_visible = Some(window_visible);
+        }
+
+        let occlusion_state = msg_ulong(window, "occlusionState");
+        if self.window_occlusion_state != Some(occlusion_state) {
+            println!(
+                "renderer_event=window_occlusion_changed state={} uptime_s={uptime:.1}",
+                occlusion_state
+            );
+            self.window_occlusion_state = Some(occlusion_state);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RendererDiagnostics {
     mask_mode: String,
@@ -798,6 +857,13 @@ impl Diagnostics {
                     now.duration_since(started_at).as_secs_f64(),
                 );
             }
+            if interval >= Duration::from_secs(5) {
+                println!(
+                    "renderer_event=display_wake_inferred gap_ms={:.1} uptime_s={:.1}",
+                    duration_ms(interval),
+                    now.duration_since(started_at).as_secs_f64(),
+                );
+            }
         }
         self.last_frame_at = Some(now);
 
@@ -879,6 +945,17 @@ unsafe fn ns_color(red: f64, green: f64, blue: f64, alpha: f64) -> Result<Id, St
 
 unsafe fn msg_id(receiver: Id, selector_name: &str) -> Id {
     let function: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
+}
+
+unsafe fn msg_bool(receiver: Id, selector_name: &str) -> bool {
+    let function: extern "C" fn(Id, Sel) -> Bool = std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name)) != NO
+}
+
+unsafe fn msg_ulong(receiver: Id, selector_name: &str) -> NSUInteger {
+    let function: extern "C" fn(Id, Sel) -> NSUInteger =
+        std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name))
 }
 

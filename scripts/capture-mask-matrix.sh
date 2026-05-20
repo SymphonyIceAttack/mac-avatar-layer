@@ -59,9 +59,14 @@ capture_mode() {
 }
 
 mkdir -p "$OUTPUT_DIR"
+if [[ "${VTUBE_RS_SKIP_TARGET_CLEAN:-0}" != "1" ]]; then
+  "$ROOT_DIR/scripts/clean-target.sh" --generated
+  mkdir -p "$OUTPUT_DIR"
+fi
 
 capture_mode "shared" "false" "false"
 capture_mode "high-precision" "false" "true"
 capture_mode "no-mask" "true" "false"
 
 echo "Mask matrix screenshots: $OUTPUT_DIR"
+echo "Render regression report: $("$ROOT_DIR/scripts/render-regression-report.sh")"

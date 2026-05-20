@@ -86,5 +86,19 @@ sleep "$POST_WINDOW_WAIT_SECONDS"
 MODEL_NAME="$(basename "$MODEL_PATH" .model3.json)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUTPUT_PATH="$OUTPUT_DIR/${MODEL_NAME}-${TIMESTAMP}.png"
-screencapture -x -l "$WINDOW_ID" "$OUTPUT_PATH"
+CAPTURE_ATTEMPTS="${CAPTURE_ATTEMPTS:-5}"
+for attempt in $(seq 1 "$CAPTURE_ATTEMPTS"); do
+  if screencapture -x -l "$WINDOW_ID" "$OUTPUT_PATH" 2>"$OUTPUT_DIR/capture-screencapture.err"; then
+    echo "$OUTPUT_PATH"
+    exit 0
+  fi
+  if [[ "$attempt" == "$CAPTURE_ATTEMPTS" ]]; then
+    echo "Could not capture vtube-studio-rs window after $CAPTURE_ATTEMPTS attempts. Last screencapture error:" >&2
+    cat "$OUTPUT_DIR/capture-screencapture.err" >&2 || true
+    echo "Last app log lines:" >&2
+    tail -40 "$OUTPUT_DIR/capture.log" >&2 || true
+    exit 1
+  fi
+  sleep 0.5
+done
 echo "$OUTPUT_PATH"
