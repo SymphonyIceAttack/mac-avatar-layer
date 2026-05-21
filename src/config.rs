@@ -60,6 +60,7 @@ pub struct RendererConfig {
     pub disable_masks: bool,
     pub high_precision_masks: bool,
     pub atlas_mipmaps: bool,
+    pub atlas_anisotropy: u64,
     pub debug_texture_mode: Option<String>,
     pub hidden_drawables: Vec<String>,
     pub hidden_parts: Vec<String>,
@@ -75,6 +76,7 @@ impl Default for RendererConfig {
             disable_masks: false,
             high_precision_masks: false,
             atlas_mipmaps: false,
+            atlas_anisotropy: 1,
             debug_texture_mode: None,
             hidden_drawables: Vec::new(),
             hidden_parts: Vec::new(),
@@ -169,6 +171,7 @@ show = false
 disable_masks = true
 high_precision_masks = true
 atlas_mipmaps = true
+atlas_anisotropy = 8
 debug_texture_mode = "uv"
 hidden_drawables = ["ArtMeshDebug"]
 hidden_parts = ["PartHidden"]
@@ -200,6 +203,7 @@ mouth_open = 0.7
         assert!(config.renderer.disable_masks);
         assert!(config.renderer.high_precision_masks);
         assert!(config.renderer.atlas_mipmaps);
+        assert_eq!(config.renderer.atlas_anisotropy, 8);
         assert_eq!(config.renderer.debug_texture_mode.as_deref(), Some("uv"));
         assert_eq!(config.renderer.hidden_drawables, ["ArtMeshDebug"]);
         assert_eq!(config.renderer.hidden_parts, ["PartHidden"]);

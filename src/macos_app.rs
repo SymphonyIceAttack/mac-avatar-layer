@@ -789,6 +789,7 @@ struct RendererDiagnostics {
     mask_mode: String,
     debug_texture_mode: String,
     atlas_mipmaps: bool,
+    atlas_anisotropy: u64,
     hidden_count: usize,
     only_count: usize,
     highlight_count: usize,
@@ -815,6 +816,7 @@ impl RendererDiagnostics {
                 .unwrap_or("none")
                 .to_string(),
             atlas_mipmaps: config.atlas_mipmaps,
+            atlas_anisotropy: config.atlas_anisotropy.clamp(1, 16),
             hidden_count: config.hidden_drawables.len() + config.hidden_parts.len(),
             only_count: config.only_drawables.len() + config.only_parts.len(),
             highlight_count: config.highlight_drawables.len() + config.highlight_parts.len(),
@@ -838,12 +840,13 @@ impl RendererDiagnostics {
 
     fn summary(&self) -> String {
         format!(
-            "Renderer: mask {} | offscreen {} | ext blend {} | debug {} | mipmaps {} | filters h/o/hi {}/{}/{}",
+            "Renderer: mask {} | offscreen {} | ext blend {} | debug {} | mipmaps {} | aniso {} | filters h/o/hi {}/{}/{}",
             self.mask_mode,
             self.offscreen_count,
             self.extended_blend_count,
             self.debug_texture_mode,
             if self.atlas_mipmaps { "on" } else { "off" },
+            self.atlas_anisotropy,
             self.hidden_count,
             self.only_count,
             self.highlight_count

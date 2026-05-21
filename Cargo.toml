@@ -3,6 +3,9 @@ name = "vtube-studio-rs"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [".", "xtask"]
+
 [features]
 default = []
 cubism-core = ["dep:live2d-cubism-core-sys"]

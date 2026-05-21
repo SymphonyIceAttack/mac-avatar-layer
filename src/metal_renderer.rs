@@ -431,19 +431,21 @@ impl MetalRenderer {
         let extended_pipeline_state =
             create_extended_pipeline_state(&device, &library, sample_count)?;
         let mask_pipeline_state = create_mask_pipeline_state(&device, &library)?;
-        let atlas_sampler = create_atlas_sampler(&device, config.atlas_mipmaps);
+        let atlas_anisotropy = atlas_anisotropy_level(config.atlas_anisotropy);
+        let atlas_sampler = create_atlas_sampler(&device, config.atlas_mipmaps, atlas_anisotropy);
         let mask_sampler = create_mask_sampler(&device);
         let textures = load_textures(&device, &command_queue, model, config.atlas_mipmaps)?;
         let white_mask_texture = create_white_mask_texture(&device);
         let (quad_vertex_buffer, quad_index_buffer) = create_quad_buffers(&device);
         println!(
-            "renderer_event=metal_initialized device=\"{}\" textures={} sample_count={} masks_disabled={} high_precision_masks={} mipmaps={} debug_texture_mode={}",
+            "renderer_event=metal_initialized device=\"{}\" textures={} sample_count={} masks_disabled={} high_precision_masks={} mipmaps={} atlas_anisotropy={} debug_texture_mode={}",
             device.name(),
             textures.len(),
             sample_count,
             config.disable_masks,
             config.high_precision_masks,
             config.atlas_mipmaps,
+            atlas_anisotropy,
             config.debug_texture_mode.as_deref().unwrap_or("none")
         );
 
@@ -2197,7 +2199,11 @@ fn create_mask_pipeline_state(
         .map_err(|error| format!("Failed to create Metal mask pipeline: {error}"))
 }
 
-fn create_atlas_sampler(device: &Device, mipmapped: bool) -> SamplerState {
+fn atlas_anisotropy_level(configured: u64) -> u64 {
+    configured.clamp(1, 16)
+}
+
+fn create_atlas_sampler(device: &Device, mipmapped: bool, max_anisotropy: u64) -> SamplerState {
     let descriptor = SamplerDescriptor::new();
     descriptor.set_min_filter(MTLSamplerMinMagFilter::Linear);
     descriptor.set_mag_filter(MTLSamplerMinMagFilter::Linear);
@@ -2208,8 +2214,8 @@ fn create_atlas_sampler(device: &Device, mipmapped: bool) -> SamplerState {
     });
     descriptor.set_address_mode_s(MTLSamplerAddressMode::ClampToEdge);
     descriptor.set_address_mode_t(MTLSamplerAddressMode::ClampToEdge);
-    if mipmapped {
-        descriptor.set_max_anisotropy(8);
+    if max_anisotropy > 1 {
+        descriptor.set_max_anisotropy(max_anisotropy);
     }
     device.new_sampler(&descriptor)
 }
@@ -2596,11 +2602,7 @@ fn render_mask_atlas(
             let Some(texture) = textures.get(item.drawable.texture_index.max(0) as usize) else {
                 continue;
             };
-            let mask_params = MaskParams {
-                opacity: item.drawable.opacity.clamp(0.0, 1.0),
-                channel_index: context.channel.index(),
-                _padding: [0; 2],
-            };
+            let mask_params = mask_source_params(context);
             let next_cull_mode = drawable_cull_mode(&item.drawable);
             let next_front_winding = drawable_front_winding(&item.frame, FitTransform::identity());
             if front_winding != Some(next_front_winding) {
@@ -2792,11 +2794,7 @@ fn render_mask_context(
         let Some(texture) = textures.get(item.drawable.texture_index.max(0) as usize) else {
             continue;
         };
-        let mask_params = MaskParams {
-            opacity: item.drawable.opacity.clamp(0.0, 1.0),
-            channel_index: context.channel.index(),
-            _padding: [0; 2],
-        };
+        let mask_params = mask_source_params(context);
         let next_cull_mode = drawable_cull_mode(&item.drawable);
         let next_front_winding = drawable_front_winding(&item.frame, FitTransform::identity());
         if front_winding != Some(next_front_winding) {
@@ -2837,6 +2835,17 @@ fn collect_draw_items(runtime: &CubismModelRuntime) -> Vec<DrawItem> {
                 .map(|frame| DrawItem { drawable, frame })
         })
         .collect()
+}
+
+fn mask_source_params(context: &MaskContext) -> MaskParams {
+    MaskParams {
+        // Clipping source drawables may have model opacity 0 because they are
+        // not meant to be visible as normal art. The mask itself is generated
+        // from texture alpha.
+        opacity: 1.0,
+        channel_index: context.channel.index(),
+        _padding: [0; 2],
+    }
 }
 
 fn collect_offscreen_items(runtime: &CubismModelRuntime) -> Vec<OffscreenItem> {
@@ -3486,10 +3495,10 @@ mod tests {
     use super::{
         Affine2, Bounds, DrawItem, FitTransform, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel,
         MaskContext, MaskPlacement, MetalRenderer, OffscreenItem,
-        assign_high_precision_mask_layouts, assign_mask_layouts, framework_color_blend_mode,
-        fullscreen_quad_vertices, mask_render_texture_count, offscreen_fallback_diagnostics,
-        offscreen_fragment_params, part_is_descendant_of, stable_mask_texture_size,
-        unique_mask_contexts,
+        assign_high_precision_mask_layouts, assign_mask_layouts, atlas_anisotropy_level,
+        framework_color_blend_mode, fullscreen_quad_vertices, mask_render_texture_count,
+        mask_source_params, offscreen_fallback_diagnostics, offscreen_fragment_params,
+        part_is_descendant_of, stable_mask_texture_size, unique_mask_contexts,
     };
     use crate::cubism::CubismPartInfo;
     use crate::{config::RendererConfig, cubism, live2d_model::Live2dModel};
@@ -3980,6 +3989,14 @@ mod tests {
     }
 
     #[test]
+    fn atlas_anisotropy_is_clamped_to_metal_sampler_range() {
+        assert_eq!(atlas_anisotropy_level(0), 1);
+        assert_eq!(atlas_anisotropy_level(1), 1);
+        assert_eq!(atlas_anisotropy_level(8), 8);
+        assert_eq!(atlas_anisotropy_level(64), 16);
+    }
+
+    #[test]
     fn mask_placement_uses_physical_mask_precision_when_tile_has_room() {
         let placement = MaskPlacement::new(
             Bounds {
@@ -4160,6 +4177,34 @@ mod tests {
         assert_eq!(params.layout_bounds, contexts[0].shader_layout_bounds());
         assert_eq!(params.draw_x, contexts[0].matrix_for_draw.x);
         assert_eq!(params.draw_y, contexts[0].matrix_for_draw.y);
+    }
+
+    #[test]
+    fn mask_sources_ignore_drawable_opacity() {
+        let context = MaskContext {
+            masks: vec![44],
+            bounds: Bounds {
+                min_x: -1.0,
+                min_y: -1.0,
+                max_x: 1.0,
+                max_y: 1.0,
+            },
+            buffer_index: 0,
+            channel: MaskChannel::Blue,
+            layout_bounds: LayoutBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            matrix_for_mask: Affine2::identity(),
+            matrix_for_draw: Affine2::identity(),
+        };
+
+        let params = mask_source_params(&context);
+
+        assert_eq!(params.opacity, 1.0);
+        assert_eq!(params.channel_index, MaskChannel::Blue.index());
     }
 
     #[test]

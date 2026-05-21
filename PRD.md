@@ -30,6 +30,9 @@ expression, physics, and tracking input.
 - Optional high precision masks give each clipping context a full-size mask
   texture and redraw it immediately before each masked drawable instead of
   sharing an RGBA atlas tile.
+- Clipping mask generation uses the mask source texture alpha without applying
+  the source drawable's model opacity. This keeps hidden helper mask drawables,
+  such as Rice's eye clipping masks, from producing empty masks.
 - Models with Cubism offscreen drawables currently fall back from high precision
   masks to the shared mask path so offscreen render/composite remains enabled;
   diagnostics show this as `mask shared(offscreen)`.
@@ -60,30 +63,53 @@ expression, physics, and tracking input.
   drawable recovery, and display wake checks passed; two long-frame gaps were
   recorded as transition signals.
 - Texture sampling quality can be compared with
-  `scripts/capture-quality-matrix.sh`, which captures mipmaps off/on for the
-  default model plus `Mao` and `Ren`.
+  `cargo xtask capture-quality-matrix`, which captures mipmaps off/on plus
+  mipmaps-on-anisotropy-8 for the default model plus `Mao` and `Ren`.
 - Render regression captures refresh `target/render-regression/report.md`, a
   Markdown index for latest screenshots, manual visual checks, model risk
-  probe output, automatic review focus, renderer fallback events, and recent
-  renderer events.
+  probe output, automatic review focus, renderer fallback events, MSAA/edge
+  quality summaries, and recent renderer events.
 - The render regression report embeds thumbnail previews and grouped contact
   sheets so visual triage can start from the Markdown report before opening
   individual PNG files.
-- Render regression report generation now runs through a bounded safe wrapper,
-  and `scripts/capture-full-matrix.sh` chains the standard visual matrices with
+- `cargo xtask capture-full-matrix` chains the standard visual matrices with
   cleanup between steps and a single report generation at the end.
-- `scripts/capture-rice-stress.sh` captures the official `Rice` sample in
+- `cargo xtask capture-rice-stress` captures the official `Rice` sample in
   shared, high-precision, and no-mask modes when the SDK sample is available.
   Rice is treated as an optional stress model for additive, inverted-mask, and
-  translucent-drawable coverage, and `scripts/capture-rice-candidate.sh`
-  remains as a compatibility alias for the earlier candidate workflow.
-- `scripts/ren-offscreen-audit.sh` writes
+  translucent-drawable coverage.
+- `cargo xtask rice-stress-audit` writes
+  `target/render-regression/rice-stress-audit.md`, a focused Rice audit for
+  additive drawables, inverted masks, translucent layering, capture references,
+  and a manual pass/investigate decision before changing blend or mask behavior.
+- `cargo xtask mao-mask-audit` writes
+  `target/render-regression/mao-mask-audit.md`, a focused Mao audit for dense
+  clipping, inverted masks, eye masks, capture references, and a manual
+  pass/investigate decision before changing clipping layout or mask matrix
+  behavior.
+- `cargo xtask ren-offscreen-audit` writes
   `target/render-regression/ren-offscreen-audit.md`, a focused Ren audit for
   nested offscreens, masked offscreens, extended offscreens, and extended
-  drawables before changing the offscreen compositor.
+  drawables, including the offscreen begin/snapshot/flush timeline, automatic
+  plan checks, and a manual pass/investigate decision before changing the
+  offscreen compositor.
+- `cargo xtask ren-visual-diff` writes
+  `target/render-regression/ren-visual-diff.md` and diff heatmaps under
+  `target/render-regression/ren-visual-diff/`, comparing Ren shared,
+  high-precision fallback, and no-mask captures across whole-image and focused
+  face/eye, hair-shadow, torso/transparent, and pupil-offscreen regions.
+- `cargo xtask quality-visual-diff` writes
+  `target/render-regression/quality-visual-diff.md` and diff heatmaps under
+  `target/render-regression/quality-visual-diff/`, comparing mipmaps off/on and
+  anisotropy 1/8 for the default model, `Mao`, and `Ren` across whole-image and
+  focused avatar regions.
 - Project-generated `target/` artifacts are cleaned automatically by the local
-  run/capture scripts; `scripts/clean-target.sh --all` also removes Cargo build
+  run/capture commands; `cargo xtask clean --all` also removes Cargo build
   outputs when a full cleanup is needed.
+- Screenshot capture is implemented in Rust through CoreGraphics instead of
+  shelling out to `screencapture`.
+- Stale renderer process cleanup is implemented in Rust instead of shelling out
+  to `pkill`.
 - App startup now uses a local PID guard under `target/vtube-studio-rs.pid` to
   prevent duplicate avatar windows during development; set
   `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only for deliberate debugging.
@@ -106,7 +132,7 @@ expression, physics, and tracking input.
   diagnostics.
 - Input first pass is implemented: mouse-driven head/eye parameters and
   microphone RMS-driven `ParamMouthOpenY`.
-- `scripts/run-metal.sh` provides a one-command local Metal run path with SDK
+- `cargo xtask run-metal` provides a one-command local Metal run path with SDK
   path detection for `public/CubismSdkForNative`.
 - `--probe-models` scans local `.model3.json` files without opening a window and
   reports parameter, part, drawable, masked drawable, maximum mask, blend-mode,
@@ -115,10 +141,10 @@ expression, physics, and tracking input.
   specific risk reasons such as dense clipping, many masked drawables, offscreen
   objects, extended blends, masked extended drawables, extended offscreens,
   masked offscreens, or inverted masks.
-- `scripts/probe-risk-models.sh` wraps the probe with SDK path auto-detection
+- `cargo xtask probe-risk-models` wraps the probe with SDK path auto-detection
   and writes `target/render-regression/probe.txt`; the render regression report
   embeds this output so each screenshot sweep carries the model risk context.
-- `scripts/sample-compatibility-sweep.sh` scans the official SDK sample
+- `cargo xtask sample-compatibility-sweep` scans the official SDK sample
   resources and writes `target/render-regression/compatibility-sweep.md`, a
   ranked compatibility report for deciding whether more stress models should be
   added to screenshot matrices.
@@ -338,46 +364,67 @@ Status: first pass done.
 Status: active.
 
 - Keep README/PRD updated.
-- Keep `scripts/run-metal.sh` as the recommended local run entry.
+- Keep `cargo xtask run-metal` as the recommended local run entry.
 - Keep `--probe-models` available for model compatibility checks.
-- Keep `scripts/capture-metal.sh` available for cropped renderer screenshots of
+- Keep `cargo xtask capture-metal` available for cropped renderer screenshots of
   high-risk models.
-- Keep `scripts/capture-risk-models.sh` available as the standard local visual
+- Keep `cargo xtask capture-risk-models` available as the standard local visual
   regression sweep for the default model, `Mao`, and `Ren`.
-- Keep `scripts/capture-mask-matrix.sh` available for the `Mao` shared-mask,
+- Keep `cargo xtask capture-mask-matrix` available for the `Mao` shared-mask,
   high-precision-mask, and no-mask visual comparison.
-- Keep `scripts/capture-offscreen-matrix.sh` available for the `Ren` offscreen
+- Keep `cargo xtask mao-mask-audit` available as the first review step before
+  changing clipping layout, mask matrix, inverted mask, or dense multi-mask
+  behavior.
+- Keep `cargo xtask capture-offscreen-matrix` available for the `Ren` offscreen
   and extended blend visual comparison.
-- Keep `scripts/ren-offscreen-audit.sh` available as the first review step
+- Keep `cargo xtask ren-offscreen-audit` available as the first review step
   before changing nested offscreen, offscreen mask, or extended blend
   compositing behavior.
-- Keep `scripts/capture-rice-stress.sh` available as an optional stress sweep
+- Keep `cargo xtask ren-visual-diff` available for pixel-diff review of Ren
+  shared, high-precision fallback, and no-mask captures before and after
+  compositor changes.
+- Keep `cargo xtask capture-rice-stress` available as an optional stress sweep
   for additive, inverted-mask, and translucent-drawable risks.
-- Keep `scripts/capture-rice-candidate.sh` as a compatibility alias for the
-  older candidate workflow.
-- Keep `scripts/capture-quality-matrix.sh` available for mipmap/anisotropic
+- Keep `cargo xtask rice-stress-audit` available as the first review step before
+  changing additive, inverted-mask, or translucent layering behavior.
+- Keep `cargo xtask capture-quality-matrix` available for mipmap/anisotropic
   sampling comparisons on the default model, `Mao`, and `Ren`.
-- Keep `scripts/capture-full-matrix.sh` available as the preferred full visual
+- Keep `cargo xtask quality-visual-diff` available for pixel-diff review of
+  mipmaps off/on and anisotropy 1/8 before changing texture sampling defaults.
+- Keep `cargo xtask capture-full-matrix` available as the preferred full visual
   regression entry: clean generated artifacts once, run the standard matrices,
   clean stale renderer processes between steps, and generate one final report.
-- Keep `scripts/probe-risk-models.sh` available for regenerating the model risk
+- Keep `cargo xtask probe-risk-models` available for regenerating the model risk
   probe included in the render regression report.
-- Keep `scripts/sample-compatibility-sweep.sh` available for official sample
+- Keep `cargo xtask sample-compatibility-sweep` available for official sample
   compatibility triage.
-- Keep `scripts/render-regression-report.sh` available as the common Markdown
+- Keep `cargo xtask render-regression-report` available as the common Markdown
   index for render regression screenshots, model risk probe output, and
   automatic review focus.
-- Keep `scripts/render-regression-report-safe.sh` available for bounded report
-  generation from capture scripts; use `VTUBE_RS_SKIP_REPORT=1` when chaining
-  captures manually.
-- Keep `scripts/clean-target.sh` available for generated artifact cleanup and
+- Use `VTUBE_RS_SKIP_REPORT=1` when chaining captures manually and generate the
+  final Markdown index with `cargo xtask render-regression-report`.
+- Keep `cargo xtask clean` available for generated artifact cleanup and
   optional full Cargo target cleanup.
-- Keep `scripts/run-space-test.sh` available for repeatable macOS Space and
+- Keep `cargo xtask run-space-test` available for repeatable macOS Space and
   display sleep/wake reliability checks with an end-of-run renderer event
   summary and Markdown report.
 - Improve missing SDK/model diagnostics.
 - Keep diagnostics overlay visibility controlled before startup rather than by
   runtime hotkeys.
+- Shell wrapper migration is complete: local developer tooling now runs through
+  Cargo-managed `cargo xtask ...` commands instead of repository shell scripts.
+- Phase the `xtask` migration:
+  1. Create the `xtask` crate and command dispatcher. Done.
+  2. Migrate pure text/report workflows. Done.
+  3. Migrate visual diff workflows to Rust using the `image` crate. Done.
+  4. Migrate capture matrix orchestration to Rust. Done.
+  5. Migrate macOS screenshot capture to Rust/CoreGraphics. Done; window ID
+     lookup no longer uses a Swift subprocess, actual window PNG capture no
+     longer uses `screencapture`, and stale process cleanup uses Rust process
+     management instead of `pkill`.
+- Keep the desired end-state command shape as `cargo xtask run-metal`,
+  `cargo xtask capture-full-matrix`, `cargo xtask run-space-test`, and
+  `cargo xtask clean --generated`.
 
 ### Milestone E: Rendering And Clipping Quality
 
@@ -394,26 +441,48 @@ Status: pending.
   sample is present. It specifically covers additive, inverted-mask, and
   translucent-drawable risk not fully covered by `Mao` or `Ren`, and should be
   skipped automatically when the sample is missing.
+- Keep `target/render-regression/rice-stress-audit.md` as the focused Rice
+  parity report for additive drawables, inverted masks, translucent layering,
+  and manual pass/investigate decisions.
+- Keep Rice eye clipping covered: shared and high-precision masks should
+  preserve the teal iris drawables that disappear when helper mask source
+  opacity is incorrectly applied.
 - Use the `Mao` mask matrix screenshots as the first visual gate for clipping
   changes.
+- Keep `target/render-regression/mao-mask-audit.md` as the focused Mao parity
+  report for dense clipping, inverted masks, eye masks, capture references, and
+  manual pass/investigate decisions.
 - Use the `Ren` offscreen matrix screenshots as the first visual gate for
   offscreen and extended blend changes.
 - Keep Ren risk probe details visible in `target/render-regression/report.md`,
   especially masked extended drawables, extended offscreens, and masked
   offscreens.
 - Keep `target/render-regression/ren-offscreen-audit.md` as the focused Ren
-  parity report for offscreen render order, nested depth, masks, and extended
-  blend distribution.
+  parity report for offscreen render order, nested depth, masks, extended blend
+  distribution, begin/snapshot/flush timeline, automatic plan checks, and
+  manual pass/investigate decisions.
+- Keep `target/render-regression/ren-visual-diff.md` as the Ren visual
+  difference report for shared/high-precision fallback/no-mask comparisons,
+  including focused regions around eyes, hair shadow, transparent torso, and
+  pupil offscreens.
 - Keep high precision mask fallback events visible in
   `target/render-regression/report.md`, especially offscreen mask and nested
   offscreen counts.
 - Use the quality matrix screenshots as the first visual gate for optional
   mipmaps/anisotropic sampling changes.
+- Keep `target/render-regression/quality-visual-diff.md` as the focused
+  mipmap off/on and anisotropy 1/8 difference report for the default model,
+  `Mao`, and `Ren`.
+- Keep anisotropy-8 quality captures visible in the main render regression
+  contact sheet and Review Focus, not only in the standalone quality diff.
 - Use `target/render-regression/report.md` as the standard visual review index.
 - Keep the report's Review Focus section as the first place to inspect after a
   matrix run.
 - Keep the report's Visual Contact Sheet as the fastest first pass for spotting
   clipping, offscreen, optional Rice stress, and mipmap regressions.
+- Keep the report's Manual Review Record as the handoff point for deciding
+  whether to proceed with renderer changes, investigate a regression, or rerun
+  the full matrix.
 - Keep Retina/window resize behavior covered by Metal layer geometry sync,
   backing-scale sync, and capture logs.
 
@@ -422,7 +491,7 @@ Status: pending.
 Status: first pass done.
 
 - Keep the repeatable Space-switch checklist and Markdown report workflow.
-- Use `scripts/run-space-test.sh` for future display sleep/wake recovery testing
+- Use `cargo xtask run-space-test` for future display sleep/wake recovery testing
   and event summaries/reports.
 - Extend structured renderer lifecycle logging as new macOS failure cases are
   found.
@@ -442,6 +511,7 @@ show = true
 disable_masks = false
 high_precision_masks = false
 atlas_mipmaps = false
+atlas_anisotropy = 1
 debug_texture_mode = "none"
 hidden_drawables = []
 hidden_parts = []

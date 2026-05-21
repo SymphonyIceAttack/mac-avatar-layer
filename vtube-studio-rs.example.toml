@@ -5,6 +5,7 @@ show = true
 disable_masks = false
 high_precision_masks = false
 atlas_mipmaps = false
+atlas_anisotropy = 1
 debug_texture_mode = "none"
 hidden_drawables = []
 hidden_parts = []

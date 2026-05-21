@@ -200,6 +200,9 @@ fn probe_models(roots: &[String]) -> Result<(), String> {
                 for detail in &summary.offscreen_details {
                     println!("  {detail}");
                 }
+                for detail in &summary.offscreen_plan_details {
+                    println!("  {detail}");
+                }
                 for detail in &summary.drawable_details {
                     println!("  {detail}");
                 }
@@ -231,6 +234,7 @@ struct ModelProbeSummary {
     offscreen_count: i32,
     risk_details: Vec<String>,
     offscreen_details: Vec<String>,
+    offscreen_plan_details: Vec<String>,
     drawable_details: Vec<String>,
 }
 
@@ -268,6 +272,7 @@ impl ModelProbeSummary {
             offscreen_count: 0,
             risk_details: Vec::new(),
             offscreen_details: Vec::new(),
+            offscreen_plan_details: Vec::new(),
             drawable_details: Vec::new(),
         }
     }
@@ -318,6 +323,7 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
                 )
             })
             .collect(),
+        offscreen_plan_details: offscreen_plan_details(&drawables, &offscreens, &parts),
         drawable_details: drawables
             .iter()
             .filter(|drawable| drawable.opacity > 0.001)
@@ -342,6 +348,52 @@ fn probe_model(model: &live2d_model::Live2dModel) -> Result<ModelProbeSummary, S
                 })
             })
             .take(16)
+            .chain(
+                drawables
+                    .iter()
+                    .filter(|drawable| {
+                        drawable
+                            .parent_part_id
+                            .as_deref()
+                            .is_some_and(|part| part.to_ascii_lowercase().contains("eye"))
+                    })
+                    .map(|drawable| {
+                        format!(
+                            "eye drawable #{} {} part {} render {} blend {} tex {} opacity {:.3} masks {} mask_ids {:?} inverted_mask={} visible={}",
+                            drawable.index,
+                            drawable.id,
+                            drawable.parent_part_id.as_deref().unwrap_or("-"),
+                            drawable.render_order,
+                            drawable.blend_mode.description(),
+                            drawable.texture_index,
+                            drawable.opacity,
+                            drawable.masks.len(),
+                            drawable.masks,
+                            drawable.flags.inverted_mask,
+                            drawable.flags.visible
+                        )
+                    }),
+            )
+            .chain(
+                drawables
+                    .iter()
+                    .filter(|drawable| drawable.flags.inverted_mask)
+                    .map(|drawable| {
+                        format!(
+                            "inverted drawable #{} {} part {} render {} blend {} tex {} opacity {:.3} masks {} mask_ids {:?} visible={}",
+                            drawable.index,
+                            drawable.id,
+                            drawable.parent_part_id.as_deref().unwrap_or("-"),
+                            drawable.render_order,
+                            drawable.blend_mode.description(),
+                            drawable.texture_index,
+                            drawable.opacity,
+                            drawable.masks.len(),
+                            drawable.masks,
+                            drawable.flags.visible
+                        )
+                    }),
+            )
             .chain(
                 drawables
                     .iter()
@@ -595,6 +647,187 @@ fn part_is_descendant_of(
         guard += 1;
     }
     false
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+#[derive(Clone, Copy)]
+enum ProbeRenderObject {
+    Drawable(usize),
+    Offscreen(usize),
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn offscreen_plan_details(
+    drawables: &[cubism::CubismDrawableInfo],
+    offscreens: &[cubism::CubismOffscreenInfo],
+    parts: &[cubism::CubismPartInfo],
+) -> Vec<String> {
+    if offscreens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut objects = drawables
+        .iter()
+        .enumerate()
+        .map(|(index, drawable)| (drawable.render_order, ProbeRenderObject::Drawable(index)))
+        .chain(offscreens.iter().enumerate().map(|(index, offscreen)| {
+            (offscreen.render_order, ProbeRenderObject::Offscreen(index))
+        }))
+        .collect::<Vec<_>>();
+    objects.sort_by_key(|(render_order, _)| *render_order);
+
+    let mut details = Vec::new();
+    let mut active_offscreens = Vec::<usize>::new();
+
+    for (_, object) in objects {
+        match object {
+            ProbeRenderObject::Drawable(drawable_index) => {
+                let drawable = &drawables[drawable_index];
+                while active_offscreens.last().is_some_and(|offscreen_index| {
+                    !part_is_descendant_of(
+                        drawable.parent_part_index,
+                        offscreens[*offscreen_index].owner_part_index,
+                        parts,
+                    )
+                }) {
+                    push_probe_flush_detail(
+                        &mut details,
+                        active_offscreens.pop().expect("checked by last"),
+                        active_offscreens.last().copied(),
+                        offscreens,
+                        "drawable_left_owner_part",
+                    );
+                }
+
+                let target = active_offscreens.last().copied();
+                if matches!(
+                    drawable.blend_mode,
+                    cubism::CubismBlendMode::Extended { .. }
+                ) && drawable.flags.visible
+                    && drawable.opacity > 0.0
+                {
+                    details.push(format!(
+                        "offscreen_plan snapshot target {} reason extended_drawable #{} render {} blend {}",
+                        probe_target_label(target, offscreens),
+                        drawable.index,
+                        drawable.render_order,
+                        drawable.blend_mode.description()
+                    ));
+                }
+                if target.is_some()
+                    || !drawable.masks.is_empty()
+                    || matches!(
+                        drawable.blend_mode,
+                        cubism::CubismBlendMode::Extended { .. }
+                    )
+                {
+                    details.push(format!(
+                        "offscreen_plan draw drawable #{} part {} target {} render {} blend {} opacity {:.3} masks {} visible={}",
+                        drawable.index,
+                        drawable.parent_part_id.as_deref().unwrap_or("-"),
+                        probe_target_label(target, offscreens),
+                        drawable.render_order,
+                        drawable.blend_mode.description(),
+                        drawable.opacity,
+                        drawable.masks.len(),
+                        drawable.flags.visible
+                    ));
+                }
+            }
+            ProbeRenderObject::Offscreen(offscreen_index) => {
+                let offscreen = &offscreens[offscreen_index];
+                while active_offscreens.last().is_some_and(|active_index| {
+                    !part_is_descendant_of(
+                        offscreen.owner_part_index,
+                        offscreens[*active_index].owner_part_index,
+                        parts,
+                    )
+                }) {
+                    push_probe_flush_detail(
+                        &mut details,
+                        active_offscreens.pop().expect("checked by last"),
+                        active_offscreens.last().copied(),
+                        offscreens,
+                        "offscreen_left_parent_part",
+                    );
+                }
+
+                active_offscreens.push(offscreen_index);
+                details.push(format!(
+                    "offscreen_plan begin offscreen #{} owner {} depth {} render {} blend {} opacity {:.3} masks {}",
+                    offscreen.index,
+                    probe_part_label(offscreen.owner_part_index, parts),
+                    offscreen_depth(offscreen.owner_part_index, offscreens, parts),
+                    offscreen.render_order,
+                    offscreen.blend_mode.description(),
+                    offscreen.opacity,
+                    offscreen.masks.len()
+                ));
+            }
+        }
+    }
+
+    while let Some(offscreen_index) = active_offscreens.pop() {
+        push_probe_flush_detail(
+            &mut details,
+            offscreen_index,
+            active_offscreens.last().copied(),
+            offscreens,
+            "end_of_render_order",
+        );
+    }
+
+    details
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn push_probe_flush_detail(
+    details: &mut Vec<String>,
+    offscreen_index: usize,
+    parent_target: Option<usize>,
+    offscreens: &[cubism::CubismOffscreenInfo],
+    reason: &str,
+) {
+    let offscreen = &offscreens[offscreen_index];
+    if matches!(
+        offscreen.blend_mode,
+        cubism::CubismBlendMode::Extended { .. }
+    ) && offscreen.opacity > 0.0
+    {
+        details.push(format!(
+            "offscreen_plan snapshot target {} reason extended_offscreen #{} render {} blend {}",
+            probe_target_label(parent_target, offscreens),
+            offscreen.index,
+            offscreen.render_order,
+            offscreen.blend_mode.description()
+        ));
+    }
+    details.push(format!(
+        "offscreen_plan flush offscreen #{} parent {} reason {} render {} blend {} opacity {:.3} masks {}",
+        offscreen.index,
+        probe_target_label(parent_target, offscreens),
+        reason,
+        offscreen.render_order,
+        offscreen.blend_mode.description(),
+        offscreen.opacity,
+        offscreen.masks.len()
+    ));
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn probe_part_label(part_index: i32, parts: &[cubism::CubismPartInfo]) -> String {
+    parts
+        .get(part_index.max(0) as usize)
+        .map(|part| format!("{}({})", part.id, part.index))
+        .unwrap_or_else(|| format!("-({part_index})"))
+}
+
+#[cfg(all(target_os = "macos", feature = "cubism-core"))]
+fn probe_target_label(target: Option<usize>, offscreens: &[cubism::CubismOffscreenInfo]) -> String {
+    target
+        .and_then(|index| offscreens.get(index))
+        .map(|offscreen| format!("#{}", offscreen.index))
+        .unwrap_or_else(|| "main".to_string())
 }
 
 #[cfg(all(target_os = "macos", feature = "cubism-core"))]

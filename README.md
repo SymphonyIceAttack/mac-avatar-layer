@@ -85,10 +85,60 @@ public/
 
 ## Run
 
+### Tooling Dependencies
+
+The local helper commands are intended for macOS development. Before running
+capture, audit, or Space reliability commands, make sure these tools are
+available:
+
+- Rust toolchain with `cargo`.
+- Xcode Command Line Tools for standard macOS developer utilities.
+- Screen Recording permission for the terminal/Codex app may be required on
+  the first capture run.
+- Window lookup and screenshot capture are implemented in Rust through
+  CoreGraphics, so capture commands no longer require `swift` or
+  `screencapture`.
+- Stale renderer process cleanup is implemented in Rust, so run/capture
+  commands no longer require `pkill`.
+
+Install missing macOS tools with:
+
+```bash
+xcode-select --install
+```
+
+The Rust-native audit and visual diff commands do not require ImageMagick.
+`public/CubismSdkForNative` and local model assets are still required for
+commands that load official sample models such as `Mao`, `Ren`, and `Rice`.
+
+Local tooling is exposed through the Rust `xtask` crate:
+
+```bash
+cargo xtask clean --generated
+cargo xtask clean --all
+cargo xtask capture-full-matrix
+cargo xtask capture-metal public/model/0.model3.json
+cargo xtask capture-mask-matrix
+cargo xtask capture-offscreen-matrix
+cargo xtask capture-quality-matrix
+cargo xtask capture-risk-models
+cargo xtask capture-rice-stress
+cargo xtask mao-mask-audit
+cargo xtask probe-risk-models public/model
+cargo xtask quality-visual-diff
+cargo xtask ren-visual-diff
+cargo xtask ren-offscreen-audit
+cargo xtask render-regression-report
+cargo xtask rice-stress-audit
+cargo xtask run-metal
+cargo xtask run-space-test
+cargo xtask sample-compatibility-sweep
+```
+
 The recommended local command is:
 
 ```bash
-./scripts/run-metal.sh
+cargo xtask run-metal
 ```
 
 It defaults to `public/model/0.model3.json`, auto-detects
@@ -97,13 +147,13 @@ It defaults to `public/model/0.model3.json`, auto-detects
 instances before launching. Pass a different model path as the first argument:
 
 ```bash
-./scripts/run-metal.sh public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json
+cargo xtask run-metal public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json
 ```
 
 To keep old instances alive during development:
 
 ```bash
-RUN_METAL_KILL_OLD=0 ./scripts/run-metal.sh
+RUN_METAL_KILL_OLD=0 cargo xtask run-metal
 ```
 
 Manual equivalent:
@@ -117,8 +167,8 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 Probe all local models without opening a window:
 
 ```bash
-./scripts/probe-risk-models.sh
-./scripts/sample-compatibility-sweep.sh
+cargo xtask probe-risk-models
+cargo xtask sample-compatibility-sweep
 
 CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
 CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
@@ -131,79 +181,104 @@ offscreen counts. It also labels each model `risk:low`, `risk:medium`, or
 `risk:high` for renderer compatibility triage. High-risk models print the
 specific reason, such as dense clipping, many masked drawables, offscreen
 objects, extended blends, masked extended drawables, extended offscreens,
-masked offscreens, or inverted masks. The script writes
+masked offscreens, or inverted masks. `cargo xtask probe-risk-models` writes
 `target/render-regression/probe.txt`, and the render regression report embeds
 that probe output.
-`sample-compatibility-sweep.sh` scans the official SDK sample resources and
-writes `target/render-regression/compatibility-sweep.md`, which ranks models by
-risk shape and recommends whether the screenshot matrix needs another stress
-model beyond `Mao` and `Ren`.
+`cargo xtask sample-compatibility-sweep` scans the official SDK sample resources
+and writes `target/render-regression/compatibility-sweep.md`, which ranks
+models by risk shape and recommends whether the screenshot matrix needs another
+stress model beyond `Mao` and `Ren`.
 
 You can also set `LIVE2D_CUBISM_SDK_NATIVE_DIR` to point at a different SDK root.
 
 Capture a cropped Metal renderer screenshot for visual regression checks:
 
 ```bash
-./scripts/capture-metal.sh public/CubismSdkForNative/Samples/Resources/Mao/Mao.model3.json
-./scripts/capture-metal.sh public/CubismSdkForNative/Samples/Resources/Ren/Ren.model3.json
-./scripts/capture-risk-models.sh
-./scripts/capture-mask-matrix.sh
-./scripts/capture-offscreen-matrix.sh
-./scripts/ren-offscreen-audit.sh
-./scripts/capture-rice-candidate.sh
-./scripts/capture-rice-stress.sh
-./scripts/capture-quality-matrix.sh
-./scripts/capture-full-matrix.sh
+cargo xtask capture-metal public/CubismSdkForNative/Samples/Resources/Mao/Mao.model3.json
+cargo xtask capture-metal public/CubismSdkForNative/Samples/Resources/Ren/Ren.model3.json
+cargo xtask capture-risk-models
+cargo xtask capture-mask-matrix
+cargo xtask mao-mask-audit
+cargo xtask capture-offscreen-matrix
+cargo xtask ren-offscreen-audit
+cargo xtask ren-visual-diff
+cargo xtask capture-rice-stress
+cargo xtask rice-stress-audit
+cargo xtask capture-quality-matrix
+cargo xtask quality-visual-diff
+cargo xtask capture-full-matrix
 ```
 
-Screenshots are written to `target/render-regression/`. The script reuses the
-same SDK auto-detection as `run-metal.sh`, waits for the app window, captures
-only that window, and closes the launched process. `capture-risk-models.sh`
+Screenshots are written to `target/render-regression/`. The capture command
+reuses the same SDK auto-detection as `cargo xtask run-metal`, waits for the
+app window, captures only that window, and closes the launched process.
+`cargo xtask capture-risk-models`
 captures the local model plus the SDK `Mao` and `Ren` stress models, preserving
 timestamped screenshots and refreshing `latest-*.png` copies for quick visual
 comparison after renderer changes. Set `WAIT_SECONDS` if a machine needs longer
 for the first build/startup, or `POST_WINDOW_WAIT_SECONDS` if the screenshot
 should wait longer for diagnostics and motion to settle after the window appears.
-`capture-mask-matrix.sh` temporarily switches the local renderer config and
+`cargo xtask capture-mask-matrix` temporarily switches the local renderer config and
 captures the `Mao` stress model in shared-mask, high-precision-mask, and
 no-mask modes under `target/render-regression/mask-matrix/`, then restores the
 previous `vtube-studio-rs.toml`.
-`capture-offscreen-matrix.sh` does the same for the `Ren` offscreen/extended
+`cargo xtask mao-mask-audit` writes `target/render-regression/mao-mask-audit.md`, a
+focused report for Mao's dense clipping, inverted masks, eye masks, capture
+references, and manual pass/investigate decision before changing clipping
+layout or mask matrix behavior.
+`cargo xtask capture-offscreen-matrix` does the same for the `Ren` offscreen/extended
 blend stress model under `target/render-regression/offscreen-matrix/`.
-`ren-offscreen-audit.sh` writes
+`cargo xtask ren-offscreen-audit` writes
 `target/render-regression/ren-offscreen-audit.md`, a focused report for Ren's
 nested offscreen, masked offscreen, extended offscreen, and extended drawable
-distribution before changing the offscreen compositor.
-`capture-rice-stress.sh` captures `Rice` in shared, high-precision, and
-no-mask modes under `target/render-regression/rice-candidate/` when the SDK
-sample is available. Rice is an optional stress model in the full matrix: it
-covers additive, inverted-mask, and translucent-drawable risks, and is skipped
-automatically when the local SDK sample is missing. `capture-rice-candidate.sh`
-remains as a compatibility alias for the earlier candidate workflow.
+distribution, offscreen begin/snapshot/flush timeline, capture references, and
+automatic plan checks plus a manual pass/investigate decision before changing
+the offscreen compositor.
+`cargo xtask ren-visual-diff` writes `target/render-regression/ren-visual-diff.md` and
+diff heatmaps under `target/render-regression/ren-visual-diff/`, comparing
+shared, high-precision fallback, and no-mask captures across the whole image
+plus face/eyes, hair shadow, transparent torso, and pupil offscreen regions.
+`cargo xtask capture-rice-stress` captures `Rice` in shared, high-precision, and
+no-mask modes under `target/render-regression/rice-stress/` when the SDK sample
+is available. Rice is an optional stress model in the full matrix: it covers
+additive, inverted-mask, and translucent-drawable risks, and is skipped
+automatically when the local SDK sample is missing.
+`cargo xtask rice-stress-audit` writes `target/render-regression/rice-stress-audit.md`,
+a focused report for Rice's additive drawables, inverted masks, translucent
+layering, capture references, and manual pass/investigate decision before
+changing blend or mask behavior.
 Offscreen models currently fall back from high-precision masks to shared masks;
 the overlay marks this as `mask shared(offscreen)`.
 The corresponding `high_precision_mask_fallback` renderer event includes
 offscreen, masked offscreen, extended offscreen, masked extended drawable,
 nested offscreen, and maximum offscreen depth counts.
-`capture-quality-matrix.sh` captures the default model plus `Mao` and `Ren`
-with texture atlas mipmaps off/on under `target/render-regression/quality-matrix/`
-so texture shimmer and atlas island bleed can be compared.
-Each capture script refreshes `target/render-regression/report.md` through a
-bounded report wrapper. Set `VTUBE_RS_SKIP_REPORT=1` when chaining several
-capture scripts and generate the report once at the end.
-`capture-full-matrix.sh` is the preferred complete visual sweep: it cleans
+`cargo xtask capture-quality-matrix` captures the default model plus `Mao` and `Ren`
+with texture atlas mipmaps off/on and mipmaps-on-anisotropy-8 under
+`target/render-regression/quality-matrix/` so texture shimmer, oblique texture
+sampling, and atlas island bleed can be compared.
+`cargo xtask quality-visual-diff` writes
+`target/render-regression/quality-visual-diff.md` and diff heatmaps under
+`target/render-regression/quality-visual-diff/`, comparing mipmaps off/on and
+anisotropy 1/8 for the default model, `Mao`, and `Ren` across whole-image and
+focused avatar regions. The main render regression report also links the
+`mipmaps-on-aniso8` screenshots in its review focus and contact sheet.
+Each capture command refreshes `target/render-regression/report.md` unless
+`VTUBE_RS_SKIP_REPORT=1` is set for chained captures.
+`cargo xtask capture-full-matrix` is the preferred complete visual sweep: it cleans
 generated render artifacts once, runs the risk, mask, offscreen, optional Rice
 stress, and quality matrices with report generation skipped inside each step,
-performs process cleanup between steps, and then writes one final Markdown
-report.
+performs process cleanup between steps, writes Mao/Ren/Rice focused audit
+reports plus the Ren and quality visual diff reports, and then writes one final
+Markdown report.
 The report is a Markdown index with latest screenshot paths, manual review
-checklist, embedded thumbnail previews/contact sheet, model risk probe output,
-automatic review focus, renderer fallback events, and recent renderer events
-from capture logs.
+checklist, embedded thumbnail previews/contact sheet, a structured manual
+review record, model risk probe output, automatic review focus, renderer
+fallback events, MSAA/edge-quality summaries, focused audit summaries, and
+recent renderer events from capture logs.
 Generated test artifacts under `target/render-regression/` and
-`target/space-test/` are cleaned automatically before these scripts run. Set
+`target/space-test/` are cleaned automatically before these commands run. Set
 `VTUBE_RS_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
-Run `./scripts/clean-target.sh --all` when you also want to remove Cargo build
+Run `cargo xtask clean --all` when you also want to remove Cargo build
 outputs.
 
 Metal renderer lifecycle logs use `renderer_event=...` records so Space-switch
@@ -218,7 +293,7 @@ and sleep/wake testing can be checked from the terminal. Useful events include
 The app prevents duplicate local avatar instances with
 `target/vtube-studio-rs.pid`; set `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only
 when intentionally debugging multiple windows.
-`scripts/run-space-test.sh` writes machine logs to `target/space-test/*.log`
+`cargo xtask run-space-test` writes machine logs to `target/space-test/*.log`
 and a Markdown checklist/report to `target/space-test/*.md`.
 
 ## App Configuration
@@ -236,6 +311,7 @@ show = true
 disable_masks = false
 high_precision_masks = false
 atlas_mipmaps = false
+atlas_anisotropy = 1
 debug_texture_mode = "none"
 hidden_drawables = []
 hidden_parts = []
@@ -265,7 +341,7 @@ smoothing = 18.0
 ```
 
 SDK path variables such as `LIVE2D_CUBISM_SDK_NATIVE_DIR`,
-`CUBISM_CORE_LIB_DIR`, and `CUBISM_CORE_INCLUDE_DIR` remain build/run-script
+`CUBISM_CORE_LIB_DIR`, and `CUBISM_CORE_INCLUDE_DIR` remain build/run command
 inputs because they are needed before the app starts.
 
 ## Test
@@ -281,7 +357,7 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
 
 ## Manual Space Test
 
-1. Run `./scripts/run-space-test.sh`.
+1. Run `cargo xtask run-space-test`.
 2. Move the avatar window where it remains visible.
 3. Switch between macOS Desktops/Spaces several times.
 4. Watch the diagnostics overlay:
@@ -295,8 +371,8 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
    pairs.
 7. After display sleep/wake, check whether `renderer_event=display_wake_inferred`
    appears and whether FPS/Frames recover afterward.
-8. Press `Ctrl-C` in the terminal. The script prints an event summary and saves
-   the full log plus a Markdown report under `target/space-test/`.
+8. Press `Ctrl-C` in the terminal. The command prints an event summary and
+   saves the full log plus a Markdown report under `target/space-test/`.
 9. Open the generated `space-test-*.md` report and fill in the manual checklist.
    Use the automatic assessment table to decide whether the next fix should
    focus on CAMetalLayer recovery, window behavior, or normal transition stalls.
