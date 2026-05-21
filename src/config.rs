@@ -47,12 +47,24 @@ impl AppConfig {
     }
 }
 
-fn default_config_path() -> &'static str {
+pub fn active_config_path() -> &'static str {
     if cfg!(debug_assertions) {
         DEVELOPMENT_CONFIG_PATH
     } else {
         BUILD_CONFIG_PATH
     }
+}
+
+pub fn active_select_model_flag() -> &'static str {
+    if cfg!(debug_assertions) {
+        "--dev"
+    } else {
+        "--build"
+    }
+}
+
+fn default_config_path() -> &'static str {
+    active_config_path()
 }
 
 fn default_runtime_profile() -> RuntimeProfile {
@@ -197,20 +209,39 @@ impl Default for MotionConfig {
 pub struct InputConfig {
     pub mouse: MouseConfig,
     pub microphone: MicrophoneConfig,
+    pub camera: CameraConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MouseConfig {
     pub enabled: bool,
+    pub coordinate_space: String,
     pub smoothing: f32,
+    pub dead_zone: f32,
+    pub invert_x: bool,
+    pub invert_y: bool,
+    pub eye_x_range: f32,
+    pub eye_y_range: f32,
+    pub angle_x_degrees: f32,
+    pub angle_y_degrees: f32,
+    pub angle_z_degrees: f32,
 }
 
 impl Default for MouseConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            coordinate_space: "screen".to_string(),
             smoothing: 10.0,
+            dead_zone: 0.02,
+            invert_x: false,
+            invert_y: false,
+            eye_x_range: 1.0,
+            eye_y_range: 1.0,
+            angle_x_degrees: 30.0,
+            angle_y_degrees: 22.0,
+            angle_z_degrees: -12.0,
         }
     }
 }
@@ -219,18 +250,78 @@ impl Default for MouseConfig {
 #[serde(default)]
 pub struct MicrophoneConfig {
     pub enabled: bool,
+    pub parameter: String,
     pub gain: f32,
     pub noise_gate: f32,
+    pub response_curve: f32,
     pub smoothing: f32,
+    pub attack: f32,
+    pub release: f32,
+    pub min_open: f32,
+    pub max_open: f32,
 }
 
 impl Default for MicrophoneConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            gain: 7.0,
-            noise_gate: 0.025,
+            parameter: "ParamMouthOpenY".to_string(),
+            gain: 10.0,
+            noise_gate: 0.008,
+            response_curve: 0.6,
             smoothing: 18.0,
+            attack: 32.0,
+            release: 10.0,
+            min_open: 0.0,
+            max_open: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CameraConfig {
+    pub enabled: bool,
+    pub device: String,
+    pub target_fps: u32,
+    pub smoothing: f32,
+    pub dead_zone: f32,
+    pub invert_x: bool,
+    pub invert_y: bool,
+    pub angle_x_degrees: f32,
+    pub angle_y_degrees: f32,
+    pub angle_z_degrees: f32,
+    pub eye_x_range: f32,
+    pub eye_y_range: f32,
+    pub mouth_enabled: bool,
+    pub mouth_gain: f32,
+    pub mouth_min_open: f32,
+    pub mouth_max_open: f32,
+    pub mouth_combine: String,
+    pub blink_from_camera: bool,
+}
+
+impl Default for CameraConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: String::new(),
+            target_fps: 30,
+            smoothing: 12.0,
+            dead_zone: 0.03,
+            invert_x: false,
+            invert_y: false,
+            angle_x_degrees: 30.0,
+            angle_y_degrees: 22.0,
+            angle_z_degrees: 12.0,
+            eye_x_range: 1.0,
+            eye_y_range: 1.0,
+            mouth_enabled: true,
+            mouth_gain: 1.4,
+            mouth_min_open: 0.0,
+            mouth_max_open: 1.0,
+            mouth_combine: "max".to_string(),
+            blink_from_camera: false,
         }
     }
 }
@@ -280,12 +371,48 @@ blink_interval = 4.2
 
 [input.mouse]
 enabled = true
+coordinate_space = "screen"
 smoothing = 12.5
+dead_zone = 0.08
+invert_x = true
+invert_y = true
+eye_x_range = 0.8
+eye_y_range = 0.7
+angle_x_degrees = 24.0
+angle_y_degrees = 16.0
+angle_z_degrees = -8.0
 
 [input.microphone]
 enabled = true
+parameter = "ParamMouthOpenY"
 gain = 8.0
 noise_gate = 0.05
+response_curve = 0.55
+smoothing = 17.0
+attack = 30.0
+release = 10.0
+min_open = 0.02
+max_open = 0.85
+
+[input.camera]
+enabled = true
+device = "FaceTime HD Camera"
+target_fps = 24
+smoothing = 14.0
+dead_zone = 0.04
+invert_x = true
+invert_y = true
+angle_x_degrees = 26.0
+angle_y_degrees = 18.0
+angle_z_degrees = 10.0
+eye_x_range = 0.9
+eye_y_range = 0.8
+mouth_enabled = false
+mouth_gain = 1.8
+mouth_min_open = 0.05
+mouth_max_open = 0.9
+mouth_combine = "microphone"
+blink_from_camera = true
 
 [overrides]
 mouth_open = 0.7
@@ -316,11 +443,44 @@ mouth_open = 0.7
         assert_eq!(config.motion.blink_interval, 4.2);
         assert_eq!(config.motion.blink_duration, 0.18);
         assert!(config.input.mouse.enabled);
+        assert_eq!(config.input.mouse.coordinate_space, "screen");
         assert_eq!(config.input.mouse.smoothing, 12.5);
+        assert_eq!(config.input.mouse.dead_zone, 0.08);
+        assert!(config.input.mouse.invert_x);
+        assert!(config.input.mouse.invert_y);
+        assert_eq!(config.input.mouse.eye_x_range, 0.8);
+        assert_eq!(config.input.mouse.eye_y_range, 0.7);
+        assert_eq!(config.input.mouse.angle_x_degrees, 24.0);
+        assert_eq!(config.input.mouse.angle_y_degrees, 16.0);
+        assert_eq!(config.input.mouse.angle_z_degrees, -8.0);
         assert!(config.input.microphone.enabled);
+        assert_eq!(config.input.microphone.parameter, "ParamMouthOpenY");
         assert_eq!(config.input.microphone.gain, 8.0);
         assert_eq!(config.input.microphone.noise_gate, 0.05);
-        assert_eq!(config.input.microphone.smoothing, 18.0);
+        assert_eq!(config.input.microphone.response_curve, 0.55);
+        assert_eq!(config.input.microphone.smoothing, 17.0);
+        assert_eq!(config.input.microphone.attack, 30.0);
+        assert_eq!(config.input.microphone.release, 10.0);
+        assert_eq!(config.input.microphone.min_open, 0.02);
+        assert_eq!(config.input.microphone.max_open, 0.85);
+        assert!(config.input.camera.enabled);
+        assert_eq!(config.input.camera.device, "FaceTime HD Camera");
+        assert_eq!(config.input.camera.target_fps, 24);
+        assert_eq!(config.input.camera.smoothing, 14.0);
+        assert_eq!(config.input.camera.dead_zone, 0.04);
+        assert!(config.input.camera.invert_x);
+        assert!(config.input.camera.invert_y);
+        assert_eq!(config.input.camera.angle_x_degrees, 26.0);
+        assert_eq!(config.input.camera.angle_y_degrees, 18.0);
+        assert_eq!(config.input.camera.angle_z_degrees, 10.0);
+        assert_eq!(config.input.camera.eye_x_range, 0.9);
+        assert_eq!(config.input.camera.eye_y_range, 0.8);
+        assert!(!config.input.camera.mouth_enabled);
+        assert_eq!(config.input.camera.mouth_gain, 1.8);
+        assert_eq!(config.input.camera.mouth_min_open, 0.05);
+        assert_eq!(config.input.camera.mouth_max_open, 0.9);
+        assert_eq!(config.input.camera.mouth_combine, "microphone");
+        assert!(config.input.camera.blink_from_camera);
         assert_eq!(config.overrides.mouth_open, Some(0.7));
         assert_eq!(config.overrides.mouth_form, None);
     }

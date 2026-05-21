@@ -20,7 +20,7 @@ impl MicrophoneInput {
         match Self::new() {
             Ok(input) => Some(input),
             Err(error) => {
-                eprintln!("Failed to start microphone input: {error}");
+                eprintln!("{}", microphone_startup_failure_message(&error));
                 None
             }
         }
@@ -77,10 +77,28 @@ where
                 let level = rms_level(data, channels);
                 level_bits.store(level.to_bits(), Ordering::Relaxed);
             },
-            |error| eprintln!("Microphone stream error: {error}"),
+            |error| eprintln!("{}", microphone_stream_error_message(&error.to_string())),
             None,
         )
         .map_err(|error| format!("Failed to build microphone stream: {error}"))
+}
+
+fn microphone_startup_failure_message(error: &str) -> String {
+    format!(
+        "Microphone input is enabled but could not start.\n\
+         Cause: {error}\n\
+         macOS: open System Settings > Privacy & Security > Microphone, then allow the terminal, Codex, or packaged app that launches vtube-studio-rs.\n\
+         To keep the avatar running without microphone input, set [input.microphone].enabled = false in the active profile config.\n\
+         Development config: vtube-studio-rs.dev.toml\n\
+         Build config: vtube-studio-rs.build.toml"
+    )
+}
+
+fn microphone_stream_error_message(error: &str) -> String {
+    format!(
+        "Microphone stream error: {error}\n\
+         If mouth tracking stops, check macOS Microphone permission or disable [input.microphone] in the active profile config."
+    )
 }
 
 fn rms_level<T>(data: &[T], channels: usize) -> f32
@@ -104,4 +122,29 @@ where
     }
 
     (sum / frame_count as f32).sqrt().clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_failure_message_points_to_macos_permission_and_configs() {
+        let message = microphone_startup_failure_message("permission denied");
+
+        assert!(message.contains("permission denied"));
+        assert!(message.contains("System Settings > Privacy & Security > Microphone"));
+        assert!(message.contains("[input.microphone].enabled = false"));
+        assert!(message.contains("vtube-studio-rs.dev.toml"));
+        assert!(message.contains("vtube-studio-rs.build.toml"));
+    }
+
+    #[test]
+    fn stream_error_message_mentions_permission_or_disable_path() {
+        let message = microphone_stream_error_message("device removed");
+
+        assert!(message.contains("device removed"));
+        assert!(message.contains("macOS Microphone permission"));
+        assert!(message.contains("[input.microphone]"));
+    }
 }

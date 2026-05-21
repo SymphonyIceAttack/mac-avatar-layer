@@ -97,7 +97,9 @@ files:
 ### Local Tooling
 
 - `cargo xtask run-metal` provides a one-command local Metal run path with SDK
-  auto-detection for `public/CubismSdkForNative`.
+  auto-detection for `public/CubismSdkForNative`; `cargo xtask run-metal
+  --release` runs the optimized build profile against
+  `vtube-studio-rs.build.toml`.
 - `cargo xtask capture-full-matrix` runs the standard visual regression matrix
   and writes one final Markdown report.
 - `cargo xtask run-space-test` writes Space/display reliability logs and a
@@ -138,16 +140,25 @@ files:
 ## Known Limitations
 
 - This is not a full VTube Studio replacement yet.
-- Webcam or ARKit face tracking is not implemented.
+- Camera tracking is not implemented yet. The selected v1 path is a macOS
+  native webcam tracker using AVFoundation capture plus Vision face landmarks;
+  ARKit/iPhone and plugin bridges are deferred.
 - There is no GUI settings panel yet; runtime controls are read from
-  profile-specific TOML files before startup.
+  profile-specific TOML files before startup, with a first-pass macOS status
+  bar menu now exposing current model/expression/renderer state and session
+  toggles for diagnostics, mouse tracking, microphone input, and expression
+  selection, plus runtime Soft/Normal/Expressive presets for mouse and mouth
+  calibration.
 - Motion, expression, physics, mouse, and microphone support are first-pass
-  implementations and need more model/device calibration.
+  implementations; mouse/mouth drivers now expose model-specific calibration
+  knobs, but still need real-device tuning.
 - Offscreen, clipping, and extended blend parity are first-pass implementations
   and still need broader official sample validation.
 - High precision masks currently fall back to shared masks when Cubism offscreen
   drawables are present; diagnostics show this as `mask shared(offscreen)`.
-- Microphone permission failures currently need better user-facing messaging.
+- Microphone startup failures now print actionable terminal guidance with the
+  macOS permission path and active profile config names; native in-window
+  prompting is still open.
 - Packaging, app signing, auto-start, and menu bar controls are not implemented.
 - Long-running Space/display sleep-wake reliability still needs more real-world
   reports beyond the first baseline.
@@ -165,17 +176,27 @@ Priority 1: Model And Runtime Usability
   discovery path until an in-app picker exists.
 - Keep `cargo xtask select-model [--dev|--build] MODEL_PATH` available as the
   developer-facing model selection path until an in-app picker exists.
-- Add a small settings UI or menu surface for diagnostics, renderer quality,
-  input toggles, selected expression, and local model selection.
-- Improve missing SDK/model/microphone permission messages so failures are
-  visible to non-developer users.
+- Keep `cargo xtask doctor` available to check dev/build config files, selected
+  model manifests, and Cubism Core SDK paths before launching.
+- Validate the selected `.model3.json` before opening the avatar window and
+  print the active config path plus repair commands when it is missing.
+- Expand the first-pass status bar settings menu into a small settings UI for
+  renderer quality and local model selection; diagnostics, expression
+  selection, and input toggles are already available as session controls.
+- Keep improving missing SDK/model/microphone permission messages so failures
+  are visible to non-developer users beyond the terminal.
 
 Priority 2: Tracking And Input
 
-- Calibrate mouse tracking ranges per model.
-- Calibrate microphone gain/noise gate defaults on more machines.
-- Decide whether face tracking should use built-in webcam, ARKit, or a plugin
-  bridge first.
+- Calibrate mouse tracking ranges per model using the local
+  `coordinate_space`/`eye_*_range`/`angle_*_degrees`/dead-zone controls and the
+  runtime Soft/Normal/Expressive preset menu. Default mouse tracking is
+  screen-relative; `coordinate_space = "window"` remains available when window
+  relative tracking is needed.
+- Calibrate microphone gain/noise gate/response-curve/attack/release defaults
+  on more machines using the runtime mouth preset menu as a first pass.
+- Implement the selected camera-tracking v1 path: built-in/default webcam
+  capture through AVFoundation plus Vision face landmarks.
 - Add permission and setup messaging for camera/microphone paths.
 
 Priority 3: Rendering Parity And Quality
@@ -236,14 +257,120 @@ Required outcomes:
 - Mouse position drives `ParamEyeBallX`, `ParamEyeBallY`, `ParamAngleX`,
   `ParamAngleY`, and `ParamAngleZ`.
 - Microphone level drives `ParamMouthOpenY`.
+- Camera tracking v1 drives `ParamAngleX`, `ParamAngleY`, `ParamAngleZ`,
+  `ParamEyeBallX`, `ParamEyeBallY`, and optionally `ParamMouthOpenY` from a
+  local webcam face/landmark stream.
 - Automatic blink and breathing remain enabled by default.
 - Input drivers can be toggled for debugging.
 
 Remaining work:
 
 - Calibrate mouse tracking ranges per model.
-- Calibrate microphone gain/noise gate defaults on more machines.
-- Consider native macOS permission messaging if microphone startup fails.
+- Calibrate microphone gain/noise gate/response-curve/attack/release defaults
+  on more machines.
+- Consider native macOS permission messaging if microphone startup fails; the
+  terminal diagnostic path is now covered.
+- Implement camera permission messaging and a no-camera fallback before enabling
+  camera tracking by default.
+
+### 2a. Camera Tracking V1 Requirements
+
+Decision: implement camera tracking v1 as a macOS-native webcam tracker using
+AVFoundation for camera capture and Vision for face rectangle/landmark
+extraction. Do not use ARKit/iPhone capture or a MediaPipe/plugin bridge in v1.
+
+Goals:
+
+- Keep the full camera path local to the machine. Do not store frames, write
+  camera images to disk, or include image data in logs.
+- Use the default camera by default, with an optional device name/id override
+  later.
+- Target 30 FPS camera sampling without blocking the 60 FPS render loop.
+- If no camera is available, permission is denied, or Vision cannot find a
+  face, the avatar should continue rendering with idle blink/breath and any
+  enabled mouse/microphone inputs.
+- Expose camera state in the `VT` status bar menu and diagnostics overlay:
+  disabled, waiting for permission, running, no face, no camera, or failed.
+
+Parameter mapping:
+
+- Face center offset maps to `ParamAngleX` and `ParamAngleY`.
+- Face roll maps to `ParamAngleZ`.
+- Face/landmark gaze approximation maps to `ParamEyeBallX` and
+  `ParamEyeBallY`; if landmarks are missing, fall back to face center offset.
+- Mouth landmark opening maps to `ParamMouthOpenY` when camera mouth tracking
+  is enabled. If microphone mouth input is also enabled, use a configurable
+  combine mode, defaulting to `max(camera, microphone)`.
+- Eye landmark openness may drive blink/eye-open parameters only when stable;
+  v1 should keep automatic blink as the default fallback.
+
+Configuration:
+
+```toml
+[input.camera]
+enabled = false
+device = ""
+target_fps = 30
+smoothing = 12.0
+dead_zone = 0.03
+invert_x = false
+invert_y = false
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = 12.0
+eye_x_range = 1.0
+eye_y_range = 1.0
+mouth_enabled = true
+mouth_gain = 1.4
+mouth_min_open = 0.0
+mouth_max_open = 1.0
+mouth_combine = "max"
+blink_from_camera = false
+```
+
+Implementation plan:
+
+- Done: add `CameraConfig` under `[input.camera]` with defaults and README
+  examples.
+- Done: add a safe Rust-facing camera input scaffold plus `VT` menu and
+  diagnostics status lines that keep runtime behavior unchanged while the
+  native backend is pending.
+- Done: add the optional `camera-tracking` feature and a macOS AVFoundation
+  permission/device probe that reports disabled, waiting for permission,
+  permission denied, no camera, backend pending, or failed without starting
+  frame capture.
+- Add a feature-gated macOS camera module wrapping AVFoundation capture and
+  Vision landmark extraction behind safe Rust-facing structs.
+- Feed camera samples into `MotionInput` without exposing Objective-C objects
+  to the motion layer.
+- Extend `MotionController` to merge camera, mouse, and microphone drivers in a
+  deterministic order: idle/expression -> mouse/camera head and eye -> mouth
+  drivers -> physics -> overrides -> `csmUpdateModel`.
+- Add `VT` menu controls for Camera Tracking and Soft/Normal/Expressive camera
+  calibration presets.
+- Add terminal and diagnostics messages for camera permission denied, no camera,
+  and no face detected.
+
+Non-goals for v1:
+
+- No ARKit blendshape stream.
+- No iPhone/Continuity Camera-specific protocol.
+- No identity recognition, recording, frame export, or background upload.
+- No full facial expression classifier beyond the landmark-derived parameters
+  listed above.
+
+Acceptance criteria:
+
+- With `[input.camera].enabled = false`, builds and runtime behavior are
+  unchanged.
+- With camera tracking enabled and permission granted, head angle and eye
+  parameters respond smoothly to face movement.
+- With no face detected, parameters decay smoothly back toward neutral instead
+  of freezing at the last extreme.
+- Denied camera permission produces actionable setup text and leaves the avatar
+  running.
+- Space switching, display sleep/wake, and duplicate-window prevention continue
+  to work while the camera session is active.
 
 ### 3. Engineering Experience
 
@@ -399,8 +526,9 @@ Status: first pass done; maintenance ongoing.
 - Text reports, visual diffs, capture matrix orchestration, window lookup,
   screenshot capture, log tailing, and stale process cleanup are implemented in
   Rust.
-- Main commands remain `cargo xtask run-metal`, `cargo xtask capture-full-matrix`,
-  `cargo xtask run-space-test`, and `cargo xtask clean --generated`.
+- Main commands remain `cargo xtask run-metal`, `cargo xtask run-metal
+  --release`, `cargo xtask capture-full-matrix`, `cargo xtask run-space-test`,
+  and `cargo xtask clean --generated`.
 
 ### Milestone E: Rendering And Clipping Quality
 
@@ -436,10 +564,14 @@ Status: next product milestone.
   `cargo xtask list-models`.
 - Reuse the local model selection path currently exposed by
   `cargo xtask select-model [--dev|--build] MODEL_PATH`.
-- Add settings UI or menu bar controls for diagnostics, renderer quality, input
-  toggles, expression selection, and selected model.
-- Improve user-facing permission and missing-file messages.
-- Decide and prototype the face-tracking path.
+- Expand the status bar controls into a settings surface for renderer quality
+  and selected model. The first-pass `VT` menu already shows renderer/model
+  state and toggles diagnostics, expression selection, mouse tracking,
+  microphone input, and input calibration presets for the current session.
+- Improve user-facing permission and missing-file messages beyond the current
+  startup terminal diagnostics.
+- Prototype the selected AVFoundation + Vision camera-tracking path and expose
+  it through `[input.camera]` plus the `VT` status bar menu.
 - Prepare packaging/signing/launch-at-login decisions.
 
 ## Debug Controls
@@ -484,13 +616,48 @@ blink_duration = 0.18
 
 [input.mouse]
 enabled = false
+coordinate_space = "screen"
 smoothing = 10.0
+dead_zone = 0.02
+invert_x = false
+invert_y = false
+eye_x_range = 1.0
+eye_y_range = 1.0
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = -12.0
 
 [input.microphone]
 enabled = false
-gain = 7.0
-noise_gate = 0.025
+parameter = "ParamMouthOpenY"
+gain = 10.0
+noise_gate = 0.008
+response_curve = 0.6
 smoothing = 18.0
+attack = 32.0
+release = 10.0
+min_open = 0.0
+max_open = 1.0
+
+[input.camera]
+enabled = false
+device = ""
+target_fps = 30
+smoothing = 12.0
+dead_zone = 0.03
+invert_x = false
+invert_y = false
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = 12.0
+eye_x_range = 1.0
+eye_y_range = 1.0
+mouth_enabled = true
+mouth_gain = 1.4
+mouth_min_open = 0.0
+mouth_max_open = 1.0
+mouth_combine = "max"
+blink_from_camera = false
 
 [overrides]
 # mouth_open = 1.0
@@ -501,10 +668,10 @@ smoothing = 18.0
 
 - Which motion should be treated as the default idle motion when multiple
   `Idle` motions exist?
-- Should microphone permission failures get an in-window prompt or only terminal
-  diagnostics for now?
-- Should webcam/face tracking be built in, bridged from ARKit, or exposed
-  through a plugin API first?
+- Should microphone permission failures get an in-window prompt now that
+  terminal diagnostics are in place?
+- After AVFoundation + Vision camera tracking v1 lands, should ARKit/iPhone or
+  plugin bridges become the next tracking input?
 - How far should the project port official Cubism Framework physics beyond the
   current lightweight implementation?
 - Should the renderer support software fallback long term, or keep it as a

@@ -95,6 +95,10 @@ available:
 - Xcode Command Line Tools for standard macOS developer utilities.
 - Screen Recording permission for the terminal/Codex app may be required on
   the first capture run.
+- Microphone permission is required only when `[input.microphone].enabled =
+  true`; if startup reports a microphone failure, allow the terminal/Codex app
+  under macOS System Settings > Privacy & Security > Microphone, or disable the
+  microphone input in the active profile config.
 - Window lookup and screenshot capture are implemented in Rust through
   CoreGraphics, so capture commands no longer require `swift` or
   `screencapture`.
@@ -123,6 +127,7 @@ cargo xtask capture-offscreen-matrix
 cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
+cargo xtask doctor
 cargo xtask list-models
 cargo xtask mao-mask-audit
 cargo xtask probe-risk-models public/model
@@ -147,12 +152,21 @@ cargo xtask run-metal
 With no argument it uses `[model].path` from the active profile config, falling
 back to `public/model/0.model3.json` when unset. It auto-detects
 `public/CubismSdkForNative`, sets `CUBISM_CORE_LIB_DIR` and
-`CUBISM_CORE_INCLUDE_DIR`, and closes old `target/debug/vtube-studio-rs`
-instances before launching. Pass a different model path as the first argument to
-override local config for that run:
+`CUBISM_CORE_INCLUDE_DIR`, and closes old `vtube-studio-rs` instances before
+launching. By default it runs the development profile and reads
+`vtube-studio-rs.dev.toml`. Pass `--release` to run an optimized build profile
+that reads `vtube-studio-rs.build.toml`:
+
+```bash
+cargo xtask run-metal --release
+```
+
+Pass a different model path as an argument to override local config for that
+run:
 
 ```bash
 cargo xtask run-metal public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json
+cargo xtask run-metal --release public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json
 ```
 
 List local models before choosing one:
@@ -166,7 +180,24 @@ cargo xtask select-model --build public/model/0.model3.json
 
 `select-model` writes `[model].path` to `vtube-studio-rs.dev.toml` by default;
 use `--build` to write `vtube-studio-rs.build.toml`. Later `cargo xtask
-run-metal` uses the development config when no model path argument is passed.
+run-metal` uses the development config when no model path argument is passed,
+while `cargo xtask run-metal --release` uses the build config.
+If startup cannot find the selected `.model3.json`, the app prints the active
+profile config path and the matching `list-models` / `select-model` command to
+repair it before opening the avatar window.
+Run `cargo xtask doctor` to check dev/build config files, selected model
+manifests, and local Cubism Core SDK paths before launching.
+
+The running app installs a first-pass macOS status bar item named `VT` near the
+right side of the menu bar. Its menu shows the active model, expression count,
+and renderer quality state, and it can toggle diagnostics, mouse tracking, and
+microphone mouth input for the current session. When the model declares
+`.exp3.json` expressions, the menu lists them and switches the active expression
+without restarting. The menu also includes Soft/Normal/Expressive mouse and
+mouth calibration presets for quick runtime tuning before committing values to
+TOML. `Open Active Config...` opens the dev/build TOML file that will be used
+on the next launch. Renderer quality and model switching are visible there
+first; full hot switching is still planned.
 
 To keep old instances alive during development:
 
@@ -180,6 +211,10 @@ Manual equivalent:
 CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
 CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
   cargo run --features metal-renderer -- public/model/0.model3.json
+
+CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
+CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
+  cargo run --release --features metal-renderer -- public/model/0.model3.json
 ```
 
 Probe all local models without opening a window:
@@ -359,13 +394,48 @@ blink_duration = 0.18
 
 [input.mouse]
 enabled = false
+coordinate_space = "screen"
 smoothing = 10.0
+dead_zone = 0.02
+invert_x = false
+invert_y = false
+eye_x_range = 1.0
+eye_y_range = 1.0
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = -12.0
 
 [input.microphone]
 enabled = false
-gain = 7.0
-noise_gate = 0.025
+parameter = "ParamMouthOpenY"
+gain = 10.0
+noise_gate = 0.008
+response_curve = 0.6
 smoothing = 18.0
+attack = 32.0
+release = 10.0
+min_open = 0.0
+max_open = 1.0
+
+[input.camera]
+enabled = false
+device = ""
+target_fps = 30
+smoothing = 12.0
+dead_zone = 0.03
+invert_x = false
+invert_y = false
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = 12.0
+eye_x_range = 1.0
+eye_y_range = 1.0
+mouth_enabled = true
+mouth_gain = 1.4
+mouth_min_open = 0.0
+mouth_max_open = 1.0
+mouth_combine = "max"
+blink_from_camera = false
 
 [overrides]
 # mouth_open = 1.0
@@ -375,6 +445,40 @@ smoothing = 18.0
 SDK path variables such as `LIVE2D_CUBISM_SDK_NATIVE_DIR`,
 `CUBISM_CORE_LIB_DIR`, and `CUBISM_CORE_INCLUDE_DIR` remain build/run command
 inputs because they are needed before the app starts.
+
+Mouse tracking maps the pointer into `ParamEyeBallX/Y` and `ParamAngleX/Y/Z`.
+By default `coordinate_space = "screen"`, so the avatar looks across the whole
+main display and moving the avatar window does not recenter mouse tracking. Use
+`coordinate_space = "window"` when you want tracking to be relative to the
+avatar window position. Use `dead_zone`, `invert_x/y`, `eye_*_range`, and
+`angle_*_degrees` to tune model-specific feel. Microphone mouth input maps RMS
+volume into
+`parameter` with separate `attack` and `release` speeds, plus `noise_gate`,
+`gain`, `response_curve`, `min_open`, and `max_open` for calibration. Lower
+`response_curve` values such as `0.45` make quiet speech open the mouth more;
+higher values such as `1.0` behave closer to linear RMS.
+
+Camera tracking is being implemented behind the optional `camera-tracking`
+feature. The `[input.camera]` block, `VT` menu status line, and diagnostics
+overlay status are already part of the app surface. With `enabled = false`, it
+has no runtime effect. With `enabled = true` and no `camera-tracking` feature,
+the app prints a backend-pending message and keeps rendering without camera
+tracking. With `--features camera-tracking`, the app links AVFoundation/Vision
+and probes camera permission plus matching device availability, but frame
+capture and Vision landmark tracking are still pending.
+
+To test the current native camera probe:
+
+```bash
+# First set [input.camera].enabled = true in vtube-studio-rs.dev.toml.
+CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
+CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
+  cargo run --features "metal-renderer camera-tracking" -- public/model/0.model3.json
+```
+
+If microphone input is enabled and macOS denies access, the app prints a
+startup diagnostic with the active dev/build config names and the permission
+path to repair it.
 
 For lower-overhead build/release-style runs, use `vtube-studio-rs.build.toml`:
 

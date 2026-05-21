@@ -123,6 +123,27 @@ impl MotionController {
         runtime.update();
     }
 
+    pub fn set_mouse_enabled(&mut self, enabled: bool, config: &MouseConfig) {
+        self.mouse_driver = if enabled {
+            Some(MouseDriver::from_runtime_config(config))
+        } else {
+            None
+        };
+    }
+
+    pub fn set_microphone_enabled(&mut self, enabled: bool, config: &MicrophoneConfig) {
+        self.mic_driver = if enabled {
+            Some(MicMouthDriver::from_runtime_config(config))
+        } else {
+            None
+        };
+    }
+
+    pub fn set_expression(&mut self, model: &Live2dModel, requested: Option<&str>) -> bool {
+        self.expression = load_expression(model, requested);
+        requested.is_none() || self.expression.is_some()
+    }
+
     fn eye_open_value(&mut self) -> f32 {
         if self.blink_elapsed >= self.blink_interval + self.blink_duration {
             self.blink_elapsed = 0.0;
@@ -230,36 +251,62 @@ struct MouseDriver {
     angle_y: f32,
     angle_z: f32,
     smoothing: f32,
+    dead_zone: f32,
+    invert_x: bool,
+    invert_y: bool,
+    eye_x_range: f32,
+    eye_y_range: f32,
+    angle_x_degrees: f32,
+    angle_y_degrees: f32,
+    angle_z_degrees: f32,
 }
 
 impl MouseDriver {
     fn from_config(config: &MouseConfig) -> Option<Self> {
         config.enabled.then(|| {
             println!("Mouse tracking enabled: driving eye ball and head angle parameters");
-            Self {
-                eye_x: 0.0,
-                eye_y: 0.0,
-                angle_x: 0.0,
-                angle_y: 0.0,
-                angle_z: 0.0,
-                smoothing: config.smoothing.clamp(1.0, 60.0),
-            }
+            Self::from_runtime_config(config)
         })
+    }
+
+    fn from_runtime_config(config: &MouseConfig) -> Self {
+        Self {
+            eye_x: 0.0,
+            eye_y: 0.0,
+            angle_x: 0.0,
+            angle_y: 0.0,
+            angle_z: 0.0,
+            smoothing: config.smoothing.clamp(1.0, 60.0),
+            dead_zone: config.dead_zone.clamp(0.0, 0.95),
+            invert_x: config.invert_x,
+            invert_y: config.invert_y,
+            eye_x_range: config.eye_x_range.clamp(0.0, 3.0),
+            eye_y_range: config.eye_y_range.clamp(0.0, 3.0),
+            angle_x_degrees: config.angle_x_degrees.clamp(-90.0, 90.0),
+            angle_y_degrees: config.angle_y_degrees.clamp(-90.0, 90.0),
+            angle_z_degrees: config.angle_z_degrees.clamp(-90.0, 90.0),
+        }
     }
 
     fn apply(&mut self, runtime: &mut CubismModelRuntime, pointer: Option<[f32; 2]>, delta: f32) {
         let Some([x, y]) = pointer else {
             return;
         };
-        let x = x.clamp(-1.0, 1.0);
-        let y = y.clamp(-1.0, 1.0);
+        let mut x = apply_dead_zone(x.clamp(-1.0, 1.0), self.dead_zone);
+        let mut y = apply_dead_zone(y.clamp(-1.0, 1.0), self.dead_zone);
+        if self.invert_x {
+            x = -x;
+        }
+        if self.invert_y {
+            y = -y;
+        }
         let alpha = (1.0 - (-self.smoothing * delta).exp()).clamp(0.0, 1.0);
 
-        self.eye_x = lerp(self.eye_x, x, alpha);
-        self.eye_y = lerp(self.eye_y, y, alpha);
-        self.angle_x = lerp(self.angle_x, x * 30.0, alpha);
-        self.angle_y = lerp(self.angle_y, y * 22.0, alpha);
-        self.angle_z = lerp(self.angle_z, -x * 12.0, alpha);
+        self.eye_x = lerp(self.eye_x, x * self.eye_x_range, alpha);
+        self.eye_y = lerp(self.eye_y, y * self.eye_y_range, alpha);
+        self.angle_x = lerp(self.angle_x, x * self.angle_x_degrees, alpha);
+        self.angle_y = lerp(self.angle_y, y * self.angle_y_degrees, alpha);
+        self.angle_z = lerp(self.angle_z, x * self.angle_z_degrees, alpha);
 
         runtime.set_parameter_value("ParamEyeBallX", self.eye_x);
         runtime.set_parameter_value("ParamEyeBallY", self.eye_y);
@@ -270,20 +317,39 @@ impl MouseDriver {
 }
 
 struct MicMouthDriver {
+    parameter: String,
     value: f32,
     gain: f32,
     noise_gate: f32,
-    smoothing: f32,
+    response_curve: f32,
+    attack: f32,
+    release: f32,
+    min_open: f32,
+    max_open: f32,
 }
 
 impl MicMouthDriver {
     fn from_config(config: &MicrophoneConfig) -> Option<Self> {
-        config.enabled.then(|| Self {
+        config.enabled.then(|| Self::from_runtime_config(config))
+    }
+
+    fn from_runtime_config(config: &MicrophoneConfig) -> Self {
+        let parameter = config.parameter.trim();
+        Self {
+            parameter: if parameter.is_empty() {
+                "ParamMouthOpenY".to_string()
+            } else {
+                parameter.to_string()
+            },
             value: 0.0,
             gain: config.gain.clamp(0.1, 80.0),
             noise_gate: config.noise_gate.clamp(0.0, 0.5),
-            smoothing: config.smoothing.clamp(1.0, 80.0),
-        })
+            response_curve: config.response_curve.clamp(0.2, 3.0),
+            attack: positive_or(config.attack, config.smoothing).clamp(1.0, 120.0),
+            release: positive_or(config.release, config.smoothing).clamp(1.0, 120.0),
+            min_open: config.min_open.clamp(0.0, 1.0),
+            max_open: config.max_open.clamp(0.0, 1.0),
+        }
     }
 
     fn apply(&mut self, runtime: &mut CubismModelRuntime, level: Option<f32>, delta: f32) {
@@ -291,20 +357,66 @@ impl MicMouthDriver {
             return;
         };
         let level = level.clamp(0.0, 1.0);
-        let target = if level <= self.noise_gate {
+        let mut target = if level <= self.noise_gate {
             0.0
         } else {
-            ((level - self.noise_gate) / (1.0 - self.noise_gate)).clamp(0.0, 1.0) * self.gain
+            let normalized = ((level - self.noise_gate) / (1.0 - self.noise_gate)).clamp(0.0, 1.0);
+            normalized.powf(self.response_curve) * self.gain
         }
         .clamp(0.0, 1.0);
-        let alpha = (1.0 - (-self.smoothing * delta).exp()).clamp(0.0, 1.0);
+        let min_open = self.min_open.min(self.max_open);
+        let max_open = self.min_open.max(self.max_open);
+        target = min_open + target * (max_open - min_open);
+        let smoothing = if target > self.value {
+            self.attack
+        } else {
+            self.release
+        };
+        let alpha = (1.0 - (-smoothing * delta).exp()).clamp(0.0, 1.0);
         self.value = lerp(self.value, target, alpha);
-        runtime.set_parameter_value("ParamMouthOpenY", self.value);
+        runtime.set_parameter_value(&self.parameter, self.value);
     }
 }
 
 fn lerp(current: f32, target: f32, alpha: f32) -> f32 {
     current + (target - current) * alpha
+}
+
+fn apply_dead_zone(value: f32, dead_zone: f32) -> f32 {
+    let dead_zone = dead_zone.clamp(0.0, 0.95);
+    let magnitude = value.abs();
+    if magnitude <= dead_zone {
+        0.0
+    } else {
+        value.signum() * ((magnitude - dead_zone) / (1.0 - dead_zone)).clamp(0.0, 1.0)
+    }
+}
+
+fn positive_or(value: f32, fallback: f32) -> f32 {
+    if value > 0.0 { value } else { fallback }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_dead_zone, positive_or};
+
+    #[test]
+    fn dead_zone_zeroes_center_and_rescales_remaining_range() {
+        assert_eq!(apply_dead_zone(0.04, 0.05), 0.0);
+        assert_eq!(apply_dead_zone(-0.04, 0.05), 0.0);
+
+        let value = apply_dead_zone(0.525, 0.05);
+        assert!((value - 0.5).abs() < 0.0001);
+        let value = apply_dead_zone(-0.525, 0.05);
+        assert!((value + 0.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn positive_or_uses_fallback_for_non_positive_values() {
+        assert_eq!(positive_or(12.0, 18.0), 12.0);
+        assert_eq!(positive_or(0.0, 18.0), 18.0);
+        assert_eq!(positive_or(-1.0, 18.0), 18.0);
+    }
 }
 
 struct MotionPlayer {

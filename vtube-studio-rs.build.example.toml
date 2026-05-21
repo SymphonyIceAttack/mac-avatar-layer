@@ -30,13 +30,48 @@ blink_duration = 0.18
 
 [input.mouse]
 enabled = false
+coordinate_space = "screen"
 smoothing = 10.0
+dead_zone = 0.02
+invert_x = false
+invert_y = false
+eye_x_range = 1.0
+eye_y_range = 1.0
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = -12.0
 
 [input.microphone]
 enabled = false
-gain = 7.0
-noise_gate = 0.025
+parameter = "ParamMouthOpenY"
+gain = 10.0
+noise_gate = 0.008
+response_curve = 0.6
 smoothing = 18.0
+attack = 32.0
+release = 10.0
+min_open = 0.0
+max_open = 1.0
+
+[input.camera]
+enabled = false
+device = ""
+target_fps = 30
+smoothing = 12.0
+dead_zone = 0.03
+invert_x = false
+invert_y = false
+angle_x_degrees = 30.0
+angle_y_degrees = 22.0
+angle_z_degrees = 12.0
+eye_x_range = 1.0
+eye_y_range = 1.0
+mouth_enabled = true
+mouth_gain = 1.4
+mouth_min_open = 0.0
+mouth_max_open = 1.0
+mouth_combine = "max"
+blink_from_camera = false
 
 [overrides]
 # mouth_open = 1.0

@@ -43,6 +43,7 @@ fn run() -> Result<()> {
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
+        Some("doctor") => doctor(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
@@ -77,6 +78,7 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
+  cargo xtask doctor
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
@@ -85,7 +87,7 @@ Usage:
   cargo xtask ren-offscreen-audit [MODEL_PATH]
   cargo xtask render-regression-report
   cargo xtask rice-stress-audit [MODEL_PATH]
-  cargo xtask run-metal [MODEL_PATH]
+  cargo xtask run-metal [--release] [MODEL_PATH]
   cargo xtask run-space-test [MODEL_PATH]
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
   cargo xtask select-model [--dev|--build] MODEL_PATH
@@ -105,6 +107,7 @@ Commands:
                      Capture baseline screenshots for default, Mao, and Ren.
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
+  doctor            Check local configs, selected models, and Cubism Core SDK paths.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
@@ -116,7 +119,7 @@ Commands:
   render-regression-report
                      Generate target/render-regression/report.md.
   rice-stress-audit Generate target/render-regression/rice-stress-audit.md.
-  run-metal         Run the Metal renderer with local Cubism Core env.
+  run-metal         Run the Metal renderer with local Cubism Core env; --release uses the build config.
   run-space-test    Run Space/display reliability test and write a Markdown report.
   sample-compatibility-sweep
                      Generate target/render-regression/compatibility-sweep.md.
@@ -352,6 +355,30 @@ fn capture_rice_stress(args: Vec<String>) -> Result<()> {
         .map(String::as_str)
         .unwrap_or("public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json");
     capture_rice_stress_matrix(model_path)
+}
+
+fn doctor(args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        return Err("usage: cargo xtask doctor".into());
+    }
+
+    let root = project_root()?;
+    println!("vtube-studio-rs doctor");
+    println!("Project: {}", root.display());
+    println!();
+
+    let mut issues = 0usize;
+    issues += check_local_config(&root, SelectModelTarget::Development)?;
+    issues += check_local_config(&root, SelectModelTarget::Build)?;
+    issues += check_cubism_core_sdk(&root);
+
+    println!();
+    if issues == 0 {
+        println!("Doctor result: ok");
+        Ok(())
+    } else {
+        Err(format!("doctor found {issues} issue(s)").into())
+    }
 }
 
 fn list_models(args: Vec<String>) -> Result<()> {
@@ -648,9 +675,7 @@ fn rice_stress_audit(args: Vec<String>) -> Result<()> {
 }
 
 fn run_metal(args: Vec<String>) -> Result<()> {
-    if args.len() > 1 {
-        return Err("usage: cargo xtask run-metal [MODEL_PATH]".into());
-    }
+    let options = parse_run_metal_args(args)?;
 
     let root = project_root()?;
     let (include_dir, lib_dir) = cubism_core_paths(&root)?;
@@ -661,12 +686,12 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let mut command = Command::new("cargo");
-    command
-        .arg("run")
-        .arg("--features")
-        .arg("metal-renderer")
-        .arg("--");
-    if let Some(model_path) = args.first() {
+    command.arg("run");
+    if options.release {
+        command.arg("--release");
+    }
+    command.arg("--features").arg("metal-renderer").arg("--");
+    if let Some(model_path) = &options.model_path {
         command.arg(model_path);
     }
 
@@ -678,8 +703,56 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!("cargo run --features metal-renderer failed with status {status}").into())
+        let profile = if options.release { " --release" } else { "" };
+        Err(
+            format!("cargo run{profile} --features metal-renderer failed with status {status}")
+                .into(),
+        )
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RunMetalOptions {
+    release: bool,
+    model_path: Option<String>,
+}
+
+fn parse_run_metal_args(args: Vec<String>) -> Result<RunMetalOptions> {
+    let mut release = false;
+    let mut model_path = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--release" => {
+                if release {
+                    return Err("usage: cargo xtask run-metal [--release] [MODEL_PATH]".into());
+                }
+                release = true;
+            }
+            "--dev" => {
+                if release {
+                    return Err("usage: cargo xtask run-metal [--release] [MODEL_PATH]".into());
+                }
+            }
+            "-h" | "--help" => {
+                return Err("usage: cargo xtask run-metal [--release] [MODEL_PATH]".into());
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown run-metal option: {value}").into());
+            }
+            value => {
+                if model_path.is_some() {
+                    return Err("usage: cargo xtask run-metal [--release] [MODEL_PATH]".into());
+                }
+                model_path = Some(value.to_string());
+            }
+        }
+    }
+
+    Ok(RunMetalOptions {
+        release,
+        model_path,
+    })
 }
 
 fn run_space_test(args: Vec<String>) -> Result<()> {
@@ -1132,6 +1205,138 @@ impl SelectModelTarget {
             Self::Build => "build",
         }
     }
+
+    fn flag_name(self) -> &'static str {
+        match self {
+            Self::Development => "dev",
+            Self::Build => "build",
+        }
+    }
+}
+
+fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
+    let config_path = root.join(target.config_path());
+    let display_path = relative_display(root, &config_path);
+    if !config_path.is_file() {
+        println!("[!] {} config missing: {}", target.label(), display_path);
+        println!(
+            "    Create it with: cp {} {}",
+            target.example_config_path(),
+            target.config_path()
+        );
+        return Ok(1);
+    }
+
+    let content = fs::read_to_string(&config_path)?;
+    let config: DoctorConfig = match toml::from_str(&content) {
+        Ok(config) => config,
+        Err(error) => {
+            println!(
+                "[!] {} config parse failed: {}",
+                target.label(),
+                display_path
+            );
+            println!("    {error}");
+            return Ok(1);
+        }
+    };
+
+    let Some(model_path) = config.model.path.as_deref() else {
+        println!("[!] {} config has no [model].path", target.label());
+        println!(
+            "    Run: cargo xtask select-model --{} MODEL_PATH",
+            target.flag_name()
+        );
+        return Ok(1);
+    };
+
+    let full_model_path = root.join(model_path);
+    if !is_model3_path(&full_model_path) {
+        println!(
+            "[!] {} model path is not a .model3.json: {model_path}",
+            target.label()
+        );
+        println!("    Run: cargo xtask list-models");
+        println!(
+            "    Then: cargo xtask select-model --{} MODEL_PATH",
+            target.flag_name()
+        );
+        return Ok(1);
+    }
+    if !full_model_path.is_file() {
+        println!(
+            "[!] {} selected model missing: {model_path}",
+            target.label()
+        );
+        println!("    Run: cargo xtask list-models");
+        println!(
+            "    Then: cargo xtask select-model --{} MODEL_PATH",
+            target.flag_name()
+        );
+        return Ok(1);
+    }
+
+    match ModelManifestSummary::load(&full_model_path) {
+        Ok(summary) => {
+            println!(
+                "[x] {} config: {} -> {} (textures {}, motions {}, expressions {}, physics {}, display {})",
+                target.label(),
+                display_path,
+                model_path,
+                summary.texture_count,
+                summary.motion_count,
+                summary.expression_count,
+                yes_no(summary.has_physics),
+                yes_no(summary.has_display_info)
+            );
+            Ok(0)
+        }
+        Err(error) => {
+            println!(
+                "[!] {} selected model manifest is invalid: {model_path}",
+                target.label()
+            );
+            println!("    {error}");
+            Ok(1)
+        }
+    }
+}
+
+fn check_cubism_core_sdk(root: &Path) -> usize {
+    match cubism_core_paths(root) {
+        Ok((include_dir, lib_dir)) => {
+            println!(
+                "[x] Cubism Core SDK: include={} lib={}",
+                relative_display(root, &include_dir),
+                relative_display(root, &lib_dir)
+            );
+            0
+        }
+        Err(error) => {
+            println!("[!] Cubism Core SDK missing or incomplete");
+            println!("    {error}");
+            println!(
+                "    Expected default location: public/CubismSdkForNative/Core/include and public/CubismSdkForNative/Core/lib/macos/{}",
+                host_arch_lib_dir().unwrap_or("arm64")
+            );
+            println!(
+                "    Or set LIVE2D_CUBISM_SDK_NATIVE_DIR, CUBISM_CORE_INCLUDE_DIR, or CUBISM_CORE_LIB_DIR."
+            );
+            1
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorConfig {
+    model: DoctorModelConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorModelConfig {
+    path: Option<String>,
 }
 
 fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, String)> {
@@ -5217,6 +5422,68 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
         .expect("build target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
         assert_eq!(model_path, "public/model/0.model3.json");
+    }
+
+    #[test]
+    fn run_metal_args_support_release_and_optional_model_path() {
+        let options = parse_run_metal_args(Vec::new()).expect("default run-metal should parse");
+        assert!(!options.release);
+        assert_eq!(options.model_path, None);
+
+        let options = parse_run_metal_args(vec!["--release".to_string()])
+            .expect("release run-metal should parse");
+        assert!(options.release);
+        assert_eq!(options.model_path, None);
+
+        let options = parse_run_metal_args(vec![
+            "--release".to_string(),
+            "public/model/0.model3.json".to_string(),
+        ])
+        .expect("release run-metal with model path should parse");
+        assert!(options.release);
+        assert_eq!(
+            options.model_path.as_deref(),
+            Some("public/model/0.model3.json")
+        );
+
+        let options = parse_run_metal_args(vec![
+            "public/model/0.model3.json".to_string(),
+            "--release".to_string(),
+        ])
+        .expect("release flag after model path should parse");
+        assert!(options.release);
+        assert_eq!(
+            options.model_path.as_deref(),
+            Some("public/model/0.model3.json")
+        );
+    }
+
+    #[test]
+    fn run_metal_args_reject_unknown_options_and_extra_paths() {
+        assert!(parse_run_metal_args(vec!["--fast".to_string()]).is_err());
+        assert!(
+            parse_run_metal_args(vec![
+                "public/model/a.model3.json".to_string(),
+                "public/model/b.model3.json".to_string()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn doctor_config_parses_model_path() {
+        let config: DoctorConfig = toml::from_str(
+            r#"
+[model]
+path = "public/model/0.model3.json"
+"#,
+        )
+        .expect("doctor config should parse");
+
+        assert_eq!(
+            config.model.path.as_deref(),
+            Some("public/model/0.model3.json")
+        );
     }
 
     #[test]

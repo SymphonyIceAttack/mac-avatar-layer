@@ -2,7 +2,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::audio_input::MicrophoneInput;
-use crate::config::AppConfig;
+use crate::camera_input::CameraInput;
+use crate::config::{AppConfig, MicrophoneConfig, MouseConfig};
 use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
@@ -13,7 +14,9 @@ use crate::software_renderer::SoftwareRenderer;
 use std::ffi::{CString, c_char, c_double, c_long, c_ulong, c_void};
 #[cfg(not(feature = "metal-renderer"))]
 use std::path::Path;
+use std::process::Command;
 use std::ptr;
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +42,9 @@ const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: NSUInteger = 1 << 4;
 const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: NSUInteger = 1 << 8;
 const NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED: NSUInteger = 1 << 15;
 const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: NSUInteger = 0x00ff_ffff;
+const NS_CONTROL_STATE_VALUE_OFF: NSInteger = 0;
+const NS_CONTROL_STATE_VALUE_ON: NSInteger = 1;
+const NS_VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 const TARGET_FPS: f64 = 60.0;
 #[cfg(feature = "metal-renderer")]
 const AVATAR_HORIZONTAL_MARGIN: CGFloat = 36.0;
@@ -71,8 +77,28 @@ struct NSRect {
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
+    fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra_bytes: usize) -> Class;
+    fn objc_registerClassPair(cls: Class);
+    fn class_addMethod(cls: Class, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
     fn objc_msgSend();
 }
+
+static MENU_COMMANDS: AtomicU32 = AtomicU32::new(0);
+static MENU_SELECTED_EXPRESSION_INDEX: AtomicI32 = AtomicI32::new(EXPRESSION_INDEX_UNCHANGED);
+
+const MENU_TOGGLE_DIAGNOSTICS: u32 = 1 << 0;
+const MENU_TOGGLE_MOUSE: u32 = 1 << 1;
+const MENU_TOGGLE_MICROPHONE: u32 = 1 << 2;
+const MENU_OPEN_ACTIVE_CONFIG: u32 = 1 << 3;
+const MENU_SELECT_EXPRESSION: u32 = 1 << 4;
+const MENU_SELECT_MOUSE_PRESET: u32 = 1 << 5;
+const MENU_SELECT_MOUTH_PRESET: u32 = 1 << 6;
+const EXPRESSION_INDEX_UNCHANGED: i32 = -2;
+const EXPRESSION_INDEX_NONE: i32 = -1;
+const INPUT_PRESET_UNCHANGED: i32 = -1;
+
+static MENU_SELECTED_MOUSE_PRESET: AtomicI32 = AtomicI32::new(INPUT_PRESET_UNCHANGED);
+static MENU_SELECTED_MOUTH_PRESET: AtomicI32 = AtomicI32::new(INPUT_PRESET_UNCHANGED);
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
@@ -162,9 +188,34 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let diagnostics_layer = create_diagnostics_layer()?;
         #[cfg(not(feature = "metal-renderer"))]
         msg_void_id(root_layer, "addSublayer:", avatar_layer);
-        if config.diagnostics.show {
-            msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
-        }
+        msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
+        let mut diagnostics_visible = config.diagnostics.show;
+        msg_void_bool(
+            diagnostics_layer,
+            "setHidden:",
+            bool_to_objc(!diagnostics_visible),
+        );
+        let mut mouse_enabled = config.input.mouse.enabled;
+        let mut microphone_enabled = config.input.microphone.enabled;
+        let mut selected_expression_index =
+            selected_expression_index(&model, config.motion.expression.as_deref());
+        let camera_input = CameraInput::from_config(&config.input.camera);
+        let settings_menu = install_settings_menu(
+            app,
+            &model,
+            model_path,
+            &config,
+            camera_input.status_label(),
+            &renderer_diagnostics,
+            RuntimeControlState {
+                diagnostics_visible,
+                mouse_enabled,
+                microphone_enabled,
+                selected_expression_index,
+                mouse_preset: InputPreset::Normal,
+                mouth_preset: InputPreset::Normal,
+            },
+        )?;
 
         msg_void_id(window, "makeKeyAndOrderFront:", NIL);
         msg_void(window, "orderFrontRegardless");
@@ -177,11 +228,14 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             model.summary(),
             cubism_summary,
             renderer_diagnostics,
+            format!("Camera: {}", camera_input.status_label()),
         );
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
         let mut motion_controller = crate::motion::MotionController::new(&model, &config);
-        let microphone = MicrophoneInput::from_config(&config.input.microphone);
+        let mut microphone = MicrophoneInput::from_config(&config.input.microphone);
+        let mut mouse_preset = InputPreset::Normal;
+        let mut mouth_preset = InputPreset::Normal;
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
         let mut lifecycle_monitor = AppLifecycleMonitor::new();
@@ -189,6 +243,20 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
 
         loop {
             drain_pending_events(app, run_loop_mode);
+            handle_settings_menu_commands(
+                diagnostics_layer,
+                &settings_menu,
+                &mut diagnostics_visible,
+                &mut mouse_enabled,
+                &mut microphone_enabled,
+                &mut selected_expression_index,
+                &mut mouse_preset,
+                &mut mouth_preset,
+                &config,
+                &model,
+                &mut motion_controller,
+                &mut microphone,
+            )?;
             lifecycle_monitor.poll(app, window, started_at);
             begin_immediate_layer_update();
             let now = Instant::now();
@@ -196,7 +264,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut cubism_runtime,
                 now.saturating_duration_since(last_frame_at),
                 &MotionInput {
-                    pointer: normalized_mouse_position(),
+                    pointer: normalized_mouse_position(window, &config.input.mouse),
                     mouth_level: microphone.as_ref().map(MicrophoneInput::level),
                 },
             );
@@ -576,8 +644,8 @@ unsafe fn create_diagnostics_layer() -> Result<Id, String> {
     let frame = NSRect {
         origin: NSPoint { x: 18.0, y: 18.0 },
         size: NSSize {
-            width: 324.0,
-            height: 148.0,
+            width: 660.0,
+            height: 286.0,
         },
     };
 
@@ -591,7 +659,7 @@ unsafe fn create_diagnostics_layer() -> Result<Id, String> {
     msg_void_bool(layer, "setWrapped:", YES);
     set_layer_text(
         layer,
-        "Model: loading\nCubism Core: loading\nFPS: warming up\nFrame delta: warming up\nSlow frames: 0\nFrames: 0\nApp Nap guard: active",
+        "Model: loading\nCubism Core: loading\nRenderer: loading\nCamera: loading\nFPS: warming up\nFrame delta: warming up\nSlow frames: 0\nFrames: 0\nApp Nap guard: active",
     )?;
 
     Ok(layer)
@@ -627,20 +695,29 @@ unsafe fn commit_layer_update() {
     msg_void(transaction, "commit");
 }
 
-unsafe fn normalized_mouse_position() -> Option<[f32; 2]> {
+unsafe fn normalized_mouse_position(window: Id, config: &MouseConfig) -> Option<[f32; 2]> {
     let mouse = msg_point(class("NSEvent").ok()?, "mouseLocation");
+    let coordinate_space = config.coordinate_space.trim();
+    if coordinate_space.eq_ignore_ascii_case("window") {
+        let frame = msg_rect(window, "frame");
+        return normalized_point_in_rect(mouse, frame);
+    }
+
     let screen = msg_id(class("NSScreen").ok()?, "mainScreen");
     if screen.is_null() {
         return None;
     }
 
-    let frame = msg_rect(screen, "frame");
+    normalized_point_in_rect(mouse, msg_rect(screen, "frame"))
+}
+
+fn normalized_point_in_rect(point: NSPoint, frame: NSRect) -> Option<[f32; 2]> {
     if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
         return None;
     }
 
-    let x = ((mouse.x - frame.origin.x) / frame.size.width * 2.0 - 1.0) as f32;
-    let y = ((mouse.y - frame.origin.y) / frame.size.height * 2.0 - 1.0) as f32;
+    let x = ((point.x - frame.origin.x) / frame.size.width * 2.0 - 1.0) as f32;
+    let y = ((point.y - frame.origin.y) / frame.size.height * 2.0 - 1.0) as f32;
     Some([x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)])
 }
 
@@ -663,6 +740,683 @@ unsafe fn set_layer_text(layer: Id, text: &str) -> Result<(), String> {
     let text = ns_string(text)?;
     msg_void_id(layer, "setString:", text);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeControlState {
+    diagnostics_visible: bool,
+    mouse_enabled: bool,
+    microphone_enabled: bool,
+    selected_expression_index: Option<usize>,
+    mouse_preset: InputPreset,
+    mouth_preset: InputPreset,
+}
+
+struct SettingsMenu {
+    _controller: Id,
+    _status_item: Id,
+    diagnostics_item: Id,
+    mouse_item: Id,
+    microphone_item: Id,
+    expression_items: Vec<Id>,
+    mouse_preset_items: Vec<Id>,
+    mouth_preset_items: Vec<Id>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputPreset {
+    Soft,
+    Normal,
+    Expressive,
+}
+
+impl InputPreset {
+    const ALL: [Self; 3] = [Self::Soft, Self::Normal, Self::Expressive];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Soft => "Soft",
+            Self::Normal => "Normal",
+            Self::Expressive => "Expressive",
+        }
+    }
+
+    fn tag(self) -> NSInteger {
+        match self {
+            Self::Soft => 0,
+            Self::Normal => 1,
+            Self::Expressive => 2,
+        }
+    }
+
+    fn from_tag(tag: i32) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Soft),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Expressive),
+            _ => None,
+        }
+    }
+}
+
+unsafe fn install_settings_menu(
+    app: Id,
+    model: &Live2dModel,
+    model_path: &str,
+    config: &AppConfig,
+    camera_status: &str,
+    renderer_diagnostics: &RendererDiagnostics,
+    state: RuntimeControlState,
+) -> Result<SettingsMenu, String> {
+    let controller_class = settings_menu_controller_class()?;
+    let controller = msg_id(controller_class, "new");
+    if controller.is_null() {
+        return Err("SettingsMenuController allocation returned nil".to_string());
+    }
+
+    let main_menu = ns_menu("")?;
+    let app_menu_item = msg_id(msg_id(class("NSMenuItem")?, "alloc"), "init");
+    msg_void_id(main_menu, "addItem:", app_menu_item);
+
+    let app_menu = ns_menu("vtube-studio-rs")?;
+    msg_void_id(app_menu_item, "setSubmenu:", app_menu);
+
+    add_disabled_menu_item(app_menu, "vtube-studio-rs")?;
+    add_separator_menu_item(app_menu)?;
+
+    let model_title = format!("Model: {}", model_title(model_path));
+    add_disabled_menu_item(app_menu, &model_title)?;
+    add_disabled_menu_item(app_menu, "Expression")?;
+    let mut expression_items = Vec::new();
+    let none_item = add_tagged_action_menu_item(
+        app_menu,
+        "None",
+        "selectExpression:",
+        "",
+        controller,
+        EXPRESSION_INDEX_NONE as NSInteger,
+    )?;
+    expression_items.push(none_item);
+    if model.expressions.is_empty() {
+        add_disabled_menu_item(app_menu, "No expressions in model")?;
+    } else {
+        for (index, expression) in model.expressions.iter().enumerate() {
+            let item = add_tagged_action_menu_item(
+                app_menu,
+                &expression.name,
+                "selectExpression:",
+                "",
+                controller,
+                index as NSInteger,
+            )?;
+            expression_items.push(item);
+        }
+    }
+    add_separator_menu_item(app_menu)?;
+
+    let diagnostics_item = add_action_menu_item(
+        app_menu,
+        "Show Diagnostics",
+        "toggleDiagnostics:",
+        "d",
+        controller,
+    )?;
+    let mouse_item = add_action_menu_item(
+        app_menu,
+        "Mouse Tracking",
+        "toggleMouseTracking:",
+        "m",
+        controller,
+    )?;
+    let microphone_item = add_action_menu_item(
+        app_menu,
+        "Microphone Mouth Input",
+        "toggleMicrophoneInput:",
+        "u",
+        controller,
+    )?;
+    let camera_title = format!("Camera Tracking: {camera_status}");
+    add_disabled_menu_item(app_menu, &camera_title)?;
+    add_separator_menu_item(app_menu)?;
+
+    add_disabled_menu_item(app_menu, "Mouse Calibration")?;
+    let mut mouse_preset_items = Vec::new();
+    for preset in InputPreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectMousePreset:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        mouse_preset_items.push(item);
+    }
+    let mouse_detail = format!(
+        "Base: {} | dead {:.2} | eye {:.1}/{:.1} | angle {:.0}/{:.0}/{:.0}",
+        mouse_coordinate_space_label(&config.input.mouse),
+        config.input.mouse.dead_zone,
+        config.input.mouse.eye_x_range,
+        config.input.mouse.eye_y_range,
+        config.input.mouse.angle_x_degrees,
+        config.input.mouse.angle_y_degrees,
+        config.input.mouse.angle_z_degrees
+    );
+    add_disabled_menu_item(app_menu, &mouse_detail)?;
+    add_separator_menu_item(app_menu)?;
+
+    add_disabled_menu_item(app_menu, "Mouth Calibration")?;
+    let mut mouth_preset_items = Vec::new();
+    for preset in InputPreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectMouthPreset:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        mouth_preset_items.push(item);
+    }
+    let mouth_detail = format!(
+        "Base: {} | gate {:.3} | gain {:.1} | curve {:.2} | open {:.2}-{:.2}",
+        config.input.microphone.parameter,
+        config.input.microphone.noise_gate,
+        config.input.microphone.gain,
+        config.input.microphone.response_curve,
+        config.input.microphone.min_open,
+        config.input.microphone.max_open
+    );
+    add_disabled_menu_item(app_menu, &mouth_detail)?;
+    add_separator_menu_item(app_menu)?;
+
+    let msaa_title = format!(
+        "Renderer MSAA: {}",
+        if config.renderer.enable_msaa(config.app.runtime_profile) {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    add_disabled_menu_item(app_menu, &msaa_title)?;
+    let masks_title = format!("Renderer masks: {}", renderer_diagnostics.mask_mode);
+    add_disabled_menu_item(app_menu, &masks_title)?;
+    let texture_title = format!(
+        "Texture quality: mipmaps {} / aniso {}",
+        if renderer_diagnostics.atlas_mipmaps {
+            "on"
+        } else {
+            "off"
+        },
+        renderer_diagnostics.atlas_anisotropy
+    );
+    add_disabled_menu_item(app_menu, &texture_title)?;
+    add_separator_menu_item(app_menu)?;
+
+    add_action_menu_item(
+        app_menu,
+        "Open Active Config...",
+        "openActiveConfig:",
+        ",",
+        controller,
+    )?;
+    add_disabled_menu_item(app_menu, "Model switching UI: planned")?;
+    add_separator_menu_item(app_menu)?;
+
+    let quit_item = ns_menu_item("Quit vtube-studio-rs", Some("terminate:"), "q")?;
+    msg_void_id(app_menu, "addItem:", quit_item);
+
+    msg_void_id(app, "setMainMenu:", main_menu);
+    let status_item = install_status_bar_item(app_menu)?;
+
+    let menu = SettingsMenu {
+        _controller: controller,
+        _status_item: status_item,
+        diagnostics_item,
+        mouse_item,
+        microphone_item,
+        expression_items,
+        mouse_preset_items,
+        mouth_preset_items,
+    };
+    update_settings_menu_state(&menu, state);
+    println!("renderer_event=settings_menu_installed kind=main_menu status_item=VT");
+    Ok(menu)
+}
+
+unsafe fn handle_settings_menu_commands(
+    diagnostics_layer: Id,
+    settings_menu: &SettingsMenu,
+    diagnostics_visible: &mut bool,
+    mouse_enabled: &mut bool,
+    microphone_enabled: &mut bool,
+    selected_expression_index: &mut Option<usize>,
+    mouse_preset: &mut InputPreset,
+    mouth_preset: &mut InputPreset,
+    config: &AppConfig,
+    model: &Live2dModel,
+    motion_controller: &mut crate::motion::MotionController,
+    microphone: &mut Option<MicrophoneInput>,
+) -> Result<(), String> {
+    let commands = MENU_COMMANDS.swap(0, Ordering::AcqRel);
+    if commands == 0 {
+        return Ok(());
+    }
+
+    if commands & MENU_TOGGLE_DIAGNOSTICS != 0 {
+        *diagnostics_visible = !*diagnostics_visible;
+        msg_void_bool(
+            diagnostics_layer,
+            "setHidden:",
+            bool_to_objc(!*diagnostics_visible),
+        );
+        println!(
+            "renderer_event=settings_changed diagnostics_visible={}",
+            *diagnostics_visible
+        );
+    }
+
+    if commands & MENU_TOGGLE_MOUSE != 0 {
+        *mouse_enabled = !*mouse_enabled;
+        let mouse_config = runtime_mouse_config(&config.input.mouse, *mouse_preset);
+        motion_controller.set_mouse_enabled(*mouse_enabled, &mouse_config);
+        println!(
+            "renderer_event=settings_changed mouse_enabled={}",
+            *mouse_enabled
+        );
+    }
+
+    if commands & MENU_TOGGLE_MICROPHONE != 0 {
+        let next_enabled = !*microphone_enabled;
+        if next_enabled {
+            let microphone_config =
+                runtime_microphone_config(&config.input.microphone, *mouth_preset);
+            let next_input = MicrophoneInput::from_config(&microphone_config);
+            if next_input.is_some() {
+                *microphone = next_input;
+                motion_controller.set_microphone_enabled(true, &microphone_config);
+                *microphone_enabled = true;
+            } else {
+                *microphone_enabled = false;
+            }
+        } else {
+            *microphone = None;
+            motion_controller.set_microphone_enabled(false, &config.input.microphone);
+            *microphone_enabled = false;
+        }
+        println!(
+            "renderer_event=settings_changed microphone_enabled={}",
+            *microphone_enabled
+        );
+    }
+
+    if commands & MENU_SELECT_MOUSE_PRESET != 0 {
+        let selected = MENU_SELECTED_MOUSE_PRESET.swap(INPUT_PRESET_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = InputPreset::from_tag(selected) {
+            *mouse_preset = preset;
+            if *mouse_enabled {
+                let mouse_config = runtime_mouse_config(&config.input.mouse, *mouse_preset);
+                motion_controller.set_mouse_enabled(true, &mouse_config);
+            }
+            println!(
+                "renderer_event=settings_changed mouse_preset={}",
+                mouse_preset.label()
+            );
+        }
+    }
+
+    if commands & MENU_SELECT_MOUTH_PRESET != 0 {
+        let selected = MENU_SELECTED_MOUTH_PRESET.swap(INPUT_PRESET_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = InputPreset::from_tag(selected) {
+            *mouth_preset = preset;
+            if *microphone_enabled {
+                let microphone_config =
+                    runtime_microphone_config(&config.input.microphone, *mouth_preset);
+                motion_controller.set_microphone_enabled(true, &microphone_config);
+            }
+            println!(
+                "renderer_event=settings_changed mouth_preset={}",
+                mouth_preset.label()
+            );
+        }
+    }
+
+    if commands & MENU_OPEN_ACTIVE_CONFIG != 0 {
+        if let Err(error) = Command::new("open")
+            .arg(crate::config::active_config_path())
+            .spawn()
+        {
+            eprintln!(
+                "Failed to open active config {}: {error}",
+                crate::config::active_config_path()
+            );
+        }
+    }
+
+    if commands & MENU_SELECT_EXPRESSION != 0 {
+        let selected =
+            MENU_SELECTED_EXPRESSION_INDEX.swap(EXPRESSION_INDEX_UNCHANGED, Ordering::AcqRel);
+        match selected {
+            EXPRESSION_INDEX_NONE => {
+                motion_controller.set_expression(model, None);
+                *selected_expression_index = None;
+                println!("renderer_event=settings_changed expression=none");
+            }
+            index if index >= 0 => {
+                let expression = model.expressions.get(index as usize);
+                if let Some(expression) = expression {
+                    if motion_controller.set_expression(model, Some(&expression.name)) {
+                        *selected_expression_index = Some(index as usize);
+                        println!(
+                            "renderer_event=settings_changed expression={}",
+                            expression.name
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    update_settings_menu_state(
+        settings_menu,
+        RuntimeControlState {
+            diagnostics_visible: *diagnostics_visible,
+            mouse_enabled: *mouse_enabled,
+            microphone_enabled: *microphone_enabled,
+            selected_expression_index: *selected_expression_index,
+            mouse_preset: *mouse_preset,
+            mouth_preset: *mouth_preset,
+        },
+    );
+    Ok(())
+}
+
+unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlState) {
+    set_menu_item_checked(menu.diagnostics_item, state.diagnostics_visible);
+    set_menu_item_checked(menu.mouse_item, state.mouse_enabled);
+    set_menu_item_checked(menu.microphone_item, state.microphone_enabled);
+    for (item_index, item) in menu.expression_items.iter().enumerate() {
+        let checked = match state.selected_expression_index {
+            None => item_index == 0,
+            Some(expression_index) => item_index == expression_index + 1,
+        };
+        set_menu_item_checked(*item, checked);
+    }
+    for (index, item) in menu.mouse_preset_items.iter().enumerate() {
+        set_menu_item_checked(*item, InputPreset::ALL[index] == state.mouse_preset);
+    }
+    for (index, item) in menu.mouth_preset_items.iter().enumerate() {
+        set_menu_item_checked(*item, InputPreset::ALL[index] == state.mouth_preset);
+    }
+}
+
+unsafe fn install_status_bar_item(menu: Id) -> Result<Id, String> {
+    let status_bar = msg_id(class("NSStatusBar")?, "systemStatusBar");
+    if status_bar.is_null() {
+        return Err("NSStatusBar systemStatusBar returned nil".to_string());
+    }
+
+    let status_item = msg_id_double(
+        status_bar,
+        "statusItemWithLength:",
+        NS_VARIABLE_STATUS_ITEM_LENGTH,
+    );
+    if status_item.is_null() {
+        return Err("NSStatusBar statusItemWithLength: returned nil".to_string());
+    }
+
+    let button = msg_id(status_item, "button");
+    if !button.is_null() {
+        msg_void_id(button, "setTitle:", ns_string("VT")?);
+        msg_void_id(
+            button,
+            "setToolTip:",
+            ns_string("vtube-studio-rs settings")?,
+        );
+    }
+    msg_void_id(status_item, "setMenu:", menu);
+    Ok(status_item)
+}
+
+unsafe fn ns_menu(title: &str) -> Result<Id, String> {
+    let menu = msg_id(class("NSMenu")?, "alloc");
+    Ok(msg_id_id(menu, "initWithTitle:", ns_string(title)?))
+}
+
+unsafe fn add_disabled_menu_item(menu: Id, title: &str) -> Result<Id, String> {
+    let item = ns_menu_item(title, None, "")?;
+    msg_void_bool(item, "setEnabled:", NO);
+    msg_void_id(menu, "addItem:", item);
+    Ok(item)
+}
+
+unsafe fn add_action_menu_item(
+    menu: Id,
+    title: &str,
+    action: &str,
+    key_equivalent: &str,
+    target: Id,
+) -> Result<Id, String> {
+    let item = ns_menu_item(title, Some(action), key_equivalent)?;
+    msg_void_id(item, "setTarget:", target);
+    msg_void_id(menu, "addItem:", item);
+    Ok(item)
+}
+
+unsafe fn add_tagged_action_menu_item(
+    menu: Id,
+    title: &str,
+    action: &str,
+    key_equivalent: &str,
+    target: Id,
+    tag: NSInteger,
+) -> Result<Id, String> {
+    let item = add_action_menu_item(menu, title, action, key_equivalent, target)?;
+    msg_void_int(item, "setTag:", tag);
+    Ok(item)
+}
+
+unsafe fn add_separator_menu_item(menu: Id) -> Result<(), String> {
+    let item = msg_id(class("NSMenuItem")?, "separatorItem");
+    msg_void_id(menu, "addItem:", item);
+    Ok(())
+}
+
+unsafe fn ns_menu_item(
+    title: &str,
+    action: Option<&str>,
+    key_equivalent: &str,
+) -> Result<Id, String> {
+    let item = msg_id(class("NSMenuItem")?, "alloc");
+    let action = action
+        .map(|selector_name| selector(selector_name))
+        .unwrap_or(ptr::null_mut());
+    Ok(msg_id_id_sel_id(
+        item,
+        "initWithTitle:action:keyEquivalent:",
+        ns_string(title)?,
+        action,
+        ns_string(key_equivalent)?,
+    ))
+}
+
+unsafe fn set_menu_item_checked(item: Id, checked: bool) {
+    msg_void_int(
+        item,
+        "setState:",
+        if checked {
+            NS_CONTROL_STATE_VALUE_ON
+        } else {
+            NS_CONTROL_STATE_VALUE_OFF
+        },
+    );
+}
+
+fn model_title(model_path: &str) -> &str {
+    model_path
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model_path)
+}
+
+fn mouse_coordinate_space_label(config: &MouseConfig) -> &'static str {
+    let coordinate_space = config.coordinate_space.trim();
+    if coordinate_space.eq_ignore_ascii_case("window") {
+        "window"
+    } else {
+        "screen"
+    }
+}
+
+fn selected_expression_index(model: &Live2dModel, requested: Option<&str>) -> Option<usize> {
+    let requested = requested?;
+    model
+        .expressions
+        .iter()
+        .position(|expression| expression.name == requested)
+        .or_else(|| {
+            requested
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < model.expressions.len())
+        })
+}
+
+fn runtime_mouse_config(base: &MouseConfig, preset: InputPreset) -> MouseConfig {
+    let mut config = base.clone();
+    config.enabled = true;
+    match preset {
+        InputPreset::Soft => {
+            config.smoothing = (config.smoothing * 0.75).max(1.0);
+            config.eye_x_range *= 0.65;
+            config.eye_y_range *= 0.65;
+            config.angle_x_degrees *= 0.65;
+            config.angle_y_degrees *= 0.65;
+            config.angle_z_degrees *= 0.65;
+        }
+        InputPreset::Normal => {}
+        InputPreset::Expressive => {
+            config.smoothing = (config.smoothing * 1.25).max(1.0);
+            config.eye_x_range *= 1.35;
+            config.eye_y_range *= 1.35;
+            config.angle_x_degrees *= 1.35;
+            config.angle_y_degrees *= 1.35;
+            config.angle_z_degrees *= 1.35;
+        }
+    }
+    config
+}
+
+fn runtime_microphone_config(base: &MicrophoneConfig, preset: InputPreset) -> MicrophoneConfig {
+    let mut config = base.clone();
+    config.enabled = true;
+    match preset {
+        InputPreset::Soft => {
+            config.gain *= 0.65;
+            config.response_curve *= 1.25;
+            config.attack *= 0.8;
+            config.release *= 0.8;
+            config.max_open *= 0.75;
+        }
+        InputPreset::Normal => {}
+        InputPreset::Expressive => {
+            config.gain *= 1.45;
+            config.response_curve *= 0.75;
+            config.attack *= 1.25;
+            config.release *= 1.15;
+            config.max_open = (config.max_open * 1.15).min(1.0);
+        }
+    }
+    config
+}
+
+unsafe fn settings_menu_controller_class() -> Result<Class, String> {
+    let class_name =
+        CString::new("VTubeStudioRsSettingsMenuController").map_err(|error| error.to_string())?;
+    let existing = objc_getClass(class_name.as_ptr());
+    if !existing.is_null() {
+        return Ok(existing);
+    }
+
+    let superclass = class("NSObject")?;
+    let cls = objc_allocateClassPair(superclass, class_name.as_ptr(), 0);
+    if cls.is_null() {
+        let existing = objc_getClass(class_name.as_ptr());
+        if !existing.is_null() {
+            return Ok(existing);
+        }
+        return Err("Failed to allocate VTubeStudioRsSettingsMenuController".to_string());
+    }
+
+    add_settings_menu_method(cls, "toggleDiagnostics:", settings_toggle_diagnostics)?;
+    add_settings_menu_method(cls, "toggleMouseTracking:", settings_toggle_mouse)?;
+    add_settings_menu_method(cls, "toggleMicrophoneInput:", settings_toggle_microphone)?;
+    add_settings_menu_method(cls, "openActiveConfig:", settings_open_active_config)?;
+    add_settings_menu_method(cls, "selectExpression:", settings_select_expression)?;
+    add_settings_menu_method(cls, "selectMousePreset:", settings_select_mouse_preset)?;
+    add_settings_menu_method(cls, "selectMouthPreset:", settings_select_mouth_preset)?;
+    objc_registerClassPair(cls);
+    Ok(cls)
+}
+
+unsafe fn add_settings_menu_method(
+    cls: Class,
+    name: &str,
+    implementation: extern "C" fn(Id, Sel, Id),
+) -> Result<(), String> {
+    let types = CString::new("v@:@").map_err(|error| error.to_string())?;
+    let added = class_addMethod(
+        cls,
+        selector(name),
+        implementation as *const c_void,
+        types.as_ptr(),
+    );
+    if added == YES {
+        Ok(())
+    } else {
+        Err(format!("Failed to add settings menu action {name}"))
+    }
+}
+
+extern "C" fn settings_toggle_diagnostics(_this: Id, _selector: Sel, _sender: Id) {
+    MENU_COMMANDS.fetch_or(MENU_TOGGLE_DIAGNOSTICS, Ordering::AcqRel);
+}
+
+extern "C" fn settings_toggle_mouse(_this: Id, _selector: Sel, _sender: Id) {
+    MENU_COMMANDS.fetch_or(MENU_TOGGLE_MOUSE, Ordering::AcqRel);
+}
+
+extern "C" fn settings_toggle_microphone(_this: Id, _selector: Sel, _sender: Id) {
+    MENU_COMMANDS.fetch_or(MENU_TOGGLE_MICROPHONE, Ordering::AcqRel);
+}
+
+extern "C" fn settings_open_active_config(_this: Id, _selector: Sel, _sender: Id) {
+    MENU_COMMANDS.fetch_or(MENU_OPEN_ACTIVE_CONFIG, Ordering::AcqRel);
+}
+
+extern "C" fn settings_select_expression(_this: Id, _selector: Sel, sender: Id) {
+    unsafe {
+        let tag = msg_int(sender, "tag") as i32;
+        MENU_SELECTED_EXPRESSION_INDEX.store(tag, Ordering::Release);
+        MENU_COMMANDS.fetch_or(MENU_SELECT_EXPRESSION, Ordering::AcqRel);
+    }
+}
+
+extern "C" fn settings_select_mouse_preset(_this: Id, _selector: Sel, sender: Id) {
+    unsafe {
+        let tag = msg_int(sender, "tag") as i32;
+        MENU_SELECTED_MOUSE_PRESET.store(tag, Ordering::Release);
+        MENU_COMMANDS.fetch_or(MENU_SELECT_MOUSE_PRESET, Ordering::AcqRel);
+    }
+}
+
+extern "C" fn settings_select_mouth_preset(_this: Id, _selector: Sel, sender: Id) {
+    unsafe {
+        let tag = msg_int(sender, "tag") as i32;
+        MENU_SELECTED_MOUTH_PRESET.store(tag, Ordering::Release);
+        MENU_COMMANDS.fetch_or(MENU_SELECT_MOUTH_PRESET, Ordering::AcqRel);
+    }
 }
 
 unsafe fn drain_pending_events(app: Id, run_loop_mode: Id) {
@@ -718,6 +1472,7 @@ struct Diagnostics {
     model_summary: String,
     cubism_summary: String,
     renderer_summary: String,
+    camera_summary: String,
     total_frames: u64,
     slow_frames: u64,
     frames_since_report: u64,
@@ -860,13 +1615,15 @@ impl Diagnostics {
         model_summary: String,
         cubism_summary: String,
         renderer_diagnostics: RendererDiagnostics,
+        camera_summary: String,
     ) -> Self {
         let now = Instant::now();
         Self {
             target_frame_duration,
-            model_summary,
-            cubism_summary,
-            renderer_summary: renderer_diagnostics.summary(),
+            model_summary: diagnostics_model_summary(&model_summary),
+            cubism_summary: diagnostics_cubism_summary(&cubism_summary),
+            renderer_summary: diagnostics_renderer_summary(&renderer_diagnostics.summary()),
+            camera_summary,
             total_frames: 0,
             slow_frames: 0,
             frames_since_report: 0,
@@ -923,10 +1680,11 @@ impl Diagnostics {
             self.interval_sum_since_report / self.intervals_since_report as u32
         };
         let text = format!(
-            "Model: {}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
+            "Model: {}\n{}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
             self.model_summary,
             self.cubism_summary,
             self.renderer_summary,
+            self.camera_summary,
             fps,
             TARGET_FPS,
             duration_ms(avg_interval),
@@ -949,6 +1707,26 @@ impl Diagnostics {
 
 fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+fn diagnostics_model_summary(summary: &str) -> String {
+    summary.replace(" | groups: ", "\nGroups: ")
+}
+
+fn diagnostics_cubism_summary(summary: &str) -> String {
+    summary
+        .replace(" | drawables ", "\nDrawables ")
+        .replace(" | canvas ", "\nCanvas ")
+}
+
+fn diagnostics_renderer_summary(summary: &str) -> String {
+    summary
+        .replace(" | debug ", "\nRenderer debug ")
+        .replace(" | filters ", "\nRenderer filters ")
+}
+
+fn bool_to_objc(value: bool) -> Bool {
+    if value { YES } else { NO }
 }
 
 unsafe fn class(name: &str) -> Result<Class, String> {
@@ -1027,6 +1805,12 @@ unsafe fn msg_void_int(receiver: Id, selector_name: &str, value: NSInteger) {
     msg_void_id(receiver, selector_name, value);
 }
 
+unsafe fn msg_int(receiver: Id, selector_name: &str) -> NSInteger {
+    let function: extern "C" fn(Id, Sel) -> NSInteger =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
+}
+
 unsafe fn msg_void_ulong(receiver: Id, selector_name: &str, value: NSUInteger) {
     msg_void_id(receiver, selector_name, value);
 }
@@ -1068,10 +1852,27 @@ unsafe fn msg_id_bytes(receiver: Id, selector_name: &str, bytes: *const c_void, 
     function(receiver, selector(selector_name), bytes, len)
 }
 
-#[cfg(not(feature = "metal-renderer"))]
 unsafe fn msg_id_id(receiver: Id, selector_name: &str, value: Id) -> Id {
     let function: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value)
+}
+
+unsafe fn msg_id_double(receiver: Id, selector_name: &str, value: CGFloat) -> Id {
+    let function: extern "C" fn(Id, Sel, CGFloat) -> Id =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), value)
+}
+
+unsafe fn msg_id_id_sel_id(
+    receiver: Id,
+    selector_name: &str,
+    title: Id,
+    action: Sel,
+    key: Id,
+) -> Id {
+    let function: extern "C" fn(Id, Sel, Id, Sel, Id) -> Id =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), title, action, key)
 }
 
 unsafe fn msg_id_ulong_id(
@@ -1133,7 +1934,15 @@ unsafe fn msg_id_double_double_double_double(
 
 #[cfg(all(test, feature = "metal-renderer"))]
 mod tests {
-    use super::{NSPoint, NSRect, NSSize, avatar_frame_for_bounds};
+    use super::{
+        InputPreset, NSPoint, NSRect, NSSize, avatar_frame_for_bounds, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, runtime_microphone_config,
+        runtime_mouse_config, selected_expression_index,
+    };
+    use crate::config::{MicrophoneConfig, MouseConfig};
+    use crate::live2d_model::{Live2dModel, ModelExpression};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn avatar_frame_matches_default_window_layout() {
@@ -1165,5 +1974,121 @@ mod tests {
         assert!(frame.origin.y >= 0.0);
         assert!(frame.size.width >= 1.0);
         assert_eq!(frame.size.width, frame.size.height);
+    }
+
+    #[test]
+    fn model_title_uses_file_name_when_path_has_directories() {
+        assert_eq!(
+            model_title("public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json"),
+            "Rice.model3.json"
+        );
+        assert_eq!(model_title("0.model3.json"), "0.model3.json");
+    }
+
+    #[test]
+    fn selected_expression_index_matches_name_or_numeric_index() {
+        let model = Live2dModel {
+            manifest_path: PathBuf::from("model.model3.json"),
+            root_dir: PathBuf::from("."),
+            version: 3,
+            moc: PathBuf::from("model.moc3"),
+            textures: Vec::new(),
+            physics: None,
+            display_info: None,
+            motions: HashMap::new(),
+            expressions: vec![
+                ModelExpression {
+                    name: "smile".to_string(),
+                    file: PathBuf::from("smile.exp3.json"),
+                },
+                ModelExpression {
+                    name: "angry".to_string(),
+                    file: PathBuf::from("angry.exp3.json"),
+                },
+            ],
+            groups: Vec::new(),
+        };
+
+        assert_eq!(selected_expression_index(&model, Some("smile")), Some(0));
+        assert_eq!(selected_expression_index(&model, Some("1")), Some(1));
+        assert_eq!(selected_expression_index(&model, Some("missing")), None);
+        assert_eq!(selected_expression_index(&model, Some("2")), None);
+        assert_eq!(selected_expression_index(&model, None), None);
+    }
+
+    #[test]
+    fn input_presets_scale_mouse_and_microphone_runtime_configs() {
+        let mouse = MouseConfig {
+            enabled: false,
+            coordinate_space: "screen".to_string(),
+            smoothing: 10.0,
+            dead_zone: 0.02,
+            invert_x: false,
+            invert_y: false,
+            eye_x_range: 1.0,
+            eye_y_range: 1.0,
+            angle_x_degrees: 30.0,
+            angle_y_degrees: 20.0,
+            angle_z_degrees: -10.0,
+        };
+        let soft_mouse = runtime_mouse_config(&mouse, InputPreset::Soft);
+        let expressive_mouse = runtime_mouse_config(&mouse, InputPreset::Expressive);
+        assert!(soft_mouse.enabled);
+        assert!(soft_mouse.angle_x_degrees < mouse.angle_x_degrees);
+        assert!(expressive_mouse.angle_x_degrees > mouse.angle_x_degrees);
+        assert!(expressive_mouse.eye_x_range > soft_mouse.eye_x_range);
+
+        let microphone = MicrophoneConfig {
+            enabled: false,
+            parameter: "ParamMouthOpenY".to_string(),
+            gain: 7.0,
+            noise_gate: 0.025,
+            response_curve: 0.6,
+            smoothing: 18.0,
+            attack: 24.0,
+            release: 12.0,
+            min_open: 0.0,
+            max_open: 0.8,
+        };
+        let soft_mouth = runtime_microphone_config(&microphone, InputPreset::Soft);
+        let expressive_mouth = runtime_microphone_config(&microphone, InputPreset::Expressive);
+        assert!(soft_mouth.enabled);
+        assert!(soft_mouth.gain < microphone.gain);
+        assert!(expressive_mouth.gain > microphone.gain);
+        assert!(expressive_mouth.max_open > soft_mouth.max_open);
+    }
+
+    #[test]
+    fn normalized_point_in_rect_uses_window_relative_coordinates() {
+        let frame = NSRect {
+            origin: NSPoint { x: 100.0, y: 200.0 },
+            size: NSSize {
+                width: 400.0,
+                height: 200.0,
+            },
+        };
+
+        assert_eq!(
+            normalized_point_in_rect(NSPoint { x: 300.0, y: 300.0 }, frame),
+            Some([0.0, 0.0])
+        );
+        assert_eq!(
+            normalized_point_in_rect(NSPoint { x: 500.0, y: 400.0 }, frame),
+            Some([1.0, 1.0])
+        );
+        assert_eq!(
+            normalized_point_in_rect(NSPoint { x: 0.0, y: 100.0 }, frame),
+            Some([-1.0, -1.0])
+        );
+    }
+
+    #[test]
+    fn mouse_coordinate_space_defaults_to_screen() {
+        let mut mouse = MouseConfig::default();
+        assert_eq!(mouse_coordinate_space_label(&mouse), "screen");
+        mouse.coordinate_space = "window".to_string();
+        assert_eq!(mouse_coordinate_space_label(&mouse), "window");
+        mouse.coordinate_space = "".to_string();
+        assert_eq!(mouse_coordinate_space_label(&mouse), "screen");
     }
 }

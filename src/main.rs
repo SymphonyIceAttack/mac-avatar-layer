@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 mod audio_input;
 #[cfg(target_os = "macos")]
+mod camera_input;
+#[cfg(target_os = "macos")]
 mod config;
 #[cfg(target_os = "macos")]
 mod cubism;
@@ -8,6 +10,8 @@ mod cubism;
 mod live2d_model;
 #[cfg(target_os = "macos")]
 mod macos_app;
+#[cfg(all(target_os = "macos", feature = "camera-tracking"))]
+mod macos_camera;
 #[cfg(all(target_os = "macos", feature = "metal-renderer"))]
 mod metal_renderer;
 #[cfg(target_os = "macos")]
@@ -43,7 +47,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let model_path = config.resolved_model_path(args.first().map(String::as_str));
+    let cli_model_path = args.first().map(String::as_str);
+    let model_path = config.resolved_model_path(cli_model_path);
+    if let Err(error) = validate_model_manifest_path(&model_path, cli_model_path.is_some()) {
+        eprintln!("vtube-studio-rs failed to start: {error}");
+        std::process::exit(1);
+    }
 
     let _instance_guard = match AppInstanceGuard::acquire() {
         Ok(guard) => guard,
@@ -56,6 +65,35 @@ fn main() {
     if let Err(error) = macos_app::run(&model_path, config) {
         eprintln!("vtube-studio-rs failed to start: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn validate_model_manifest_path(model_path: &str, from_cli: bool) -> Result<(), String> {
+    let path = std::path::Path::new(model_path);
+    if !path.is_file() {
+        return Err(missing_model_manifest_message(model_path, from_cli));
+    }
+    if !is_model3_path(path) {
+        return Err(format!(
+            "model path must point to a .model3.json manifest: {model_path}\n\nUse `cargo xtask list-models` to list valid local model manifests."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn missing_model_manifest_message(model_path: &str, from_cli: bool) -> String {
+    if from_cli {
+        format!(
+            "model manifest was not found: {model_path}\n\nThe path came from the command line. Run `cargo xtask list-models` to list local models, then retry with a listed .model3.json path."
+        )
+    } else {
+        let config_path = config::active_config_path();
+        let select_flag = config::active_select_model_flag();
+        format!(
+            "model manifest was not found: {model_path}\n\nThe path came from `{config_path}` `[model].path`, or from the default `public/model/0.model3.json` when that key is unset.\n\nRun `cargo xtask list-models` to list local models, then run `cargo xtask select-model {select_flag} MODEL_PATH` to update `{config_path}`."
+        )
     }
 }
 
@@ -892,10 +930,7 @@ fn collect_model3_paths(
     let metadata = std::fs::metadata(root)
         .map_err(|error| format!("Failed to inspect {}: {error}", root.display()))?;
     if metadata.is_file() {
-        if root
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().ends_with(".model3.json"))
-        {
+        if is_model3_path(root) {
             paths.push(root.to_path_buf());
         }
         return Ok(());
@@ -912,16 +947,51 @@ fn collect_model3_paths(
             .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
         if file_type.is_dir() {
             collect_model3_paths(&path, paths)?;
-        } else if file_type.is_file()
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".model3.json"))
-        {
+        } else if file_type.is_file() && is_model3_path(&path) {
             paths.push(path);
         }
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_model3_path(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".model3.json"))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{is_model3_path, missing_model_manifest_message};
+
+    #[test]
+    fn model3_path_detection_requires_model3_json_suffix() {
+        assert!(is_model3_path(std::path::Path::new(
+            "public/model/0.model3.json"
+        )));
+        assert!(!is_model3_path(std::path::Path::new(
+            "public/model/model.json"
+        )));
+    }
+
+    #[test]
+    fn missing_config_model_message_points_to_selection_commands() {
+        let message = missing_model_manifest_message("public/missing.model3.json", false);
+
+        assert!(message.contains("cargo xtask list-models"));
+        assert!(message.contains("cargo xtask select-model"));
+        assert!(message.contains("[model].path"));
+    }
+
+    #[test]
+    fn missing_cli_model_message_names_command_line_source() {
+        let message = missing_model_manifest_message("public/missing.model3.json", true);
+
+        assert!(message.contains("command line"));
+        assert!(message.contains("cargo xtask list-models"));
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -8,6 +8,7 @@ members = [".", "xtask"]
 
 [features]
 default = []
+camera-tracking = []
 cubism-core = ["dep:live2d-cubism-core-sys"]
 metal-renderer = ["cubism-core", "dep:core-graphics-types", "dep:metal"]
 
