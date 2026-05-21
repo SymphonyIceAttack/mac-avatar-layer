@@ -1515,6 +1515,8 @@ dependencies = [
  "core-foundation-sys",
  "ctrlc",
  "image",
+ "serde",
+ "serde_json",
  "sysinfo",
 ]
 

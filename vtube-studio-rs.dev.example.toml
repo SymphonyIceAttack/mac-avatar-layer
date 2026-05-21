@@ -1,9 +1,19 @@
+[app]
+runtime_profile = "development"
+
+[model]
+path = "public/model/0.model3.json"
+
 [diagnostics]
 show = true
 
 [renderer]
 disable_masks = false
 high_precision_masks = false
+# Defaults depend on [app].runtime_profile:
+# development => enable_msaa/log_events true, release => false.
+# enable_msaa = true
+# log_events = true
 atlas_mipmaps = false
 atlas_anisotropy = 1
 debug_texture_mode = "none"

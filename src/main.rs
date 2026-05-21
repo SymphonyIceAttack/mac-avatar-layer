@@ -36,10 +36,14 @@ fn main() {
         return;
     }
 
-    let model_path = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "public/model/0.model3.json".to_string());
+    let config = match config::AppConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("vtube-studio-rs failed to start: {error}");
+            std::process::exit(1);
+        }
+    };
+    let model_path = config.resolved_model_path(args.first().map(String::as_str));
 
     let _instance_guard = match AppInstanceGuard::acquire() {
         Ok(guard) => guard,
@@ -49,7 +53,7 @@ fn main() {
         }
     };
 
-    if let Err(error) = macos_app::run(&model_path) {
+    if let Err(error) = macos_app::run(&model_path, config) {
         eprintln!("vtube-studio-rs failed to start: {error}");
         std::process::exit(1);
     }

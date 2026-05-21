@@ -2,171 +2,198 @@
 
 ## Product Goal
 
-Build a Rust-first macOS avatar host inspired by VTube Studio, with the first
-product advantage being reliable avatar rendering across macOS Desktop/Space
-switches. The app should load local Live2D Cubism model assets from `public/`,
-render them through Cubism Core and Metal, and progressively add motion,
-expression, physics, and tracking input.
+Build a Rust-first macOS avatar host inspired by VTube Studio. The first
+product advantage is reliable avatar rendering across macOS Desktop/Space
+switches, while still loading real Live2D Cubism assets from local `public/`
+model folders and rendering them through Cubism Core + Metal.
 
-## Current State
+The project should grow toward a practical daily avatar host: stable windowing,
+correct rendering, basic motion/expression/physics, simple input drivers, and a
+local developer workflow that does not depend on checked-in SDK/model assets.
 
-- The app opens a native borderless AppKit window that can join all Spaces.
-- The frame loop runs at roughly 60 FPS with diagnostics for frame timing.
-- `public/model/0.model3.json` is loaded locally, including `.moc3`, textures,
-  physics, display info, motions, and expressions when present.
+## MVP Definition
+
+The current MVP is considered usable when all of the following work from local
+files:
+
+- Load a `.model3.json` model from `public/`, including `.moc3`, texture atlas,
+  display info, motions, expressions, and physics when present.
+- Evaluate the model through official Cubism Core via `live2d-cubism-core-sys`.
+- Render drawable meshes through Metal with correct draw order, blend modes,
+  clipping masks, texture atlas sampling, offscreen composites, and basic edge
+  quality.
+- Drive first-pass avatar motion from idle blink/breath, `.motion3.json`,
+  `.exp3.json`, `.physics3.json`, mouse, microphone, and local TOML overrides.
+- Keep the native transparent AppKit window visible and rendering across macOS
+  Spaces and common display transitions.
+- Provide one-command local run and regression tooling through `cargo xtask`.
+
+## Completed Core Capabilities
+
+### Runtime And Model Loading
+
 - `public/` is intentionally local-only and ignored by Git.
+- The app loads `public/model/0.model3.json` and other local `.model3.json`
+  files, including `.moc3`, textures, physics, display info, motions, and
+  expressions when present.
 - Cubism Core is integrated through `live2d-cubism-core-sys`.
+- The Cubism wrapper exposes parameter, part, drawable, canvas, offscreen, and
+  diagnostic data without exposing raw sys pointers to the app layer.
+
+### Rendering
+
 - Metal rendering supports texture upload, drawable meshes, render order,
-  normal/additive/multiplicative blend modes, clipping masks, RGBA mask channel
-  packing, 1/2/4/9 mask layout, explicit affine mask/draw matrices,
-  per-drawable multiply/screen colors, double-sided culling flags, optional
-  texture-atlas mipmaps/anisotropic sampling, configurable drawable/part hiding,
-  and bucketed Retina mask texture sizing for resize stability.
-- The Metal layer frame, `contentsScale`, drawable size, mask textures,
-  offscreen textures, and MSAA texture are synchronized from the current AppKit
-  window bounds/backing scale before each render.
-- Cubism-style `ppu / physicalMaskWidth` and `ppu / physicalMaskHeight`
-  clipping precision branches are applied when canvas ppu is available.
-- Optional high precision masks give each clipping context a full-size mask
-  texture and redraw it immediately before each masked drawable instead of
-  sharing an RGBA atlas tile.
-- Clipping mask generation uses the mask source texture alpha without applying
-  the source drawable's model opacity. This keeps hidden helper mask drawables,
-  such as Rice's eye clipping masks, from producing empty masks.
-- Models with Cubism offscreen drawables currently fall back from high precision
-  masks to the shared mask path so offscreen render/composite remains enabled;
-  diagnostics show this as `mask shared(offscreen)`.
-- High precision mask fallback logs include offscreen, masked offscreen,
-  extended offscreen, masked extended drawable, nested offscreen, and maximum
-  offscreen depth counts so the fallback cause is reviewable from capture logs.
-- Shared atlas clipping supports multiple mask render textures when context
-  count exceeds one texture's practical capacity.
-- Cubism Core offscreen drawable counts are detected, logged, and routed through
-  a first-pass Metal offscreen render/composite path.
-- The offscreen compositor uses local offscreen item indices instead of assuming
-  Cubism Core offscreen indices are contiguous, and nested flush order is
-  covered by unit tests.
-- Extended blend snapshot timing is covered by unit tests for nested offscreen
-  draw targets, parent offscreen composites, and main-target composites.
-- Masked offscreen composites use fullscreen quad vertices whose
-  `model_position` values are recovered through the inverse `FitTransform`, so
-  offscreen mask sampling receives model-space coordinates instead of screen
-  NDC coordinates.
-- Metal renderer lifecycle events are logged with `renderer_event=...` records
-  for startup, drawable size changes, mask/offscreen/MSAA texture changes,
-  drawable availability, AppKit active/visible/occlusion state changes, long
-  frame gaps, and inferred display wake events.
-- Space/display reliability runs write machine logs to `target/space-test/*.log`
-  and Markdown checklist reports to `target/space-test/*.md`.
-- First Space reliability baseline passed on 2026-05-20 using
-  `target/space-test/space-test-20260520-191559.md`: startup guards,
-  drawable recovery, and display wake checks passed; two long-frame gaps were
-  recorded as transition signals.
-- Texture sampling quality can be compared with
-  `cargo xtask capture-quality-matrix`, which captures mipmaps off/on plus
-  mipmaps-on-anisotropy-8 for the default model plus `Mao` and `Ren`.
-- Render regression captures refresh `target/render-regression/report.md`, a
-  Markdown index for latest screenshots, manual visual checks, model risk
-  probe output, automatic review focus, renderer fallback events, MSAA/edge
-  quality summaries, and recent renderer events.
-- The render regression report embeds thumbnail previews and grouped contact
-  sheets so visual triage can start from the Markdown report before opening
-  individual PNG files.
-- `cargo xtask capture-full-matrix` chains the standard visual matrices with
-  cleanup between steps and a single report generation at the end.
-- `cargo xtask capture-rice-stress` captures the official `Rice` sample in
-  shared, high-precision, and no-mask modes when the SDK sample is available.
-  Rice is treated as an optional stress model for additive, inverted-mask, and
-  translucent-drawable coverage.
-- `cargo xtask rice-stress-audit` writes
-  `target/render-regression/rice-stress-audit.md`, a focused Rice audit for
-  additive drawables, inverted masks, translucent layering, capture references,
-  and a manual pass/investigate decision before changing blend or mask behavior.
-- `cargo xtask mao-mask-audit` writes
-  `target/render-regression/mao-mask-audit.md`, a focused Mao audit for dense
-  clipping, inverted masks, eye masks, capture references, and a manual
-  pass/investigate decision before changing clipping layout or mask matrix
-  behavior.
-- `cargo xtask ren-offscreen-audit` writes
-  `target/render-regression/ren-offscreen-audit.md`, a focused Ren audit for
-  nested offscreens, masked offscreens, extended offscreens, and extended
-  drawables, including the offscreen begin/snapshot/flush timeline, automatic
-  plan checks, and a manual pass/investigate decision before changing the
-  offscreen compositor.
-- `cargo xtask ren-visual-diff` writes
-  `target/render-regression/ren-visual-diff.md` and diff heatmaps under
-  `target/render-regression/ren-visual-diff/`, comparing Ren shared,
-  high-precision fallback, and no-mask captures across whole-image and focused
-  face/eye, hair-shadow, torso/transparent, and pupil-offscreen regions.
-- `cargo xtask quality-visual-diff` writes
-  `target/render-regression/quality-visual-diff.md` and diff heatmaps under
-  `target/render-regression/quality-visual-diff/`, comparing mipmaps off/on and
-  anisotropy 1/8 for the default model, `Mao`, and `Ren` across whole-image and
-  focused avatar regions.
-- Project-generated `target/` artifacts are cleaned automatically by the local
-  run/capture commands; `cargo xtask clean --all` also removes Cargo build
-  outputs when a full cleanup is needed.
-- Screenshot capture is implemented in Rust through CoreGraphics instead of
-  shelling out to `screencapture`.
-- Stale renderer process cleanup is implemented in Rust instead of shelling out
-  to `pkill`.
-- App startup now uses a local PID guard under `target/vtube-studio-rs.pid` to
-  prevent duplicate avatar windows during development; set
-  `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only for deliberate debugging.
-- Layer edge antialiasing and 4x MSAA are enabled when supported to reduce
-  transparent window and avatar mesh edge artifacts.
-- `MotionController` owns per-frame parameter updates in this order:
-  1. idle blink and breath
-  2. idle `.motion3.json` playback
-  3. optional `.exp3.json` expression
-  4. mouse and microphone input
-  5. `.physics3.json` output
-  6. local TOML config overrides
-  7. `csmUpdateModel`
-- Motion first pass is implemented: model3 motion references, idle motion
-  selection, looping, and linear/bezier/stepped/inverse-stepped segments.
-- Expression first pass is implemented: `Add`, `Multiply`, and `Overwrite`
-  parameter blends selected by local TOML config.
-- Physics first pass is implemented: input normalization, particles, gravity,
-  wind, stabilization, fixed-step evaluation, output interpolation, and
-  diagnostics.
-- Input first pass is implemented: mouse-driven head/eye parameters and
-  microphone RMS-driven `ParamMouthOpenY`.
+  normal/additive/multiplicative blend modes, per-drawable multiply/screen
+  colors, double-sided culling flags, and optional atlas mipmaps/anisotropy.
+- Clipping supports RGBA mask channel packing, 1/2/4/9 layout, explicit
+  `matrix_for_mask` / `matrix_for_draw`, Cubism-style ppu precision branches,
+  shared multi-texture masks, and optional high precision masks.
+- Mask source generation uses source texture alpha without multiplying source
+  drawable model opacity, preserving helper mask drawables such as Rice's eye
+  masks.
+- Cubism offscreen drawables are detected, logged, and routed through a
+  first-pass Metal offscreen render/composite path.
+- Nested offscreen flush order and extended blend snapshot timing are covered by
+  unit tests.
+- Extended Cubism v5 blend diagnostics decode color + alpha pairs, and the
+  first-pass Metal extended blend shader samples render-target snapshots before
+  compositing.
+- The Metal layer frame, contents scale, drawable size, mask textures,
+  offscreen textures, blend snapshots, and MSAA texture are synchronized from
+  the current AppKit window bounds/backing scale before rendering.
+- Layer edge antialiasing and 4x MSAA are enabled when supported.
+
+### Motion, Expression, Physics, And Input
+
+- `MotionController` owns per-frame parameter updates in this order: idle
+  blink/breath, idle motion playback, optional expression, mouse/microphone
+  input, physics output, TOML overrides, then `csmUpdateModel`.
+- Motion first pass supports model3 motion references, idle motion selection,
+  looping, and linear/bezier/stepped/inverse-stepped segments.
+- Expression first pass supports `Add`, `Multiply`, and `Overwrite` parameter
+  blends selected by local TOML config.
+- Physics first pass supports input normalization, particles, gravity, wind,
+  stabilization, fixed-step evaluation, output interpolation, and diagnostics.
+- Input first pass supports mouse-driven head/eye parameters and microphone
+  RMS-driven `ParamMouthOpenY`.
+
+### macOS Windowing And Reliability
+
+- The app opens a native transparent borderless AppKit window that can join all
+  Spaces.
+- The render loop targets roughly 60 FPS and reports frame timing diagnostics.
+- App startup uses a local PID guard under `target/vtube-studio-rs.pid` to avoid
+  duplicate development windows. `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` is only
+  for deliberate debugging.
+- Renderer lifecycle events use `renderer_event=...` records for startup,
+  drawable size changes, mask/offscreen/MSAA texture changes, drawable
+  availability, AppKit active/visible/occlusion state changes, long frame gaps,
+  and inferred display wake events.
+- The first Space reliability baseline passed on 2026-05-20 using
+  `target/space-test/space-test-20260520-191559.md`: startup guards, drawable
+  recovery, and display wake checks passed; long frame gaps were transition
+  signals.
+
+### Local Tooling
+
 - `cargo xtask run-metal` provides a one-command local Metal run path with SDK
-  path detection for `public/CubismSdkForNative`.
+  auto-detection for `public/CubismSdkForNative`.
+- `cargo xtask capture-full-matrix` runs the standard visual regression matrix
+  and writes one final Markdown report.
+- `cargo xtask run-space-test` writes Space/display reliability logs and a
+  Markdown checklist report under `target/space-test/`.
+- `cargo xtask clean --generated` removes generated local artifacts; `--all`
+  also removes Cargo build output.
+- Screenshot capture, window lookup, and stale process cleanup are implemented
+  in Rust/macOS APIs instead of shelling out to `screencapture`, Swift, `tail`,
+  or `pkill`.
+
+## Validation And Regression Tooling
+
 - `--probe-models` scans local `.model3.json` files without opening a window and
   reports parameter, part, drawable, masked drawable, maximum mask, blend-mode,
-  inverted-mask, and offscreen counts. It labels models as `risk:low`,
-  `risk:medium`, or `risk:high` for renderer compatibility triage, and prints
-  specific risk reasons such as dense clipping, many masked drawables, offscreen
-  objects, extended blends, masked extended drawables, extended offscreens,
-  masked offscreens, or inverted masks.
-- `cargo xtask probe-risk-models` wraps the probe with SDK path auto-detection
-  and writes `target/render-regression/probe.txt`; the render regression report
-  embeds this output so each screenshot sweep carries the model risk context.
-- `cargo xtask sample-compatibility-sweep` scans the official SDK sample
-  resources and writes `target/render-regression/compatibility-sweep.md`, a
-  ranked compatibility report for deciding whether more stress models should be
-  added to screenshot matrices.
-- Local SDK sample probe currently loads 9 models successfully. Notable stress
-  cases: `Mao` has 37 masked drawables, which exercises multi shared mask
-  textures; `Ren` has 24 offscreen drawables, which exercises the first-pass
-  offscreen render/composite path.
-- Cubism v5 extended blend modes are decoded in diagnostics as `color + alpha`
-  pairs and routed through a first-pass Metal extended blend shader that samples
-  a render-target snapshot before compositing.
-- Extended alpha compositing now converts snapshot source/destination colors
-  back to straight color before applying Over/Atop/Out/Conjoint/Disjoint
-  parameters, then writes premultiplied output. This keeps Ren-style extended
-  shadow and draw-order composites closer to Cubism Framework behavior.
-- Extended color blend ids are mapped from Cubism Core raw color types to the
-  Framework shader enum before entering Metal, including AddGlow, Darken,
-  Multiply, ColorBurn, LinearBurn, Lighten, Screen, ColorDodge, Overlay,
-  SoftLight, HardLight, LinearLight, Hue, and Color.
-- Metal startup diagnostics report the number of extended blend objects using
-  the extended blend shader.
-- Runtime diagnostics, renderer debug switches, input drivers, and manual mouth
-  overrides are configured before launch from `vtube-studio-rs.toml`.
+  inverted-mask, extended blend, and offscreen counts.
+- `cargo xtask probe-risk-models` writes `target/render-regression/probe.txt`;
+  the render regression report embeds it for each screenshot sweep.
+- `cargo xtask sample-compatibility-sweep` scans official SDK sample resources
+  and writes `target/render-regression/compatibility-sweep.md`.
+- Current SDK sample probe loads 9 models successfully. `Mao` stresses dense
+  clipping and multi shared mask textures. `Ren` stresses offscreen and
+  extended blend rendering. `Rice` is optional stress coverage for additive,
+  inverted-mask, translucent-drawable, and eye-mask behavior.
+- `cargo xtask capture-mask-matrix` and `mao-mask-audit` cover Mao clipping
+  parity.
+- `cargo xtask capture-offscreen-matrix`, `ren-offscreen-audit`, and
+  `ren-visual-diff` cover Ren offscreen, extended blend, and focused pixel diff
+  review.
+- `cargo xtask capture-rice-stress` and `rice-stress-audit` cover optional Rice
+  stress behavior when that SDK sample is present.
+- `cargo xtask capture-quality-matrix` and `quality-visual-diff` compare
+  mipmaps off/on and anisotropy 1/8 for the default model, Mao, and Ren.
+- `target/render-regression/report.md` is the main visual review index. It
+  includes latest screenshots, contact sheets, manual review records, model risk
+  probe output, fallback events, MSAA/edge quality summaries, Retina/resize
+  stability summaries, focused audit summaries, and recent renderer events.
+
+## Known Limitations
+
+- This is not a full VTube Studio replacement yet.
+- Webcam or ARKit face tracking is not implemented.
+- There is no GUI settings panel yet; runtime controls are read from
+  profile-specific TOML files before startup.
+- Motion, expression, physics, mouse, and microphone support are first-pass
+  implementations and need more model/device calibration.
+- Offscreen, clipping, and extended blend parity are first-pass implementations
+  and still need broader official sample validation.
+- High precision masks currently fall back to shared masks when Cubism offscreen
+  drawables are present; diagnostics show this as `mask shared(offscreen)`.
+- Microphone permission failures currently need better user-facing messaging.
+- Packaging, app signing, auto-start, and menu bar controls are not implemented.
+- Long-running Space/display sleep-wake reliability still needs more real-world
+  reports beyond the first baseline.
+
+## Next Product Phase
+
+The next product phase should shift from renderer/tooling groundwork toward a
+usable avatar host experience.
+
+Priority 1: Model And Runtime Usability
+
+- Add model selection and model switching instead of hard-coding a single local
+  model path in daily use.
+- Keep `cargo xtask list-models` available as the developer-facing model
+  discovery path until an in-app picker exists.
+- Keep `cargo xtask select-model [--dev|--build] MODEL_PATH` available as the
+  developer-facing model selection path until an in-app picker exists.
+- Add a small settings UI or menu surface for diagnostics, renderer quality,
+  input toggles, selected expression, and local model selection.
+- Improve missing SDK/model/microphone permission messages so failures are
+  visible to non-developer users.
+
+Priority 2: Tracking And Input
+
+- Calibrate mouse tracking ranges per model.
+- Calibrate microphone gain/noise gate defaults on more machines.
+- Decide whether face tracking should use built-in webcam, ARKit, or a plugin
+  bridge first.
+- Add permission and setup messaging for camera/microphone paths.
+
+Priority 3: Rendering Parity And Quality
+
+- Continue validating dense clipping, inverted masks, offscreens, extended
+  blends, mipmaps, anisotropy, MSAA, and Retina resize behavior against official
+  samples and real user models.
+- Use `compatibility-sweep.md` to decide when a new model should join the visual
+  regression matrix.
+- Refine nested offscreen, offscreen mask, and extended blend parity where
+  official sample comparison reveals differences.
+
+Priority 4: macOS Productization
+
+- Continue Space/display sleep-wake reliability runs on real desktops.
+- Add packaging, signing, menu bar controls, and optional launch-at-login.
+- Keep duplicate-window prevention and generated-artifact cleanup reliable for
+  day-to-day development.
 
 ## Non-Goals For The Next Phase
 
@@ -180,7 +207,7 @@ expression, physics, and tracking input.
 
 ### 1. Motion, Expression, And Physics
 
-Status: first pass done.
+Status: first pass done; calibration and compatibility ongoing.
 
 Required outcomes:
 
@@ -202,16 +229,12 @@ Remaining work:
 
 ### 2. Parameter Drivers And Input
 
-Status: first pass done.
+Status: first pass done; calibration ongoing.
 
 Required outcomes:
 
-- Mouse position drives:
-  - `ParamEyeBallX`
-  - `ParamEyeBallY`
-  - `ParamAngleX`
-  - `ParamAngleY`
-  - `ParamAngleZ`
+- Mouse position drives `ParamEyeBallX`, `ParamEyeBallY`, `ParamAngleX`,
+  `ParamAngleY`, and `ParamAngleZ`.
 - Microphone level drives `ParamMouthOpenY`.
 - Automatic blink and breathing remain enabled by default.
 - Input drivers can be toggled for debugging.
@@ -224,7 +247,7 @@ Remaining work:
 
 ### 3. Engineering Experience
 
-Status: in progress.
+Status: first pass done; maintenance ongoing.
 
 Required outcomes:
 
@@ -232,10 +255,14 @@ Required outcomes:
 - Document that `public/` is intentionally ignored and not uploaded to GitHub.
 - Auto-detect `public/CubismSdkForNative` SDK paths when explicit env vars are
   absent.
-- Add a one-command local run path for Metal renderer.
-- Keep diagnostics overlay visibility as a launch-time configuration.
-- Keep runtime debug controls in `vtube-studio-rs.toml`, not process
-  environment variables.
+- Keep one-command local run and regression paths under `cargo xtask`.
+- Keep diagnostics overlay visibility and runtime debug controls in local TOML
+  config rather than process environment variables.
+- Split local runtime config into development and build files:
+  `vtube-studio-rs.dev.toml` and `vtube-studio-rs.build.toml`.
+- Keep `app.runtime_profile = "development" | "release"` available so release
+  style runs can default renderer event logs and MSAA off without removing
+  Cubism, clipping, or offscreen correctness paths.
 - Keep README and PRD aligned as capabilities change.
 
 Acceptance criteria:
@@ -245,47 +272,47 @@ Acceptance criteria:
 - Missing SDK/model files produce actionable messages.
 - Debug overlay can be hidden/shown without editing code.
 
-### 4. CubismClippingManager Parity
+### 4. CubismClippingManager And Offscreen Parity
 
-Status: next major rendering task.
+Status: first pass done; parity refinement ongoing.
 
 Required outcomes:
 
-- Preserve the current RGBA channel packing and 1/2/4/9 layout behavior.
+- Preserve RGBA channel packing and 1/2/4/9 layout behavior.
 - Keep explicit `matrix_for_mask` and `matrix_for_draw` structures.
 - Keep masked offscreen composites using inverse-fit model positions for mask
   matrix sampling.
 - Keep Cubism Core offscreen drawable detection in runtime diagnostics.
-- Continue validating the first-pass Metal offscreen render/composite path
-  against `Ren` and future offscreen-heavy sample models.
-- Keep nested offscreen flush order covered by tests: child offscreens flush
-  into their parent targets before parent targets flush upward.
-- Keep extended blend snapshot timing covered by tests before changing snapshot
-  texture copies or compositor ordering.
+- Continue validating Metal offscreen render/composite behavior against `Ren`
+  and future offscreen-heavy sample models.
+- Keep nested offscreen flush order and extended blend snapshot timing covered
+  by tests.
 - Refine nested offscreen, offscreen mask, and extended blend parity where
   official sample comparison reveals differences.
 
 Acceptance criteria:
 
-- Existing sample model still renders without atlas text artifacts or white-eye
+- Existing sample models render without atlas text artifacts or white-eye
   regressions.
 - Masked eye and mouth drawables remain visually stable after window resizing.
-- The renderer logs when it falls back because mask count or offscreen features
+- Renderer logs explain fallback causes when mask count or offscreen features
   exceed current support.
 
 ### 5. Rendering Quality
 
-Status: next visual quality task.
+Status: active validation pass.
 
 Required outcomes:
 
 - Keep normal, additive, and multiplicative blending visually consistent with
   Cubism Framework behavior.
-- Keep per-drawable multiply and screen colors enabled for both masked and
-  unmasked drawables.
-- Keep culling, double-sided drawables, inverted masks, and clipped drawables
-  stable across shared atlas, multi-texture atlas, and high precision mask
-  paths.
+- Keep per-drawable multiply and screen colors enabled for masked and unmasked
+  drawables.
+- Keep culling, double-sided drawables, inverted masks, clipped drawables,
+  optional mipmaps, anisotropy, MSAA, and Retina resize behavior stable across
+  visual regression matrices.
+- Keep renderer-owned texture memory diagnosable through `renderer_event=memory_budget`
+  with atlas, mask, offscreen, MSAA, snapshot, and total estimates.
 - Keep atlas mipmaps optional: disabled by default to avoid atlas island bleed,
   but available for well-padded model textures.
 - Keep transparent window edges and avatar mesh edges smooth with layer edge
@@ -293,14 +320,17 @@ Required outcomes:
 
 Acceptance criteria:
 
-- Additive, multiplicative, normal, masked, and inverted-mask drawables remain
-  correct.
-- Texture sampling remains crisp without shimmering at common window sizes.
+- Additive, multiplicative, normal, masked, inverted-mask, offscreen, and
+  extended-blend drawables remain correct in standard sample matrices.
+- Texture sampling remains crisp without obvious shimmer, blur, or atlas island
+  bleed at common window sizes.
 - Transparent window corners and avatar edges avoid obvious stair-step artifacts.
+- Large RSS values can be compared against renderer-owned texture memory before
+  treating them as leaks.
 
 ### 6. macOS Space Stability
 
-Status: first reliability pass done.
+Status: first reliability pass done; long-run validation ongoing.
 
 Required outcomes:
 
@@ -361,155 +391,82 @@ Status: first pass done.
 
 ### Milestone D: Engineering Experience
 
-Status: active.
+Status: first pass done; maintenance ongoing.
 
-- Keep README/PRD updated.
-- Keep `cargo xtask run-metal` as the recommended local run entry.
-- Keep `--probe-models` available for model compatibility checks.
-- Keep `cargo xtask capture-metal` available for cropped renderer screenshots of
-  high-risk models.
-- Keep `cargo xtask capture-risk-models` available as the standard local visual
-  regression sweep for the default model, `Mao`, and `Ren`.
-- Keep `cargo xtask capture-mask-matrix` available for the `Mao` shared-mask,
-  high-precision-mask, and no-mask visual comparison.
-- Keep `cargo xtask mao-mask-audit` available as the first review step before
-  changing clipping layout, mask matrix, inverted mask, or dense multi-mask
-  behavior.
-- Keep `cargo xtask capture-offscreen-matrix` available for the `Ren` offscreen
-  and extended blend visual comparison.
-- Keep `cargo xtask ren-offscreen-audit` available as the first review step
-  before changing nested offscreen, offscreen mask, or extended blend
-  compositing behavior.
-- Keep `cargo xtask ren-visual-diff` available for pixel-diff review of Ren
-  shared, high-precision fallback, and no-mask captures before and after
-  compositor changes.
-- Keep `cargo xtask capture-rice-stress` available as an optional stress sweep
-  for additive, inverted-mask, and translucent-drawable risks.
-- Keep `cargo xtask rice-stress-audit` available as the first review step before
-  changing additive, inverted-mask, or translucent layering behavior.
-- Keep `cargo xtask capture-quality-matrix` available for mipmap/anisotropic
-  sampling comparisons on the default model, `Mao`, and `Ren`.
-- Keep `cargo xtask quality-visual-diff` available for pixel-diff review of
-  mipmaps off/on and anisotropy 1/8 before changing texture sampling defaults.
-- Keep `cargo xtask capture-full-matrix` available as the preferred full visual
-  regression entry: clean generated artifacts once, run the standard matrices,
-  clean stale renderer processes between steps, and generate one final report.
-- Keep `cargo xtask probe-risk-models` available for regenerating the model risk
-  probe included in the render regression report.
-- Keep `cargo xtask sample-compatibility-sweep` available for official sample
-  compatibility triage.
-- Keep `cargo xtask render-regression-report` available as the common Markdown
-  index for render regression screenshots, model risk probe output, and
-  automatic review focus.
-- Use `VTUBE_RS_SKIP_REPORT=1` when chaining captures manually and generate the
-  final Markdown index with `cargo xtask render-regression-report`.
-- Keep `cargo xtask clean` available for generated artifact cleanup and
-  optional full Cargo target cleanup.
-- Keep `cargo xtask run-space-test` available for repeatable macOS Space and
-  display sleep/wake reliability checks with an end-of-run renderer event
-  summary and Markdown report.
-- Improve missing SDK/model diagnostics.
-- Keep diagnostics overlay visibility controlled before startup rather than by
-  runtime hotkeys.
-- Shell wrapper migration is complete: local developer tooling now runs through
-  Cargo-managed `cargo xtask ...` commands instead of repository shell scripts.
-- Phase the `xtask` migration:
-  1. Create the `xtask` crate and command dispatcher. Done.
-  2. Migrate pure text/report workflows. Done.
-  3. Migrate visual diff workflows to Rust using the `image` crate. Done.
-  4. Migrate capture matrix orchestration to Rust. Done.
-  5. Migrate macOS screenshot capture to Rust/CoreGraphics. Done; window ID
-     lookup no longer uses a Swift subprocess, actual window PNG capture no
-     longer uses `screencapture`, and stale process cleanup uses Rust process
-     management instead of `pkill`.
-- Keep the desired end-state command shape as `cargo xtask run-metal`,
-  `cargo xtask capture-full-matrix`, `cargo xtask run-space-test`, and
-  `cargo xtask clean --generated`.
+- README/PRD are kept updated.
+- Local developer tooling runs through Cargo-managed `cargo xtask ...` commands
+  instead of repository shell scripts.
+- Text reports, visual diffs, capture matrix orchestration, window lookup,
+  screenshot capture, log tailing, and stale process cleanup are implemented in
+  Rust.
+- Main commands remain `cargo xtask run-metal`, `cargo xtask capture-full-matrix`,
+  `cargo xtask run-space-test`, and `cargo xtask clean --generated`.
 
 ### Milestone E: Rendering And Clipping Quality
 
-Status: pending.
+Status: active validation pass.
 
-- Continue validating per-drawable colors, culling, optional mipmaps,
-  anisotropic sampling, bucketed mask texture sizing, and MSAA edge behavior
-  against more models.
-- Validate multi-texture and high precision mask behavior against high-risk
-  models found by `--probe-models`, especially `Mao` and `Ren`.
-- Use `target/render-regression/compatibility-sweep.md` to decide whether a
-  new official sample model should join the screenshot matrix.
-- Treat `Rice` as an optional stress model in the full matrix when the SDK
-  sample is present. It specifically covers additive, inverted-mask, and
-  translucent-drawable risk not fully covered by `Mao` or `Ren`, and should be
-  skipped automatically when the sample is missing.
-- Keep `target/render-regression/rice-stress-audit.md` as the focused Rice
-  parity report for additive drawables, inverted masks, translucent layering,
-  and manual pass/investigate decisions.
-- Keep Rice eye clipping covered: shared and high-precision masks should
-  preserve the teal iris drawables that disappear when helper mask source
-  opacity is incorrectly applied.
-- Use the `Mao` mask matrix screenshots as the first visual gate for clipping
-  changes.
-- Keep `target/render-regression/mao-mask-audit.md` as the focused Mao parity
-  report for dense clipping, inverted masks, eye masks, capture references, and
-  manual pass/investigate decisions.
-- Use the `Ren` offscreen matrix screenshots as the first visual gate for
-  offscreen and extended blend changes.
-- Keep Ren risk probe details visible in `target/render-regression/report.md`,
-  especially masked extended drawables, extended offscreens, and masked
-  offscreens.
-- Keep `target/render-regression/ren-offscreen-audit.md` as the focused Ren
-  parity report for offscreen render order, nested depth, masks, extended blend
-  distribution, begin/snapshot/flush timeline, automatic plan checks, and
-  manual pass/investigate decisions.
-- Keep `target/render-regression/ren-visual-diff.md` as the Ren visual
-  difference report for shared/high-precision fallback/no-mask comparisons,
-  including focused regions around eyes, hair shadow, transparent torso, and
-  pupil offscreens.
-- Keep high precision mask fallback events visible in
-  `target/render-regression/report.md`, especially offscreen mask and nested
-  offscreen counts.
-- Use the quality matrix screenshots as the first visual gate for optional
-  mipmaps/anisotropic sampling changes.
-- Keep `target/render-regression/quality-visual-diff.md` as the focused
-  mipmap off/on and anisotropy 1/8 difference report for the default model,
-  `Mao`, and `Ren`.
-- Keep anisotropy-8 quality captures visible in the main render regression
-  contact sheet and Review Focus, not only in the standalone quality diff.
-- Use `target/render-regression/report.md` as the standard visual review index.
-- Keep the report's Review Focus section as the first place to inspect after a
-  matrix run.
-- Keep the report's Visual Contact Sheet as the fastest first pass for spotting
-  clipping, offscreen, optional Rice stress, and mipmap regressions.
-- Keep the report's Manual Review Record as the handoff point for deciding
-  whether to proceed with renderer changes, investigate a regression, or rerun
-  the full matrix.
-- Keep Retina/window resize behavior covered by Metal layer geometry sync,
-  backing-scale sync, and capture logs.
+- Standard visual matrices cover baseline models, Mao clipping, Ren offscreen,
+  optional Rice stress, texture sampling, anisotropy, MSAA edge quality, and
+  Retina/window resize logs.
+- Continue adding stress models only when compatibility sweep finds a new risk
+  shape not already covered by Mao, Ren, or Rice.
+- Continue refining clipping/offscreen/extended blend parity based on visual
+  reports and official sample comparison.
 
 ### Milestone F: macOS Reliability Pass
 
-Status: first pass done.
+Status: first pass done; repeat validation ongoing.
 
 - Keep the repeatable Space-switch checklist and Markdown report workflow.
-- Use `cargo xtask run-space-test` for future display sleep/wake recovery testing
-  and event summaries/reports.
+- Use `cargo xtask run-space-test` for future display sleep/wake recovery tests.
 - Extend structured renderer lifecycle logging as new macOS failure cases are
   found.
 - Continue reducing duplicate process/window issues during development.
 
+### Milestone G: Product Usability
+
+Status: next product milestone.
+
+- Add model selection and switching.
+- Keep startup model selection available through `[model].path` in
+  `vtube-studio-rs.dev.toml` / `vtube-studio-rs.build.toml`; command-line model
+  paths override TOML for one run.
+- Reuse the local model discovery path currently exposed by
+  `cargo xtask list-models`.
+- Reuse the local model selection path currently exposed by
+  `cargo xtask select-model [--dev|--build] MODEL_PATH`.
+- Add settings UI or menu bar controls for diagnostics, renderer quality, input
+  toggles, expression selection, and selected model.
+- Improve user-facing permission and missing-file messages.
+- Decide and prototype the face-tracking path.
+- Prepare packaging/signing/launch-at-login decisions.
+
 ## Debug Controls
 
-Runtime debug controls are read once at startup from local
-`vtube-studio-rs.toml`. The file is ignored by Git; committed defaults live in
-`vtube-studio-rs.example.toml`.
+Runtime debug controls are read once at startup from local profile configs.
+Development runs use `vtube-studio-rs.dev.toml`; release builds use
+`vtube-studio-rs.build.toml`. Both files are ignored by Git; committed defaults
+live in `vtube-studio-rs.dev.example.toml` and
+`vtube-studio-rs.build.example.toml`.
 
 ```toml
+[app]
+runtime_profile = "development"
+
+[model]
+path = "public/model/0.model3.json"
+
 [diagnostics]
 show = true
 
 [renderer]
 disable_masks = false
 high_precision_masks = false
+# Defaults depend on [app].runtime_profile:
+# development => enable_msaa/log_events true, release => false.
+# enable_msaa = true
+# log_events = true
 atlas_mipmaps = false
 atlas_anisotropy = 1
 debug_texture_mode = "none"

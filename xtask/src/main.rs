@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     ffi::CStr,
     fs,
@@ -15,9 +16,14 @@ use std::{
 };
 
 use image::{Rgba, RgbaImage};
+use serde::Deserialize;
 use sysinfo::{Process, ProcessesToUpdate, Signal, System};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const DEVELOPMENT_CONFIG_PATH: &str = "vtube-studio-rs.dev.toml";
+const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml";
+const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
+const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
 
 fn main() {
     if let Err(error) = run() {
@@ -37,6 +43,7 @@ fn run() -> Result<()> {
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
+        Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
         Some("quality-visual-diff") => quality_visual_diff(args.collect()),
@@ -47,6 +54,7 @@ fn run() -> Result<()> {
         Some("run-metal") => run_metal(args.collect()),
         Some("run-space-test") => run_space_test(args.collect()),
         Some("sample-compatibility-sweep") => sample_compatibility_sweep(args.collect()),
+        Some("select-model") => select_model(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -69,6 +77,7 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
+  cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
   cargo xtask quality-visual-diff
@@ -79,6 +88,7 @@ Usage:
   cargo xtask run-metal [MODEL_PATH]
   cargo xtask run-space-test [MODEL_PATH]
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
+  cargo xtask select-model [--dev|--build] MODEL_PATH
 
 Commands:
   clean              Remove generated target artifacts; --all also runs cargo clean.
@@ -95,6 +105,7 @@ Commands:
                      Capture baseline screenshots for default, Mao, and Ren.
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
+  list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
   quality-visual-diff
@@ -109,6 +120,7 @@ Commands:
   run-space-test    Run Space/display reliability test and write a Markdown report.
   sample-compatibility-sweep
                      Generate target/render-regression/compatibility-sweep.md.
+  select-model      Write [model].path in the dev/build local config.
 "
     );
 }
@@ -340,6 +352,70 @@ fn capture_rice_stress(args: Vec<String>) -> Result<()> {
         .map(String::as_str)
         .unwrap_or("public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json");
     capture_rice_stress_matrix(model_path)
+}
+
+fn list_models(args: Vec<String>) -> Result<()> {
+    let root = project_root()?;
+    let roots = if args.is_empty() {
+        vec!["public".to_string()]
+    } else {
+        args
+    };
+
+    let mut model_paths = Vec::new();
+    for item in &roots {
+        collect_model3_paths(&root.join(item), &mut model_paths)?;
+    }
+    model_paths.sort();
+    model_paths.dedup();
+
+    if model_paths.is_empty() {
+        return Err(format!("no .model3.json files found under: {}", roots.join(", ")).into());
+    }
+
+    println!("Found {} Live2D model(s):", model_paths.len());
+    println!(
+        "{:<18} {:>3} {:>3} {:>4} {:>4} {:>7} {}",
+        "name", "tex", "mot", "expr", "phys", "display", "path"
+    );
+
+    let mut failures = 0usize;
+    for path in model_paths {
+        match ModelManifestSummary::load(&path) {
+            Ok(summary) => {
+                println!(
+                    "{:<18} {:>3} {:>3} {:>4} {:>4} {:>7} {}",
+                    summary.name,
+                    summary.texture_count,
+                    summary.motion_count,
+                    summary.expression_count,
+                    yes_no(summary.has_physics),
+                    yes_no(summary.has_display_info),
+                    relative_display(&root, &summary.path)
+                );
+            }
+            Err(error) => {
+                failures += 1;
+                println!(
+                    "{:<18} {:>3} {:>3} {:>4} {:>4} {:>7} {}",
+                    model_name_from_path(&path.to_string_lossy()),
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    relative_display(&root, &path)
+                );
+                eprintln!("  failed to read {}: {error}", path.display());
+            }
+        }
+    }
+
+    if failures > 0 {
+        return Err(format!("{failures} model manifest(s) could not be read").into());
+    }
+
+    Ok(())
 }
 
 fn mao_mask_audit(args: Vec<String>) -> Result<()> {
@@ -577,10 +653,6 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let root = project_root()?;
-    let model_path = args
-        .first()
-        .map(String::as_str)
-        .unwrap_or("public/model/0.model3.json");
     let (include_dir, lib_dir) = cubism_core_paths(&root)?;
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
@@ -588,12 +660,17 @@ fn run_metal(args: Vec<String>) -> Result<()> {
         let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
     }
 
-    let status = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .arg("run")
         .arg("--features")
         .arg("metal-renderer")
-        .arg("--")
-        .arg(model_path)
+        .arg("--");
+    if let Some(model_path) = args.first() {
+        command.arg(model_path);
+    }
+
+    let status = command
         .current_dir(&root)
         .env("CUBISM_CORE_INCLUDE_DIR", include_dir)
         .env("CUBISM_CORE_LIB_DIR", lib_dir)
@@ -611,10 +688,10 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     }
 
     let root = project_root()?;
-    let model_path = args
+    let model_label = args
         .first()
         .map(String::as_str)
-        .unwrap_or("public/model/0.model3.json");
+        .unwrap_or("profile config [model].path, or public/model/0.model3.json when unset");
     let output_dir = env::var_os("OUTPUT_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target/space-test"));
@@ -634,7 +711,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
 
     println!("Starting vtube-studio-rs Space/display reliability run.");
-    println!("Model: {model_path}");
+    println!("Model: {model_label}");
     println!("Log: {}", log_path.display());
     println!("Report: {}", report_path.display());
     println!();
@@ -649,12 +726,17 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
 
     let log_file = fs::File::create(&log_path)?;
     let log_stderr = log_file.try_clone()?;
-    let app_child = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .arg("run")
         .arg("--features")
         .arg("metal-renderer")
-        .arg("--")
-        .arg(model_path)
+        .arg("--");
+    if let Some(model_path) = args.first() {
+        command.arg(model_path);
+    }
+
+    let app_child = command
         .current_dir(&root)
         .env("CUBISM_CORE_INCLUDE_DIR", include_dir)
         .env("CUBISM_CORE_LIB_DIR", lib_dir)
@@ -683,7 +765,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     tail.stop();
     drop(app);
     terminate_app_processes(&root);
-    let report = write_space_test_report(model_path, &log_path, &report_path)?;
+    let report = write_space_test_report(model_label, &log_path, &report_path)?;
     print_space_test_summary(&report, &log_path, &report_path);
     Ok(())
 }
@@ -775,8 +857,8 @@ fn capture_mask_mode_matrix_to(
         fs::create_dir_all(&output_dir)?;
     }
 
-    let config_path = root.join("vtube-studio-rs.toml");
-    let example_config_path = root.join("vtube-studio-rs.example.toml");
+    let config_path = root.join(DEVELOPMENT_CONFIG_PATH);
+    let example_config_path = root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH);
     let _config_guard = ConfigRestoreGuard::prepare(&config_path, &example_config_path)?;
 
     capture_renderer_mode(
@@ -835,8 +917,8 @@ fn capture_quality_mode_matrix_to(
         fs::create_dir_all(&output_dir)?;
     }
 
-    let config_path = root.join("vtube-studio-rs.toml");
-    let example_config_path = root.join("vtube-studio-rs.example.toml");
+    let config_path = root.join(DEVELOPMENT_CONFIG_PATH);
+    let example_config_path = root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH);
     let _config_guard = ConfigRestoreGuard::prepare(&config_path, &example_config_path)?;
 
     for model_path in models {
@@ -928,8 +1010,8 @@ fn capture_rice_stress_matrix_to(
     let probe_path = output_dir.parent().unwrap_or(root).join("probe.txt");
     run_model_probe(root, &[model_path.to_string()], &probe_path)?;
 
-    let config_path = root.join("vtube-studio-rs.toml");
-    let example_config_path = root.join("vtube-studio-rs.example.toml");
+    let config_path = root.join(DEVELOPMENT_CONFIG_PATH);
+    let example_config_path = root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH);
     let _config_guard = ConfigRestoreGuard::prepare(&config_path, &example_config_path)?;
 
     capture_renderer_mode(
@@ -965,6 +1047,104 @@ fn capture_rice_stress_matrix_to(
         run_render_regression_report_safe(root)?;
     }
     Ok(())
+}
+
+fn select_model(args: Vec<String>) -> Result<()> {
+    let (target, model_arg) = parse_select_model_args(args)?;
+
+    let root = project_root()?;
+    let input_path = Path::new(&model_arg);
+    let model_path = if input_path.is_absolute() {
+        input_path.to_path_buf()
+    } else {
+        root.join(input_path)
+    };
+
+    if !is_model3_path(&model_path) {
+        return Err(format!(
+            "model path must end with .model3.json: {}",
+            model_path.display()
+        )
+        .into());
+    }
+    require_file(&model_path, "Missing model manifest")?;
+
+    let summary = ModelManifestSummary::load(&model_path)?;
+    let stored_path = relative_display(&root, &model_path);
+    let config_path = root.join(target.config_path());
+    let example_config_path = root.join(target.example_config_path());
+    let content = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else if example_config_path.is_file() {
+        fs::read_to_string(&example_config_path)?
+    } else {
+        String::new()
+    };
+    let updated = set_toml_section_value(
+        &content,
+        "model",
+        "path",
+        &toml_string_literal(&stored_path),
+    );
+    fs::write(&config_path, updated)?;
+
+    println!("Selected model: {}", summary.name);
+    println!("Target: {}", target.label());
+    println!("Config: {}", relative_display(&root, &config_path));
+    println!("Path: {stored_path}");
+    println!(
+        "Resources: textures {} | motions {} | expressions {} | physics {} | display {}",
+        summary.texture_count,
+        summary.motion_count,
+        summary.expression_count,
+        yes_no(summary.has_physics),
+        yes_no(summary.has_display_info)
+    );
+    println!("Run with: cargo xtask run-metal");
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SelectModelTarget {
+    Development,
+    Build,
+}
+
+impl SelectModelTarget {
+    fn config_path(self) -> &'static str {
+        match self {
+            Self::Development => DEVELOPMENT_CONFIG_PATH,
+            Self::Build => BUILD_CONFIG_PATH,
+        }
+    }
+
+    fn example_config_path(self) -> &'static str {
+        match self {
+            Self::Development => DEVELOPMENT_EXAMPLE_CONFIG_PATH,
+            Self::Build => BUILD_EXAMPLE_CONFIG_PATH,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Build => "build",
+        }
+    }
+}
+
+fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, String)> {
+    match args.as_slice() {
+        [model_path] => Ok((SelectModelTarget::Development, model_path.clone())),
+        [flag, model_path] if flag == "--dev" || flag == "--development" => {
+            Ok((SelectModelTarget::Development, model_path.clone()))
+        }
+        [flag, model_path] if flag == "--build" => {
+            Ok((SelectModelTarget::Build, model_path.clone()))
+        }
+        _ => Err("usage: cargo xtask select-model [--dev|--build] MODEL_PATH".into()),
+    }
 }
 
 fn capture_risk_models_to(
@@ -1035,7 +1215,7 @@ fn capture_configured_mode(
     label: &str,
     config_updates: &[(&str, String)],
 ) -> Result<()> {
-    let config_path = root.join("vtube-studio-rs.toml");
+    let config_path = root.join(DEVELOPMENT_CONFIG_PATH);
     set_toml_values(&config_path, config_updates)?;
     let model_name = model_name_from_path(model_path);
     println!("Capturing {model_name} {matrix_label} {label}");
@@ -1974,6 +2154,80 @@ fn set_toml_value(content: &str, key: &str, value: &str) -> String {
     output
 }
 
+fn set_toml_section_value(content: &str, section: &str, key: &str, value: &str) -> String {
+    let section_header = format!("[{section}]");
+    let mut output = String::new();
+    let mut found_section = false;
+    let mut in_target_section = false;
+    let mut found_key = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_target_section
+            && trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && trimmed != section_header
+        {
+            if !found_key {
+                output.push_str(key);
+                output.push_str(" = ");
+                output.push_str(value);
+                output.push('\n');
+                found_key = true;
+            }
+            in_target_section = false;
+        }
+
+        if trimmed == section_header {
+            found_section = true;
+            in_target_section = true;
+        }
+
+        if in_target_section {
+            let trimmed_start = line.trim_start();
+            if trimmed_start.starts_with(key)
+                && trimmed_start[key.len()..].trim_start().starts_with('=')
+            {
+                let indent_len = line.len() - trimmed_start.len();
+                output.push_str(&line[..indent_len]);
+                output.push_str(key);
+                output.push_str(" = ");
+                output.push_str(value);
+                output.push('\n');
+                found_key = true;
+                continue;
+            }
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    if found_section && in_target_section && !found_key {
+        output.push_str(key);
+        output.push_str(" = ");
+        output.push_str(value);
+        output.push('\n');
+    } else if !found_section {
+        if !output.is_empty() && !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+        output.push_str(&section_header);
+        output.push('\n');
+        output.push_str(key);
+        output.push_str(" = ");
+        output.push_str(value);
+        output.push('\n');
+    }
+
+    output
+}
+
+fn toml_string_literal(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 fn model_name_from_path(model_path: &str) -> String {
     let file_name = Path::new(model_path)
         .file_name()
@@ -1983,6 +2237,105 @@ fn model_name_from_path(model_path: &str) -> String {
         .strip_suffix(".model3.json")
         .unwrap_or(file_name)
         .to_string()
+}
+
+#[derive(Debug)]
+struct ModelManifestSummary {
+    path: PathBuf,
+    name: String,
+    texture_count: usize,
+    motion_count: usize,
+    expression_count: usize,
+    has_physics: bool,
+    has_display_info: bool,
+}
+
+impl ModelManifestSummary {
+    fn load(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)?;
+        let manifest: ModelManifestLite = serde_json::from_str(&text)?;
+        let references = manifest.file_references;
+        let motion_count = references
+            .motions
+            .values()
+            .map(std::vec::Vec::len)
+            .sum::<usize>();
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            name: model_name_from_path(&path.to_string_lossy()),
+            texture_count: references.textures.len(),
+            motion_count,
+            expression_count: references.expressions.len(),
+            has_physics: references.physics.is_some(),
+            has_display_info: references.display_info.is_some(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ModelManifestLite {
+    file_references: FileReferencesLite,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FileReferencesLite {
+    #[serde(default)]
+    textures: Vec<String>,
+    physics: Option<String>,
+    display_info: Option<String>,
+    #[serde(default)]
+    motions: HashMap<String, Vec<serde_json::Value>>,
+    #[serde(default)]
+    expressions: Vec<serde_json::Value>,
+}
+
+fn collect_model3_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let metadata = fs::metadata(root)
+        .map_err(|error| format!("failed to inspect {}: {error}", root.display()))?;
+    if metadata.is_file() {
+        if is_model3_path(root) {
+            paths.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+
+    for entry in
+        fs::read_dir(root).map_err(|error| format!("failed to read {}: {error}", root.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("failed to read entry in {}: {error}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            collect_model3_paths(&path, paths)?;
+        } else if file_type.is_file() && is_model3_path(&path) {
+            paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_model3_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".model3.json"))
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn run_render_regression_report_safe(root: &Path) -> Result<()> {
@@ -3034,6 +3387,7 @@ fn render_regression_report_markdown(root: &Path, output_dir: &Path) -> String {
     report.push_str(&probe_summary(root, output_dir));
     report.push_str(&fallback_summary(root, output_dir));
     report.push_str(&msaa_summary(root, output_dir));
+    report.push_str(&retina_resize_summary(root, output_dir));
     report.push_str(&audit_summary(
         root,
         &output_dir.join("mao-mask-audit.md"),
@@ -3293,6 +3647,16 @@ fn review_focus(root: &Path, output_dir: &Path) -> String {
             escape_markdown_table_cell(&why)
         ));
     }
+    if let Some(resize) = retina_resize_overview(output_dir) {
+        let why = format!(
+            "{} drawable size event(s), {} mask texture event(s), max physical size {} px.",
+            resize.drawable_size_events, resize.mask_texture_events, resize.max_physical_size
+        );
+        output.push_str(&format!(
+            "| Retina / window resize stability | {} Check mask and offscreen edges after resize or backing-scale changes. | `target/render-regression/report.md#retina--resize-stability` |\n",
+            escape_markdown_table_cell(&why)
+        ));
+    }
     if probe.is_none() {
         output.push_str("| Probe missing | Run `cargo xtask probe-risk-models` or `cargo xtask capture-risk-models` to populate model-specific review focus. | `target/render-regression/probe.txt` |\n");
     }
@@ -3455,6 +3819,157 @@ fn renderer_event_u64(line: &str, key: &str) -> Option<u64> {
     let marker = format!("{key}=");
     let (_, rest) = line.split_once(&marker)?;
     first_token(rest)?.parse().ok()
+}
+
+#[derive(Debug, Default)]
+struct RetinaResizeOverview {
+    contents_scale_events: usize,
+    drawable_size_events: usize,
+    mask_texture_events: usize,
+    offscreen_texture_events: usize,
+    max_physical_size: u64,
+    max_mask_texture_size: u64,
+}
+
+fn retina_resize_overview(output_dir: &Path) -> Option<RetinaResizeOverview> {
+    let mut overview = RetinaResizeOverview::default();
+    for log_path in capture_logs(output_dir) {
+        let Ok(log) = fs::read_to_string(log_path) else {
+            continue;
+        };
+        for line in log.lines() {
+            if line.contains("renderer_event=contents_scale_changed") {
+                overview.contents_scale_events += 1;
+            }
+            if line.contains("renderer_event=drawable_size_changed") {
+                overview.drawable_size_events += 1;
+                if let Some(physical) = renderer_event_u64(line, "physical") {
+                    overview.max_physical_size = overview.max_physical_size.max(physical);
+                }
+            }
+            if line.contains("renderer_event=mask_tile_size_changed") {
+                overview.mask_texture_events += 1;
+                if let Some(size) = renderer_event_u64(line, "new") {
+                    overview.max_mask_texture_size = overview.max_mask_texture_size.max(size);
+                }
+            } else if line.contains("renderer_event=mask_atlas_resized")
+                || line.contains("renderer_event=high_precision_mask_texture_size_changed")
+            {
+                overview.mask_texture_events += 1;
+                if let Some(size) = renderer_event_u64(line, "texture_size")
+                    .or_else(|| renderer_event_u64(line, "new"))
+                {
+                    overview.max_mask_texture_size = overview.max_mask_texture_size.max(size);
+                }
+            }
+            if line.contains("renderer_event=offscreen_texture_size_changed")
+                || line.contains("renderer_event=blend_snapshot_texture_size_changed")
+            {
+                overview.offscreen_texture_events += 1;
+            }
+        }
+    }
+    if overview.contents_scale_events == 0
+        && overview.drawable_size_events == 0
+        && overview.mask_texture_events == 0
+        && overview.offscreen_texture_events == 0
+    {
+        None
+    } else {
+        Some(overview)
+    }
+}
+
+fn retina_resize_summary(root: &Path, output_dir: &Path) -> String {
+    let mut output = String::new();
+    output.push_str("## Retina / Resize Stability\n\n");
+    output.push_str("| Log | Contents Scale | Drawable Size | Mask Texture | Offscreen Texture | Max Physical | Max Mask Texture | Review |\n");
+    output.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n");
+
+    let mut found = false;
+    for log_path in capture_logs(output_dir) {
+        let Ok(log) = fs::read_to_string(&log_path) else {
+            continue;
+        };
+        let mut contents_scale_events = 0;
+        let mut drawable_size_events = 0;
+        let mut mask_texture_events = 0;
+        let mut offscreen_texture_events = 0;
+        let mut max_physical_size = 0_u64;
+        let mut max_mask_texture_size = 0_u64;
+        for line in log.lines() {
+            if line.contains("renderer_event=contents_scale_changed") {
+                contents_scale_events += 1;
+            }
+            if line.contains("renderer_event=drawable_size_changed") {
+                drawable_size_events += 1;
+                if let Some(physical) = renderer_event_u64(line, "physical") {
+                    max_physical_size = max_physical_size.max(physical);
+                }
+            }
+            if line.contains("renderer_event=mask_tile_size_changed") {
+                mask_texture_events += 1;
+                if let Some(size) = renderer_event_u64(line, "new") {
+                    max_mask_texture_size = max_mask_texture_size.max(size);
+                }
+            } else if line.contains("renderer_event=mask_atlas_resized")
+                || line.contains("renderer_event=high_precision_mask_texture_size_changed")
+            {
+                mask_texture_events += 1;
+                if let Some(size) = renderer_event_u64(line, "texture_size")
+                    .or_else(|| renderer_event_u64(line, "new"))
+                {
+                    max_mask_texture_size = max_mask_texture_size.max(size);
+                }
+            }
+            if line.contains("renderer_event=offscreen_texture_size_changed")
+                || line.contains("renderer_event=blend_snapshot_texture_size_changed")
+            {
+                offscreen_texture_events += 1;
+            }
+        }
+        if contents_scale_events == 0
+            && drawable_size_events == 0
+            && mask_texture_events == 0
+            && offscreen_texture_events == 0
+        {
+            continue;
+        }
+
+        found = true;
+        let review = if mask_texture_events > 0 || offscreen_texture_events > 0 {
+            "Resize touched mask/offscreen textures; inspect clipped edges and offscreen composites."
+        } else {
+            "Drawable geometry changed; confirm avatar framing and Retina sharpness."
+        };
+        output.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |\n",
+            relative_path(root, &log_path),
+            contents_scale_events,
+            drawable_size_events,
+            mask_texture_events,
+            offscreen_texture_events,
+            display_u64_or_dash(max_physical_size),
+            display_u64_or_dash(max_mask_texture_size),
+            review
+        ));
+    }
+
+    if !found {
+        output.push_str(
+            "| _No resize events found_ |  |  |  |  |  |  | Run a capture or Space test first. |\n",
+        );
+    }
+    output.push('\n');
+    output
+}
+
+fn display_u64_or_dash(value: u64) -> String {
+    if value == 0 {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4567,6 +5082,45 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     }
 
     #[test]
+    fn retina_resize_summary_reports_geometry_and_texture_events() {
+        let root = env::temp_dir().join(format!(
+            "vtube-studio-rs-xtask-retina-test-{}",
+            timestamp_for_filename()
+        ));
+        let output_dir = root.join("target/render-regression");
+        let capture_dir = output_dir.join("mask-matrix");
+        fs::create_dir_all(&capture_dir).expect("capture dir should be created");
+        fs::write(
+            capture_dir.join("capture.log"),
+            concat!(
+                "renderer_event=contents_scale_changed old=1.00 new=2.00\n",
+                "renderer_event=drawable_size_changed logical=512.0 physical=1024 contents_scale=2.00\n",
+                "renderer_event=mask_tile_size_changed old=512 new=1024 physical=1024\n",
+                "renderer_event=mask_atlas_resized contexts=37 textures=2 texture_size=1024\n",
+                "renderer_event=offscreen_texture_size_changed old=0x0 new=1024x1024 count=2\n",
+            ),
+        )
+        .expect("capture log should be written");
+
+        let summary = retina_resize_summary(&root, &output_dir);
+        let overview =
+            retina_resize_overview(&output_dir).expect("resize overview should be present");
+        let focus = review_focus(&root, &output_dir);
+
+        assert_eq!(overview.contents_scale_events, 1);
+        assert_eq!(overview.drawable_size_events, 1);
+        assert_eq!(overview.mask_texture_events, 2);
+        assert_eq!(overview.offscreen_texture_events, 1);
+        assert_eq!(overview.max_physical_size, 1024);
+        assert_eq!(overview.max_mask_texture_size, 1024);
+        assert!(summary.contains("Retina / Resize Stability"));
+        assert!(summary.contains("Resize touched mask/offscreen textures"));
+        assert!(focus.contains("Retina / window resize stability"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn ren_visual_diff_rows_match_shell_geometry() {
         let rows = ren_visual_diff_rows(1000, 800);
 
@@ -4619,12 +5173,110 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     }
 
     #[test]
+    fn set_toml_section_value_replaces_key_only_in_target_section() {
+        let content = "[other]\npath = \"keep\"\n\n[model]\n  path = \"old\"\n[renderer]\n";
+
+        let updated = set_toml_section_value(content, "model", "path", "\"new\"");
+
+        assert!(updated.contains("[other]\npath = \"keep\"\n"));
+        assert!(updated.contains("[model]\n  path = \"new\"\n[renderer]\n"));
+    }
+
+    #[test]
+    fn set_toml_section_value_inserts_missing_key_before_next_section() {
+        let content = "[model]\n# no path yet\n\n[renderer]\ndisable_masks = false\n";
+
+        let updated =
+            set_toml_section_value(content, "model", "path", "\"public/model/0.model3.json\"");
+
+        assert!(updated.contains(
+            "[model]\n# no path yet\n\npath = \"public/model/0.model3.json\"\n[renderer]\n"
+        ));
+    }
+
+    #[test]
+    fn set_toml_section_value_appends_missing_section() {
+        let updated =
+            set_toml_section_value("[renderer]\n", "model", "path", "\"avatar.model3.json\"");
+
+        assert!(updated.ends_with("\n[model]\npath = \"avatar.model3.json\"\n"));
+    }
+
+    #[test]
+    fn select_model_args_choose_dev_or_build_config() {
+        let (target, model_path) =
+            parse_select_model_args(vec!["public/model/0.model3.json".to_string()])
+                .expect("default target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+        assert_eq!(model_path, "public/model/0.model3.json");
+
+        let (target, model_path) = parse_select_model_args(vec![
+            "--build".to_string(),
+            "public/model/0.model3.json".to_string(),
+        ])
+        .expect("build target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+        assert_eq!(model_path, "public/model/0.model3.json");
+    }
+
+    #[test]
+    fn toml_string_literal_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            toml_string_literal(r#"public/model/"avatar"\0.model3.json"#),
+            r#""public/model/\"avatar\"\\0.model3.json""#
+        );
+    }
+
+    #[test]
     fn model_name_strips_model3_suffix() {
         assert_eq!(
             model_name_from_path("public/CubismSdkForNative/Samples/Resources/Ren/Ren.model3.json"),
             "Ren"
         );
         assert_eq!(model_name_from_path("/tmp/avatar.json"), "avatar.json");
+    }
+
+    #[test]
+    fn model_manifest_summary_counts_resources() {
+        let root = env::temp_dir().join(format!(
+            "vtube-studio-rs-model-list-test-{}",
+            timestamp_for_filename()
+        ));
+        fs::create_dir_all(&root).expect("test dir should be created");
+        let manifest_path = root.join("Avatar.model3.json");
+        fs::write(
+            &manifest_path,
+            r#"
+{
+  "Version": 3,
+  "FileReferences": {
+    "Moc": "Avatar.moc3",
+    "Textures": ["texture_00.png", "texture_01.png"],
+    "Physics": "Avatar.physics3.json",
+    "DisplayInfo": "Avatar.cdi3.json",
+    "Motions": {
+      "Idle": [{ "File": "idle_00.motion3.json" }],
+      "TapBody": [{ "File": "tap_00.motion3.json" }, { "File": "tap_01.motion3.json" }]
+    },
+    "Expressions": [
+      { "Name": "smile", "File": "smile.exp3.json" }
+    ]
+  }
+}
+"#,
+        )
+        .expect("manifest should be written");
+
+        let summary = ModelManifestSummary::load(&manifest_path).expect("manifest should parse");
+
+        assert_eq!(summary.name, "Avatar");
+        assert_eq!(summary.texture_count, 2);
+        assert_eq!(summary.motion_count, 3);
+        assert_eq!(summary.expression_count, 1);
+        assert!(summary.has_physics);
+        assert!(summary.has_display_info);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

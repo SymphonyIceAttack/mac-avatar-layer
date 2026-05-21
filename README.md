@@ -123,6 +123,7 @@ cargo xtask capture-offscreen-matrix
 cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
+cargo xtask list-models
 cargo xtask mao-mask-audit
 cargo xtask probe-risk-models public/model
 cargo xtask quality-visual-diff
@@ -133,6 +134,8 @@ cargo xtask rice-stress-audit
 cargo xtask run-metal
 cargo xtask run-space-test
 cargo xtask sample-compatibility-sweep
+cargo xtask select-model --dev public/model/0.model3.json
+cargo xtask select-model --build public/model/0.model3.json
 ```
 
 The recommended local command is:
@@ -141,14 +144,29 @@ The recommended local command is:
 cargo xtask run-metal
 ```
 
-It defaults to `public/model/0.model3.json`, auto-detects
+With no argument it uses `[model].path` from the active profile config, falling
+back to `public/model/0.model3.json` when unset. It auto-detects
 `public/CubismSdkForNative`, sets `CUBISM_CORE_LIB_DIR` and
 `CUBISM_CORE_INCLUDE_DIR`, and closes old `target/debug/vtube-studio-rs`
-instances before launching. Pass a different model path as the first argument:
+instances before launching. Pass a different model path as the first argument to
+override local config for that run:
 
 ```bash
 cargo xtask run-metal public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json
 ```
+
+List local models before choosing one:
+
+```bash
+cargo xtask list-models
+cargo xtask list-models public/model
+cargo xtask select-model --dev public/model/0.model3.json
+cargo xtask select-model --build public/model/0.model3.json
+```
+
+`select-model` writes `[model].path` to `vtube-studio-rs.dev.toml` by default;
+use `--build` to write `vtube-studio-rs.build.toml`. Later `cargo xtask
+run-metal` uses the development config when no model path argument is passed.
 
 To keep old instances alive during development:
 
@@ -218,10 +236,10 @@ timestamped screenshots and refreshing `latest-*.png` copies for quick visual
 comparison after renderer changes. Set `WAIT_SECONDS` if a machine needs longer
 for the first build/startup, or `POST_WINDOW_WAIT_SECONDS` if the screenshot
 should wait longer for diagnostics and motion to settle after the window appears.
-`cargo xtask capture-mask-matrix` temporarily switches the local renderer config and
+`cargo xtask capture-mask-matrix` temporarily switches the local dev renderer config and
 captures the `Mao` stress model in shared-mask, high-precision-mask, and
 no-mask modes under `target/render-regression/mask-matrix/`, then restores the
-previous `vtube-studio-rs.toml`.
+previous `vtube-studio-rs.dev.toml`.
 `cargo xtask mao-mask-audit` writes `target/render-regression/mao-mask-audit.md`, a
 focused report for Mao's dense clipping, inverted masks, eye masks, capture
 references, and manual pass/investigate decision before changing clipping
@@ -274,7 +292,7 @@ The report is a Markdown index with latest screenshot paths, manual review
 checklist, embedded thumbnail previews/contact sheet, a structured manual
 review record, model risk probe output, automatic review focus, renderer
 fallback events, MSAA/edge-quality summaries, focused audit summaries, and
-recent renderer events from capture logs.
+Retina/resize stability summaries from capture logs.
 Generated test artifacts under `target/render-regression/` and
 `target/space-test/` are cleaned automatically before these commands run. Set
 `VTUBE_RS_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
@@ -288,8 +306,11 @@ and sleep/wake testing can be checked from the terminal. Useful events include
 `metal_initialized`, `contents_scale_changed`, `drawable_size_changed`,
 `mask_tile_size_changed`,
 `mask_atlas_resized`, `offscreen_texture_size_changed`,
-`next_drawable_unavailable`, `next_drawable_recovered`, `long_frame_gap`, and
-`display_wake_inferred`.
+`memory_budget`, `next_drawable_unavailable`, `next_drawable_recovered`,
+`long_frame_gap`, and `display_wake_inferred`. `memory_budget` estimates the
+renderer-owned atlas, mask, offscreen, MSAA, and blend snapshot texture memory;
+Activity Monitor RSS can be higher because it also includes debug runtime,
+driver/cache, and system allocation overhead.
 The app prevents duplicate local avatar instances with
 `target/vtube-studio-rs.pid`; set `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only
 when intentionally debugging multiple windows.
@@ -298,18 +319,29 @@ and a Markdown checklist/report to `target/space-test/*.md`.
 
 ## App Configuration
 
-Runtime options are read once at startup from `vtube-studio-rs.toml` in the
-project root. The file is local-only and ignored by Git; copy
-`vtube-studio-rs.example.toml` when you want to customize a run. If the file is
-missing, the app uses the same defaults as the example.
+Runtime options are read once at startup from a profile-specific local config in
+the project root. Debug/development runs use `vtube-studio-rs.dev.toml`; release
+builds use `vtube-studio-rs.build.toml`. Both files are local-only and ignored
+by Git. Copy `vtube-studio-rs.dev.example.toml` or
+`vtube-studio-rs.build.example.toml` when you want to customize a run.
 
 ```toml
+[app]
+runtime_profile = "development"
+
+[model]
+path = "public/model/0.model3.json"
+
 [diagnostics]
 show = true
 
 [renderer]
 disable_masks = false
 high_precision_masks = false
+# Defaults depend on [app].runtime_profile:
+# development => enable_msaa/log_events true, release => false.
+# enable_msaa = true
+# log_events = true
 atlas_mipmaps = false
 atlas_anisotropy = 1
 debug_texture_mode = "none"
@@ -343,6 +375,19 @@ smoothing = 18.0
 SDK path variables such as `LIVE2D_CUBISM_SDK_NATIVE_DIR`,
 `CUBISM_CORE_LIB_DIR`, and `CUBISM_CORE_INCLUDE_DIR` remain build/run command
 inputs because they are needed before the app starts.
+
+For lower-overhead build/release-style runs, use `vtube-studio-rs.build.toml`:
+
+```toml
+[app]
+runtime_profile = "release"
+
+[diagnostics]
+show = false
+```
+
+In release profile, renderer event logs and MSAA default to off unless
+`[renderer].log_events` or `[renderer].enable_msaa` explicitly override them.
 
 ## Test
 

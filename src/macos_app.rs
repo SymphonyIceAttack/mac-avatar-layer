@@ -103,7 +103,7 @@ unsafe extern "C" {
     fn CGImageRelease(image: Id);
 }
 
-pub fn run(model_path: &str) -> Result<(), String> {
+pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
     unsafe {
         let app = msg_id(class("NSApplication")?, "sharedApplication");
         msg_void_id(
@@ -112,7 +112,6 @@ pub fn run(model_path: &str) -> Result<(), String> {
             NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
         );
         let _activity_token = prevent_app_nap()?;
-        let config = AppConfig::load()?;
         let model = Live2dModel::load(model_path)?;
         println!("Loaded {}", model.summary());
         println!("Model root: {}", model.root_dir.display());
@@ -133,7 +132,8 @@ pub fn run(model_path: &str) -> Result<(), String> {
             .with_offscreen_count(cubism_runtime.info().offscreen_count);
         #[cfg(feature = "metal-renderer")]
         let mut metal_renderer = {
-            let mut renderer = MetalRenderer::load(&model, &config.renderer)?;
+            let mut renderer =
+                MetalRenderer::load(&model, &config.renderer, config.app.runtime_profile)?;
             let probe = renderer.render_probe(&cubism_runtime);
             renderer_diagnostics.apply_metal_probe(&probe);
             println!(

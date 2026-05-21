@@ -2,4 +2,6 @@
 .DS_Store
 public
 vtube-studio-rs.toml
+vtube-studio-rs.dev.toml
+vtube-studio-rs.build.toml
 CubismSdkForNative*/

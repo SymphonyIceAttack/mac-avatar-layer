@@ -1,0 +1,43 @@
+[app]
+runtime_profile = "release"
+
+[model]
+path = "public/model/0.model3.json"
+
+[diagnostics]
+show = false
+
+[renderer]
+disable_masks = false
+high_precision_masks = false
+# Build config defaults to lower overhead. Uncomment to force either option.
+# enable_msaa = true
+# log_events = true
+atlas_mipmaps = false
+atlas_anisotropy = 1
+debug_texture_mode = "none"
+hidden_drawables = []
+hidden_parts = []
+only_drawables = []
+only_parts = []
+highlight_drawables = []
+highlight_parts = []
+
+[motion]
+# expression = "smile"
+blink_interval = 3.8
+blink_duration = 0.18
+
+[input.mouse]
+enabled = false
+smoothing = 10.0
+
+[input.microphone]
+enabled = false
+gain = 7.0
+noise_gate = 0.025
+smoothing = 18.0
+
+[overrides]
+# mouth_open = 1.0
+# mouth_form = 0.0
