@@ -1,5 +1,8 @@
 [app]
 runtime_profile = "release"
+window_level = "screen_saver"
+window_width = 540.0
+window_height = 720.0
 
 [model]
 path = "public/model/0.model3.json"
@@ -57,10 +60,16 @@ max_open = 1.0
 enabled = false
 device = ""
 target_fps = 30
+pose_mode = "camera_when_available"
 smoothing = 12.0
 dead_zone = 0.03
-invert_x = false
+invert_x = true
 invert_y = false
+face_x_offset = 0.0
+face_y_offset = 0.0
+gaze_x_offset = 0.0
+gaze_y_offset = 0.0
+roll_offset = 0.0
 angle_x_degrees = 30.0
 angle_y_degrees = 22.0
 angle_z_degrees = 12.0
@@ -68,10 +77,13 @@ eye_x_range = 1.0
 eye_y_range = 1.0
 mouth_enabled = true
 mouth_gain = 1.4
+mouth_open_offset = 0.0
 mouth_min_open = 0.0
 mouth_max_open = 1.0
 mouth_combine = "max"
 blink_from_camera = false
+blink_close_threshold = 0.20
+blink_open_threshold = 0.38
 
 [overrides]
 # mouth_open = 1.0

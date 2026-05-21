@@ -40,14 +40,26 @@ fn main() {
         return;
     }
 
-    let config = match config::AppConfig::load() {
+    let cli = match parse_cli_args(&args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            eprintln!("vtube-studio-rs failed to start: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = set_working_directory_from_config(cli.config_path.as_deref()) {
+        eprintln!("vtube-studio-rs failed to start: {error}");
+        std::process::exit(1);
+    }
+
+    let config = match load_app_config(cli.config_path.as_deref()) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("vtube-studio-rs failed to start: {error}");
             std::process::exit(1);
         }
     };
-    let cli_model_path = args.first().map(String::as_str);
+    let cli_model_path = cli.model_path.as_deref();
     let model_path = config.resolved_model_path(cli_model_path);
     if let Err(error) = validate_model_manifest_path(&model_path, cli_model_path.is_some()) {
         eprintln!("vtube-studio-rs failed to start: {error}");
@@ -66,6 +78,82 @@ fn main() {
         eprintln!("vtube-studio-rs failed to start: {error}");
         std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct CliArgs {
+    config_path: Option<String>,
+    model_path: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
+    let mut config_path = None;
+    let mut model_path = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    return Err("missing value after --config".to_string());
+                };
+                config_path = Some(path.clone());
+            }
+            "--help" | "-h" => {
+                return Err(
+                    "usage: vtube-studio-rs [--config CONFIG_PATH] [MODEL_PATH]".to_string()
+                );
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown argument: {value}"));
+            }
+            value => {
+                if model_path.is_some() {
+                    return Err("only one MODEL_PATH argument is supported".to_string());
+                }
+                model_path = Some(value.to_string());
+            }
+        }
+        index += 1;
+    }
+
+    Ok(CliArgs {
+        config_path,
+        model_path,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn load_app_config(config_path: Option<&str>) -> Result<config::AppConfig, String> {
+    if let Some(config_path) = config_path {
+        return config::AppConfig::load_from_path(std::path::Path::new(config_path));
+    }
+
+    config::AppConfig::load()
+}
+
+#[cfg(target_os = "macos")]
+fn set_working_directory_from_config(config_path: Option<&str>) -> Result<(), String> {
+    let Some(config_path) = config_path else {
+        return Ok(());
+    };
+    let config_path = std::path::Path::new(config_path);
+    if !config_path.is_absolute() {
+        return Ok(());
+    }
+    let Some(parent) = config_path.parent() else {
+        return Ok(());
+    };
+
+    std::env::set_current_dir(parent).map_err(|error| {
+        format!(
+            "Failed to use {} as working directory: {error}",
+            parent.display()
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -964,7 +1052,7 @@ fn is_model3_path(path: &std::path::Path) -> bool {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{is_model3_path, missing_model_manifest_message};
+    use super::{CliArgs, is_model3_path, missing_model_manifest_message, parse_cli_args};
 
     #[test]
     fn model3_path_detection_requires_model3_json_suffix() {
@@ -991,6 +1079,23 @@ mod tests {
 
         assert!(message.contains("command line"));
         assert!(message.contains("cargo xtask list-models"));
+    }
+
+    #[test]
+    fn cli_args_accept_config_and_model_path() {
+        let args = vec![
+            "--config".to_string(),
+            "/tmp/vtube-studio-rs.dev.toml".to_string(),
+            "/tmp/model/0.model3.json".to_string(),
+        ];
+
+        assert_eq!(
+            parse_cli_args(&args).expect("args should parse"),
+            CliArgs {
+                config_path: Some("/tmp/vtube-studio-rs.dev.toml".to_string()),
+                model_path: Some("/tmp/model/0.model3.json".to_string()),
+            }
+        );
     }
 }
 

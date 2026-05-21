@@ -8,16 +8,33 @@ members = [".", "xtask"]
 
 [features]
 default = []
-camera-tracking = []
+camera-tracking = [
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2",
+    "dep:objc2-av-foundation",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-media",
+    "dep:objc2-foundation",
+    "dep:objc2-vision",
+]
 cubism-core = ["dep:live2d-cubism-core-sys"]
 metal-renderer = ["cubism-core", "dep:core-graphics-types", "dep:metal"]
 
 [dependencies]
+block2 = { version = "0.6.2", optional = true }
 core-graphics-types = { version = "0.2.0", optional = true }
 cpal = "0.15.3"
+dispatch2 = { version = "0.3.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 live2d-cubism-core-sys = { version = "0.1", optional = true }
 metal = { version = "0.33.0", optional = true }
+objc2 = { version = "0.6.2", optional = true }
+objc2-av-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureVideoDataOutput", "AVMediaFormat"] }
+objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2"] }
+objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = ["CMSampleBuffer", "objc2"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSError", "NSString", "NSValue"] }
+objc2-vision = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-media", "VNDetectFaceLandmarksRequest", "VNDetectFaceRectanglesRequest", "VNFaceLandmarks", "VNObservation", "VNRequest", "VNRequestHandler"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 toml = "0.8.23"

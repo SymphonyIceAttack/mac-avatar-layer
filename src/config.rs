@@ -30,7 +30,7 @@ impl AppConfig {
         Ok(config)
     }
 
-    fn load_from_path(path: &Path) -> Result<Self, String> {
+    pub(crate) fn load_from_path(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path)
             .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
         let config = toml::from_str(&text)
@@ -112,10 +112,24 @@ impl Default for RuntimeProfile {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppRuntimeConfig {
     pub runtime_profile: RuntimeProfile,
+    pub window_level: String,
+    pub window_width: f64,
+    pub window_height: f64,
+}
+
+impl Default for AppRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            runtime_profile: RuntimeProfile::default(),
+            window_level: "screen_saver".to_string(),
+            window_width: 360.0,
+            window_height: 480.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -284,10 +298,16 @@ pub struct CameraConfig {
     pub enabled: bool,
     pub device: String,
     pub target_fps: u32,
+    pub pose_mode: String,
     pub smoothing: f32,
     pub dead_zone: f32,
     pub invert_x: bool,
     pub invert_y: bool,
+    pub face_x_offset: f32,
+    pub face_y_offset: f32,
+    pub gaze_x_offset: f32,
+    pub gaze_y_offset: f32,
+    pub roll_offset: f32,
     pub angle_x_degrees: f32,
     pub angle_y_degrees: f32,
     pub angle_z_degrees: f32,
@@ -295,10 +315,13 @@ pub struct CameraConfig {
     pub eye_y_range: f32,
     pub mouth_enabled: bool,
     pub mouth_gain: f32,
+    pub mouth_open_offset: f32,
     pub mouth_min_open: f32,
     pub mouth_max_open: f32,
     pub mouth_combine: String,
     pub blink_from_camera: bool,
+    pub blink_close_threshold: f32,
+    pub blink_open_threshold: f32,
 }
 
 impl Default for CameraConfig {
@@ -307,10 +330,16 @@ impl Default for CameraConfig {
             enabled: false,
             device: String::new(),
             target_fps: 30,
+            pose_mode: "camera_when_available".to_string(),
             smoothing: 12.0,
             dead_zone: 0.03,
-            invert_x: false,
+            invert_x: true,
             invert_y: false,
+            face_x_offset: 0.0,
+            face_y_offset: 0.0,
+            gaze_x_offset: 0.0,
+            gaze_y_offset: 0.0,
+            roll_offset: 0.0,
             angle_x_degrees: 30.0,
             angle_y_degrees: 22.0,
             angle_z_degrees: 12.0,
@@ -318,10 +347,13 @@ impl Default for CameraConfig {
             eye_y_range: 1.0,
             mouth_enabled: true,
             mouth_gain: 1.4,
+            mouth_open_offset: 0.0,
             mouth_min_open: 0.0,
             mouth_max_open: 1.0,
             mouth_combine: "max".to_string(),
             blink_from_camera: false,
+            blink_close_threshold: 0.20,
+            blink_open_threshold: 0.38,
         }
     }
 }
@@ -335,7 +367,7 @@ pub struct OverridesConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, RendererConfig, RuntimeProfile};
+    use super::{AppConfig, CameraConfig, RendererConfig, RuntimeProfile};
 
     #[test]
     fn parses_partial_config_toml() {
@@ -346,6 +378,9 @@ path = "public/model/custom.model3.json"
 
 [app]
 runtime_profile = "release"
+window_level = "screen_saver"
+window_width = 540.0
+window_height = 720.0
 
 [diagnostics]
 show = false
@@ -398,10 +433,16 @@ max_open = 0.85
 enabled = true
 device = "FaceTime HD Camera"
 target_fps = 24
+pose_mode = "mouse"
 smoothing = 14.0
 dead_zone = 0.04
 invert_x = true
 invert_y = true
+face_x_offset = 0.10
+face_y_offset = -0.08
+gaze_x_offset = 0.05
+gaze_y_offset = -0.04
+roll_offset = 0.03
 angle_x_degrees = 26.0
 angle_y_degrees = 18.0
 angle_z_degrees = 10.0
@@ -409,10 +450,13 @@ eye_x_range = 0.9
 eye_y_range = 0.8
 mouth_enabled = false
 mouth_gain = 1.8
+mouth_open_offset = 0.06
 mouth_min_open = 0.05
 mouth_max_open = 0.9
 mouth_combine = "microphone"
 blink_from_camera = true
+blink_close_threshold = 0.22
+blink_open_threshold = 0.58
 
 [overrides]
 mouth_open = 0.7
@@ -425,6 +469,9 @@ mouth_open = 0.7
             Some("public/model/custom.model3.json")
         );
         assert_eq!(config.app.runtime_profile, RuntimeProfile::Release);
+        assert_eq!(config.app.window_level, "screen_saver");
+        assert_eq!(config.app.window_width, 540.0);
+        assert_eq!(config.app.window_height, 720.0);
         assert!(!config.diagnostics.show);
         assert!(config.renderer.disable_masks);
         assert!(config.renderer.high_precision_masks);
@@ -466,10 +513,16 @@ mouth_open = 0.7
         assert!(config.input.camera.enabled);
         assert_eq!(config.input.camera.device, "FaceTime HD Camera");
         assert_eq!(config.input.camera.target_fps, 24);
+        assert_eq!(config.input.camera.pose_mode, "mouse");
         assert_eq!(config.input.camera.smoothing, 14.0);
         assert_eq!(config.input.camera.dead_zone, 0.04);
         assert!(config.input.camera.invert_x);
         assert!(config.input.camera.invert_y);
+        assert_eq!(config.input.camera.face_x_offset, 0.10);
+        assert_eq!(config.input.camera.face_y_offset, -0.08);
+        assert_eq!(config.input.camera.gaze_x_offset, 0.05);
+        assert_eq!(config.input.camera.gaze_y_offset, -0.04);
+        assert_eq!(config.input.camera.roll_offset, 0.03);
         assert_eq!(config.input.camera.angle_x_degrees, 26.0);
         assert_eq!(config.input.camera.angle_y_degrees, 18.0);
         assert_eq!(config.input.camera.angle_z_degrees, 10.0);
@@ -477,10 +530,13 @@ mouth_open = 0.7
         assert_eq!(config.input.camera.eye_y_range, 0.8);
         assert!(!config.input.camera.mouth_enabled);
         assert_eq!(config.input.camera.mouth_gain, 1.8);
+        assert_eq!(config.input.camera.mouth_open_offset, 0.06);
         assert_eq!(config.input.camera.mouth_min_open, 0.05);
         assert_eq!(config.input.camera.mouth_max_open, 0.9);
         assert_eq!(config.input.camera.mouth_combine, "microphone");
         assert!(config.input.camera.blink_from_camera);
+        assert_eq!(config.input.camera.blink_close_threshold, 0.22);
+        assert_eq!(config.input.camera.blink_open_threshold, 0.58);
         assert_eq!(config.overrides.mouth_open, Some(0.7));
         assert_eq!(config.overrides.mouth_form, None);
     }
@@ -508,6 +564,14 @@ path = "public/model/from-config.model3.json"
             config_model.resolved_model_path(Some("public/model/from-cli.model3.json")),
             "public/model/from-cli.model3.json"
         );
+    }
+
+    #[test]
+    fn camera_defaults_use_mirrored_horizontal_pose() {
+        let config = CameraConfig::default();
+
+        assert!(config.invert_x);
+        assert!(!config.invert_y);
     }
 
     #[test]

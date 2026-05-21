@@ -81,6 +81,12 @@ files:
 
 - The app opens a native transparent borderless AppKit window that can join all
   Spaces.
+- Done: the root content layer is transparent by default, with no rounded dark
+  panel background, so normal runs show only the Live2D model unless diagnostics
+  are explicitly enabled.
+- Done: startup window size is configurable through `[app].window_width` and
+  `[app].window_height`; local dev/build configs use `540x720`, 1.5x the
+  original prototype size.
 - The render loop targets roughly 60 FPS and reports frame timing diagnostics.
 - App startup uses a local PID guard under `target/vtube-studio-rs.pid` to avoid
   duplicate development windows. `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` is only
@@ -97,9 +103,12 @@ files:
 ### Local Tooling
 
 - `cargo xtask run-metal` provides a one-command local Metal run path with SDK
-  auto-detection for `public/CubismSdkForNative`; `cargo xtask run-metal
-  --release` runs the optimized build profile against
-  `vtube-studio-rs.build.toml`.
+  auto-detection for `public/CubismSdkForNative`; it compiles
+  `metal-renderer camera-tracking` by default, launches through the local
+  signed `.app` wrapper for stable camera permissions, and the active TOML
+  controls whether camera capture starts. `cargo xtask run-metal --release`
+  runs the optimized build profile against `vtube-studio-rs.build.toml`, where
+  local camera input is enabled by default.
 - `cargo xtask capture-full-matrix` runs the standard visual regression matrix
   and writes one final Markdown report.
 - `cargo xtask run-space-test` writes Space/display reliability logs and a
@@ -140,15 +149,18 @@ files:
 ## Known Limitations
 
 - This is not a full VTube Studio replacement yet.
-- Camera tracking is not implemented yet. The selected v1 path is a macOS
-  native webcam tracker using AVFoundation capture plus Vision face landmarks;
-  ARKit/iPhone and plugin bridges are deferred.
+- Camera tracking is first-pass rather than fully calibrated. The selected v1
+  path uses macOS AVFoundation capture plus Vision face landmarks, and the
+  local pipeline now starts/stops capture, extracts landmarks, maps samples into
+  motion parameters, and exposes TOML/session calibration controls. Broader
+  real-camera tuning is still needed. ARKit/iPhone and plugin bridges are
+  deferred.
 - There is no GUI settings panel yet; runtime controls are read from
   profile-specific TOML files before startup, with a first-pass macOS status
   bar menu now exposing current model/expression/renderer state and session
-  toggles for diagnostics, mouse tracking, microphone input, and expression
-  selection, plus runtime Soft/Normal/Expressive presets for mouse and mouth
-  calibration.
+  toggles for diagnostics, mouse tracking, microphone input, camera tracking,
+  and expression selection, plus runtime Soft/Normal/Expressive presets for
+  mouse, mouth, and camera calibration.
 - Motion, expression, physics, mouse, and microphone support are first-pass
   implementations; mouse/mouth drivers now expose model-specific calibration
   knobs, but still need real-device tuning.
@@ -278,6 +290,10 @@ Remaining work:
 Decision: implement camera tracking v1 as a macOS-native webcam tracker using
 AVFoundation for camera capture and Vision for face rectangle/landmark
 extraction. Do not use ARKit/iPhone capture or a MediaPipe/plugin bridge in v1.
+Do not continue expanding hand-written Objective-C FFI for the camera backend;
+move the native camera implementation to the `objc2` ecosystem, specifically
+`objc2-av-foundation`, `objc2-vision`, and `block2`, while keeping a small safe
+Rust wrapper between Apple framework objects and the rest of the app.
 
 Goals:
 
@@ -294,15 +310,33 @@ Goals:
 
 Parameter mapping:
 
-- Face center offset maps to `ParamAngleX` and `ParamAngleY`.
-- Face roll maps to `ParamAngleZ`.
+- `VNDetectFaceRectanglesRequest` revision 3 yaw/pitch maps to `ParamAngleX`
+  and `ParamAngleY`; if native pose is missing, estimate yaw from nose/eye
+  landmarks, then fall back to face center offset. Normalize roughly 30 degrees
+  of real yaw/pitch to the full configured Live2D head range so native camera
+  tracking has visible movement without requiring exaggerated head turns.
+- `VNDetectFaceRectanglesRequest` revision 3 roll maps to `ParamAngleZ`, with
+  roughly 45 degrees of real roll mapping to the full configured tilt range.
+- Camera `invert_x` defaults to `true` so the native camera path behaves like a
+  mirrored avatar preview; users can set it to `false` for already mirrored
+  capture pipelines.
 - Face/landmark gaze approximation maps to `ParamEyeBallX` and
   `ParamEyeBallY`; if landmarks are missing, fall back to face center offset.
 - Mouth landmark opening maps to `ParamMouthOpenY` when camera mouth tracking
   is enabled. If microphone mouth input is also enabled, use a configurable
   combine mode, defaulting to `max(camera, microphone)`.
-- Eye landmark openness may drive blink/eye-open parameters only when stable;
-  v1 should keep automatic blink as the default fallback.
+- Mouse and camera both drive head/eye pose parameters, so they must not write
+  those parameters in the same frame without an explicit policy. Add
+  `[input.camera].pose_mode` with `camera_when_available`, `camera`, and
+  `mouse`; default to `camera_when_available` so camera owns head/eye pose only
+  when a face sample exists, with mouse as fallback.
+- Eye landmark openness may drive blink/eye-open parameters when
+  `blink_from_camera` is enabled; close/open thresholds add hysteresis and
+  automatic blink remains the fallback when camera blink is disabled. When
+  camera blink is enabled, neutralize eye-open parameters while lightweight
+  physics samples inputs, then restore the real blink value before Cubism
+  update; this prevents models that wire eye-open into physics from producing a
+  blink-triggered secondary body/part pulse.
 
 Configuration:
 
@@ -311,10 +345,16 @@ Configuration:
 enabled = false
 device = ""
 target_fps = 30
+pose_mode = "camera_when_available"
 smoothing = 12.0
 dead_zone = 0.03
-invert_x = false
+invert_x = true
 invert_y = false
+face_x_offset = 0.0
+face_y_offset = 0.0
+gaze_x_offset = 0.0
+gaze_y_offset = 0.0
+roll_offset = 0.0
 angle_x_degrees = 30.0
 angle_y_degrees = 22.0
 angle_z_degrees = 12.0
@@ -322,10 +362,13 @@ eye_x_range = 1.0
 eye_y_range = 1.0
 mouth_enabled = true
 mouth_gain = 1.4
+mouth_open_offset = 0.0
 mouth_min_open = 0.0
 mouth_max_open = 1.0
 mouth_combine = "max"
 blink_from_camera = false
+blink_close_threshold = 0.20
+blink_open_threshold = 0.38
 ```
 
 Implementation plan:
@@ -333,23 +376,70 @@ Implementation plan:
 - Done: add `CameraConfig` under `[input.camera]` with defaults and README
   examples.
 - Done: add a safe Rust-facing camera input scaffold plus `VT` menu and
-  diagnostics status lines that keep runtime behavior unchanged while the
-  native backend is pending.
+  diagnostics status lines for the native backend.
 - Done: add the optional `camera-tracking` feature and a macOS AVFoundation
   permission/device probe that reports disabled, waiting for permission,
   permission denied, no camera, backend pending, or failed without starting
   frame capture.
-- Add a feature-gated macOS camera module wrapping AVFoundation capture and
-  Vision landmark extraction behind safe Rust-facing structs.
-- Feed camera samples into `MotionInput` without exposing Objective-C objects
-  to the motion layer.
-- Extend `MotionController` to merge camera, mouse, and microphone drivers in a
-  deterministic order: idle/expression -> mouse/camera head and eye -> mouth
-  drivers -> physics -> overrides -> `csmUpdateModel`.
-- Add `VT` menu controls for Camera Tracking and Soft/Normal/Expressive camera
-  calibration presets.
-- Add terminal and diagnostics messages for camera permission denied, no camera,
-  and no face detected.
+- Done: add a safe camera motion sample contract and merge path into
+  `MotionController` for head angle, eye-ball, optional camera blink, and
+  camera/microphone mouth combining.
+- Done: replace the current hand-written camera Objective-C probe with
+  `objc2-av-foundation`, `objc2-vision`, and `block2` dependencies under the
+  optional `camera-tracking` feature. The probe now uses typed
+  `objc2-av-foundation` calls for authorization and device lookup, with Vision
+  landmark extraction contained in the native camera module.
+- Done: add a non-running AVFoundation capture session build check under
+  `camera-tracking`: create `AVCaptureDeviceInput`, create
+  `AVCaptureVideoDataOutput`, add both to an `AVCaptureSession`, and commit the
+  configuration without starting capture or retaining sample buffers.
+- Done: wire an `AVCaptureVideoDataOutputSampleBufferDelegate` through
+  `objc2-av-foundation`, `objc2-core-media`, and `dispatch2`. The delegate is
+  held by the native capture pipeline, runs throttled Vision landmark requests,
+  and does not retain, write, or log frame image data.
+- Done: make `CameraInput` hold the native capture runtime when
+  `camera-tracking` is enabled and permission/device setup succeeds. The
+  runtime starts/stops `AVCaptureSession`, reports `running` / `no face` /
+  `failed`, and clears the sample buffer delegate on drop.
+- Done: request macOS camera access when AVFoundation reports
+  `NotDetermined`, log `renderer_event=camera_permission_response`, and keep
+  rendering without camera tracking until the user grants permission and
+  restarts.
+- Done: make `cargo xtask run-metal` the single local launch path for dev and
+  release: it builds `metal-renderer camera-tracking`, installs the binary into
+  `target/dev-app/vtube-studio-rs Dev.app`, launches through LaunchServices with
+  `--config`, and uses the stable `rs.vtube-studio.dev` identity for camera
+  permissions.
+- Done: keep the `.app` path stable and code sign it after each build using
+  `VTUBE_RS_CODESIGN_IDENTITY` or a detected local development identity when
+  available, with ad-hoc signing as a fallback.
+- Done: add the first Vision request call site inside the sample buffer
+  delegate. Frames are throttled by `[input.camera].target_fps`, processed with
+  `VNDetectFaceLandmarksRequest`, and summarized as face/no-face/failure
+  events without storing or logging image data.
+- Done: map first-pass Vision output into `CameraMotionSample`: bounding box
+  center drives face offset, roll drives face roll, pupil-vs-eye geometry
+  drives gaze, eye vertical ratio drives optional eye openness, and lip
+  vertical ratio drives mouth openness.
+- Done: surface camera calibration data in diagnostics and the `VT` menu:
+  status, face offset, roll, gaze, mouth openness, and eye openness update while
+  the app is running so real-camera tuning has visible feedback.
+- Done: add `VT` menu Soft/Normal/Expressive camera calibration presets that
+  scale camera head/eye ranges and mouth gain for the current session.
+- Done: add a `VT` menu Camera Tracking toggle that can start/stop the native
+  camera capture lifecycle during the current session and keeps the motion
+  layer's camera driver in sync with the selected camera calibration preset.
+- Done: surface actionable camera status details in diagnostics and the `VT`
+  menu for permission denied, no camera, no face, backend missing, and failed
+  setup states.
+- Done: add normalized camera calibration offsets for face center, gaze, roll,
+  and mouth-open zero point so real webcams and models can be tuned without
+  changing the Vision landmark parser.
+- Done: prefer Vision yaw/pitch for camera head rotation and add camera blink
+  threshold hysteresis so eye-open landmarks can drive blinks without
+  half-open flutter.
+- Continue calibrating the Vision landmark-to-parameter mapping on real cameras
+  and model assets.
 
 Non-goals for v1:
 
@@ -398,6 +488,44 @@ Acceptance criteria:
   README instructions.
 - Missing SDK/model files produce actionable messages.
 - Debug overlay can be hidden/shown without editing code.
+
+### 3a. macOS Native API Binding Strategy
+
+Decision: use the `objc2` ecosystem as the preferred Rust bridge for macOS
+native APIs going forward. The project should stop growing broad hand-written
+Objective-C `objc_msgSend` bindings except for small, isolated compatibility
+shims.
+
+Migration scope:
+
+- First migrate `src/macos_camera.rs` to `objc2-av-foundation`,
+  `objc2-vision`, `objc2-foundation`, and `block2`. This is the highest-value
+  target because camera capture, sample buffer delegates, Vision requests, and
+  permission handling are all Objective-C-heavy and still early enough to
+  change safely.
+- Later migrate AppKit/Foundation usage in `src/macos_app.rs` to
+  `objc2-app-kit`, `objc2-foundation`, `objc2-quartz-core`, and
+  `objc2-core-graphics` where practical. This includes `NSApplication`,
+  `NSWindow`, status/menu items, `CATextLayer`, and window/Space behavior.
+- Keep Cubism Core on `live2d-cubism-core-sys`; `objc2` does not replace the
+  Cubism C API.
+- Keep Metal rendering on the existing `metal` crate for now. Revisit only if
+  renderer maintenance requires a broader Apple framework migration.
+- Keep microphone input on `cpal` unless the project later needs macOS-specific
+  audio device or permission control.
+
+Migration order:
+
+1. Replace the hand-written camera Objective-C probe with `objc2` crates.
+2. Add a small internal Apple platform helper layer for shared conversions such
+   as strings, errors, arrays, authorization statuses, and local-only diagnostic
+   messages.
+3. Implement AVFoundation capture and Vision landmark extraction behind safe
+   Rust-facing camera structs.
+4. Migrate status/menu/settings UI pieces from hand-written AppKit FFI to
+   `objc2-app-kit` after camera tracking is stable.
+5. Migrate the window/layer/Space behavior code only in small slices, preserving
+   the existing reliability tests and reports after each slice.
 
 ### 4. CubismClippingManager And Offscreen Parity
 
@@ -464,8 +592,22 @@ Required outcomes:
 - Verify Space switching with the avatar visible on all Spaces.
 - Verify behavior beside full-screen apps.
 - Confirm App Nap prevention is sufficient during active rendering.
-- Keep or refine `NSWindowCollectionBehaviorCanJoinAllSpaces`, `stationary`,
-  and `fullScreenAuxiliary`.
+- Done: refine overlay Space policy to a non-activating `NSPanel` at
+  configurable CoreGraphics window level plus
+  `NSWindowCollectionBehaviorCanJoinAllSpaces`,
+  `NSWindowCollectionBehaviorCanJoinAllApplications`, `stationary`,
+  `ignoresCycle`, and `fullScreenAuxiliary`, and reassert ordering when AppKit
+  reports the avatar window hidden or not visibly occluded.
+- Done: default the overlay to `app.window_level = "screen_saver"` following
+  Apple DTS guidance for non-activating overlay panels above full-screen Spaces;
+  `overlay` and `maximum` remain available for matrix testing.
+- Rejected: `NSWindowCollectionBehaviorTransient` caused hidden/double-image
+  frames during Space swipe videos, so the default policy avoids it.
+- Rejected: private WindowServer/CGS sticky tags were tested and made the window
+  appear only on one Desktop, so they are not part of the default runtime.
+- Done: switch AppKit event polling to non-blocking default, event-tracking, and
+  modal run loop modes so Space gestures are less likely to stall the render
+  loop.
 - Detect and recover from Metal layer/device issues after display sleep/wake.
 - Add structured trace output for long frame gaps and Space/display transitions.
 - Log AppKit active, window visibility, and window occlusion state changes while
@@ -564,6 +706,10 @@ Status: next product milestone.
   `cargo xtask list-models`.
 - Reuse the local model selection path currently exposed by
   `cargo xtask select-model [--dev|--build] MODEL_PATH`.
+- Done: expose a first-pass `VT` menu local model list. It scans `public/`,
+  writes the selected `.model3.json` to the active profile TOML, relaunches the
+  local `.app` with that selected model, and avoids stale command-line model
+  overrides; full in-process hot switching remains planned.
 - Expand the status bar controls into a settings surface for renderer quality
   and selected model. The first-pass `VT` menu already shows renderer/model
   state and toggles diagnostics, expression selection, mouse tracking,
@@ -585,12 +731,15 @@ live in `vtube-studio-rs.dev.example.toml` and
 ```toml
 [app]
 runtime_profile = "development"
+window_level = "screen_saver"
+window_width = 540.0
+window_height = 720.0
 
 [model]
 path = "public/model/0.model3.json"
 
 [diagnostics]
-show = true
+show = false
 
 [renderer]
 disable_masks = false
@@ -645,8 +794,13 @@ device = ""
 target_fps = 30
 smoothing = 12.0
 dead_zone = 0.03
-invert_x = false
+invert_x = true
 invert_y = false
+face_x_offset = 0.0
+face_y_offset = 0.0
+gaze_x_offset = 0.0
+gaze_y_offset = 0.0
+roll_offset = 0.0
 angle_x_degrees = 30.0
 angle_y_degrees = 22.0
 angle_z_degrees = 12.0
@@ -654,10 +808,13 @@ eye_x_range = 1.0
 eye_y_range = 1.0
 mouth_enabled = true
 mouth_gain = 1.4
+mouth_open_offset = 0.0
 mouth_min_open = 0.0
 mouth_max_open = 1.0
 mouth_combine = "max"
 blink_from_camera = false
+blink_close_threshold = 0.20
+blink_open_threshold = 0.38
 
 [overrides]
 # mouth_open = 1.0

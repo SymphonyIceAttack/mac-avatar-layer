@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use image::{Rgba, RgbaImage};
 use serde::Deserialize;
 use sysinfo::{Process, ProcessesToUpdate, Signal, System};
@@ -24,6 +27,7 @@ const DEVELOPMENT_CONFIG_PATH: &str = "vtube-studio-rs.dev.toml";
 const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml";
 const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
 const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
+const DEV_CAMERA_BUNDLE_ID: &str = "rs.vtube-studio.dev";
 
 fn main() {
     if let Err(error) = run() {
@@ -144,6 +148,8 @@ fn clean(args: Vec<String>) -> Result<()> {
     remove_path(target.join("space-test-live.out"))?;
     remove_path(target.join("space-test-live.pid"))?;
     remove_path(target.join("space-test-smoke.out"))?;
+    remove_path(target.join("camera-test"))?;
+    remove_path(target.join("dev-app"))?;
     remove_path(target.join("vtube-studio-rs.pid"))?;
 
     if mode == "--all" {
@@ -686,29 +692,240 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let mut command = Command::new("cargo");
-    command.arg("run");
+    command.arg("build");
     if options.release {
         command.arg("--release");
     }
-    command.arg("--features").arg("metal-renderer").arg("--");
-    if let Some(model_path) = &options.model_path {
-        command.arg(model_path);
-    }
-
+    command
+        .arg("--features")
+        .arg("metal-renderer camera-tracking");
     let status = command
         .current_dir(&root)
-        .env("CUBISM_CORE_INCLUDE_DIR", include_dir)
-        .env("CUBISM_CORE_LIB_DIR", lib_dir)
+        .env("CUBISM_CORE_INCLUDE_DIR", &include_dir)
+        .env("CUBISM_CORE_LIB_DIR", &lib_dir)
         .status()?;
-    if status.success() {
-        Ok(())
-    } else {
+    if !status.success() {
         let profile = if options.release { " --release" } else { "" };
-        Err(
-            format!("cargo run{profile} --features metal-renderer failed with status {status}")
-                .into(),
-        )
+        return Err(
+            format!(
+                "cargo build{profile} --features \"metal-renderer camera-tracking\" failed with status {status}"
+            )
+            .into(),
+        );
     }
+
+    let profile_dir = if options.release { "release" } else { "debug" };
+    let executable = root
+        .join("target")
+        .join(profile_dir)
+        .join("vtube-studio-rs");
+    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
+    println!("App wrapper: {}", bundle_dir.display());
+
+    let config_path = if options.release {
+        root.join(BUILD_CONFIG_PATH)
+    } else {
+        root.join(DEVELOPMENT_CONFIG_PATH)
+    };
+    let log_stem = if options.release {
+        "run-metal-release"
+    } else {
+        "run-metal-dev"
+    };
+    launch_camera_app_wrapper(
+        &root,
+        &bundle_dir,
+        &include_dir,
+        &lib_dir,
+        &config_path,
+        options.model_path.as_deref(),
+        log_stem,
+    )
+}
+
+fn install_camera_app_wrapper(root: &Path, executable: &Path) -> Result<PathBuf> {
+    let executable_name = "vtube-studio-rs";
+    let bundle_dir = root.join("target/dev-app/vtube-studio-rs Dev.app");
+    let contents_dir = bundle_dir.join("Contents");
+    let macos_dir = contents_dir.join("MacOS");
+    let app_executable = macos_dir.join(executable_name);
+    fs::create_dir_all(&macos_dir)?;
+    fs::write(
+        contents_dir.join("Info.plist"),
+        dev_camera_info_plist(executable_name),
+    )?;
+    let _ = fs::remove_file(&app_executable);
+    fs::copy(executable, &app_executable)?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&app_executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&app_executable, permissions)?;
+    }
+    sign_camera_dev_app(root, &bundle_dir)?;
+    Ok(bundle_dir)
+}
+
+fn launch_camera_app_wrapper(
+    root: &Path,
+    bundle_dir: &Path,
+    include_dir: &Path,
+    lib_dir: &Path,
+    config_path: &Path,
+    model_path: Option<&str>,
+    log_stem: &str,
+) -> Result<()> {
+    let log_dir = root.join("target/camera-test");
+    fs::create_dir_all(&log_dir)?;
+    let stdout_path = log_dir.join(format!("{log_stem}.stdout.log"));
+    let stderr_path = log_dir.join(format!("{log_stem}.stderr.log"));
+    let _ = fs::remove_file(&stdout_path);
+    let _ = fs::remove_file(&stderr_path);
+    let mut command = Command::new("open");
+    command
+        .arg("-n")
+        .arg("--stdout")
+        .arg(&stdout_path)
+        .arg("--stderr")
+        .arg(&stderr_path)
+        .arg("--env")
+        .arg(format!("CUBISM_CORE_INCLUDE_DIR={}", include_dir.display()))
+        .arg("--env")
+        .arg(format!("CUBISM_CORE_LIB_DIR={}", lib_dir.display()))
+        .arg(&bundle_dir)
+        .arg("--args")
+        .arg("--config")
+        .arg(config_path);
+    if let Some(model_path) = model_path {
+        command.arg(absolute_path(&root, model_path));
+    }
+
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("vtube-studio-rs app wrapper failed with status {status}").into());
+    }
+
+    let pid_path = root.join("target/vtube-studio-rs.pid");
+    let pid = wait_for_pid_file(&pid_path, Duration::from_secs(10))?;
+    println!("vtube-studio-rs app launched with pid {pid}.");
+    println!("Camera stdout: {}", relative_display(&root, &stdout_path));
+    println!("Camera stderr: {}", relative_display(&root, &stderr_path));
+    println!("Close the avatar window to end this command.");
+    while pid_is_alive(pid) {
+        thread::sleep(Duration::from_millis(500));
+    }
+    Ok(())
+}
+
+fn dev_camera_info_plist(executable_name: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>{executable_name}</string>
+  <key>CFBundleIdentifier</key>
+  <string>{DEV_CAMERA_BUNDLE_ID}</string>
+  <key>CFBundleName</key>
+  <string>vtube-studio-rs Dev</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSCameraUsageDescription</key>
+  <string>vtube-studio-rs uses the local camera to estimate face landmarks and drive the avatar. Frames are not stored, written to disk, or logged.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>vtube-studio-rs can use the local microphone level to drive avatar mouth movement when microphone input is enabled.</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
+    let identity = camera_codesign_identity();
+    let mut command = Command::new("codesign");
+    command
+        .arg("--force")
+        .arg("--deep")
+        .arg("--sign")
+        .arg(&identity)
+        .arg("--identifier")
+        .arg(DEV_CAMERA_BUNDLE_ID)
+        .arg(bundle_dir)
+        .current_dir(root)
+        .stdin(Stdio::null());
+    run_status(&mut command).map_err(|error| {
+        format!(
+            "failed to codesign camera dev app with identity `{identity}`: {error}. \
+Set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity, or use `-` for ad-hoc signing."
+        )
+    })?;
+
+    if identity == "-" {
+        println!(
+            "Code signed camera dev app with ad-hoc identity and stable identifier {DEV_CAMERA_BUNDLE_ID}."
+        );
+        println!(
+            "For fewer macOS Camera re-prompts after rebuilds, create/use a local codesigning certificate and set VTUBE_RS_CODESIGN_IDENTITY."
+        );
+    } else {
+        println!("Code signed camera dev app with identity `{identity}`.");
+    }
+    Ok(())
+}
+
+fn camera_codesign_identity() -> String {
+    env::var("VTUBE_RS_CODESIGN_IDENTITY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(detect_codesign_identity)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn detect_codesign_identity() -> Option<String> {
+    let output = Command::new("security")
+        .arg("find-identity")
+        .arg("-v")
+        .arg("-p")
+        .arg("codesigning")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for preferred in [
+        "Apple Development",
+        "Mac Developer",
+        "Developer ID Application",
+    ] {
+        if let Some(identity) = find_codesign_identity_line(&text, preferred) {
+            return Some(identity);
+        }
+    }
+    None
+}
+
+fn find_codesign_identity_line(text: &str, needle: &str) -> Option<String> {
+    text.lines()
+        .filter(|line| line.contains(needle))
+        .find_map(|line| {
+            let start = line.find('"')? + 1;
+            let end = line[start..].find('"')? + start;
+            Some(line[start..end].to_string())
+        })
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2537,6 +2754,36 @@ fn relative_display(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+fn absolute_path(root: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn wait_for_pid_file(path: &Path, timeout: Duration) -> Result<u32> {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                return Ok(pid);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("timed out waiting for {}", path.display()).into())
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -5467,6 +5714,27 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
                 "public/model/b.model3.json".to_string()
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn camera_dev_info_plist_declares_privacy_usage() {
+        let plist = dev_camera_info_plist("vtube-studio-rs");
+        assert!(plist.contains("<string>vtube-studio-rs</string>"));
+        assert!(plist.contains("NSCameraUsageDescription"));
+        assert!(plist.contains("NSMicrophoneUsageDescription"));
+        assert!(plist.contains("rs.vtube-studio.dev"));
+    }
+
+    #[test]
+    fn parses_preferred_codesign_identity_from_security_output() {
+        let output = r#"  1) ABCDEF1234567890 "Apple Development: Local Dev (TEAMID)"
+  2) 0123456789ABCDEF "Developer ID Application: Example (TEAMID)"
+     2 valid identities found"#;
+
+        assert_eq!(
+            find_codesign_identity_line(output, "Apple Development").as_deref(),
+            Some("Apple Development: Local Dev (TEAMID)")
         );
     }
 

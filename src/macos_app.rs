@@ -2,8 +2,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::audio_input::MicrophoneInput;
-use crate::camera_input::CameraInput;
-use crate::config::{AppConfig, MicrophoneConfig, MouseConfig};
+use crate::camera_input::{CameraInput, CameraStatus};
+use crate::config::{AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig};
 use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
@@ -12,8 +12,7 @@ use crate::motion::MotionInput;
 #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 use crate::software_renderer::SoftwareRenderer;
 use std::ffi::{CString, c_char, c_double, c_long, c_ulong, c_void};
-#[cfg(not(feature = "metal-renderer"))]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
@@ -35,11 +34,17 @@ const NIL: Id = ptr::null_mut();
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BACKING_STORE_BUFFERED: NSUInteger = 2;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
-const NS_FLOATING_WINDOW_LEVEL: NSInteger = 3;
+const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
 const NS_EVENT_MASK_ANY: NSUInteger = NSUInteger::MAX;
 const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: NSUInteger = 1 << 0;
 const NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY: NSUInteger = 1 << 4;
+const NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE: NSUInteger = 1 << 6;
 const NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: NSUInteger = 1 << 8;
+const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS: NSUInteger = 1 << 18;
+const NS_WINDOW_OCCLUSION_STATE_VISIBLE: NSUInteger = 1 << 1;
+const CG_SCREEN_SAVER_WINDOW_LEVEL_KEY: i32 = 13;
+const CG_MAXIMUM_WINDOW_LEVEL_KEY: i32 = 14;
+const CG_OVERLAY_WINDOW_LEVEL_KEY: i32 = 15;
 const NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED: NSUInteger = 1 << 15;
 const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: NSUInteger = 0x00ff_ffff;
 const NS_CONTROL_STATE_VALUE_OFF: NSInteger = 0;
@@ -85,26 +90,37 @@ unsafe extern "C" {
 
 static MENU_COMMANDS: AtomicU32 = AtomicU32::new(0);
 static MENU_SELECTED_EXPRESSION_INDEX: AtomicI32 = AtomicI32::new(EXPRESSION_INDEX_UNCHANGED);
+static MENU_SELECTED_MODEL_INDEX: AtomicI32 = AtomicI32::new(MODEL_INDEX_UNCHANGED);
 
 const MENU_TOGGLE_DIAGNOSTICS: u32 = 1 << 0;
 const MENU_TOGGLE_MOUSE: u32 = 1 << 1;
 const MENU_TOGGLE_MICROPHONE: u32 = 1 << 2;
-const MENU_OPEN_ACTIVE_CONFIG: u32 = 1 << 3;
-const MENU_SELECT_EXPRESSION: u32 = 1 << 4;
-const MENU_SELECT_MOUSE_PRESET: u32 = 1 << 5;
-const MENU_SELECT_MOUTH_PRESET: u32 = 1 << 6;
+const MENU_TOGGLE_CAMERA: u32 = 1 << 3;
+const MENU_OPEN_ACTIVE_CONFIG: u32 = 1 << 4;
+const MENU_SELECT_EXPRESSION: u32 = 1 << 5;
+const MENU_SELECT_MOUSE_PRESET: u32 = 1 << 6;
+const MENU_SELECT_MOUTH_PRESET: u32 = 1 << 7;
+const MENU_SELECT_CAMERA_PRESET: u32 = 1 << 8;
+const MENU_SELECT_MODEL: u32 = 1 << 9;
+const MODEL_INDEX_UNCHANGED: i32 = -1;
 const EXPRESSION_INDEX_UNCHANGED: i32 = -2;
 const EXPRESSION_INDEX_NONE: i32 = -1;
 const INPUT_PRESET_UNCHANGED: i32 = -1;
 
 static MENU_SELECTED_MOUSE_PRESET: AtomicI32 = AtomicI32::new(INPUT_PRESET_UNCHANGED);
 static MENU_SELECTED_MOUTH_PRESET: AtomicI32 = AtomicI32::new(INPUT_PRESET_UNCHANGED);
+static MENU_SELECTED_CAMERA_PRESET: AtomicI32 = AtomicI32::new(INPUT_PRESET_UNCHANGED);
 
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
 
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGWindowLevelForKey(key: i32) -> i32;
+}
 
 #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -150,7 +166,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         println!("{cubism_summary}");
         log_offscreen_status(cubism_runtime.info());
         log_cubism_preview(&cubism_runtime);
-        let window = create_avatar_window()?;
+        let window = create_avatar_window(&config.app)?;
         println!("renderer_event=window_created kind=avatar");
         let root_layer = create_root_layer(window)?;
         #[allow(unused_mut)]
@@ -195,11 +211,12 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             "setHidden:",
             bool_to_objc(!diagnostics_visible),
         );
-        let mut mouse_enabled = config.input.mouse.enabled;
-        let mut microphone_enabled = config.input.microphone.enabled;
         let mut selected_expression_index =
             selected_expression_index(&model, config.motion.expression.as_deref());
-        let camera_input = CameraInput::from_config(&config.input.camera);
+        let mut camera_input = CameraInput::from_config(&config.input.camera);
+        let mut camera_enabled = camera_runtime_active(camera_input.status());
+        let mut mouse_enabled = config.input.mouse.enabled;
+        let mut microphone_enabled = config.input.microphone.enabled;
         let settings_menu = install_settings_menu(
             app,
             &model,
@@ -211,24 +228,29 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 diagnostics_visible,
                 mouse_enabled,
                 microphone_enabled,
+                camera_enabled,
                 selected_expression_index,
                 mouse_preset: InputPreset::Normal,
                 mouth_preset: InputPreset::Normal,
+                camera_preset: InputPreset::Normal,
             },
         )?;
 
-        msg_void_id(window, "makeKeyAndOrderFront:", NIL);
         msg_void(window, "orderFrontRegardless");
-        msg_void_id(app, "activateIgnoringOtherApps:", YES);
 
-        let run_loop_mode = ns_string("kCFRunLoopDefaultMode")?;
+        let event_pump = EventPump::new()?;
         let mut frame_clock = FrameClock::new(TARGET_FPS);
         let mut diagnostics = Diagnostics::new(
             frame_clock.frame_duration(),
             model.summary(),
             cubism_summary,
             renderer_diagnostics,
-            format!("Camera: {}", camera_input.status_label()),
+            camera_debug_summary(
+                camera_input.status(),
+                camera_input.latest_sample(),
+                camera_input.diagnostic(),
+            )
+            .overlay_text,
         );
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
@@ -236,36 +258,44 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let mut microphone = MicrophoneInput::from_config(&config.input.microphone);
         let mut mouse_preset = InputPreset::Normal;
         let mut mouth_preset = InputPreset::Normal;
+        let mut camera_preset = InputPreset::Normal;
+        let mut last_camera_menu_text = format!("Camera Tracking: {}", camera_input.status_label());
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
         let mut lifecycle_monitor = AppLifecycleMonitor::new();
-        lifecycle_monitor.poll(app, window, started_at);
+        lifecycle_monitor.poll(app, window, &config.app, started_at);
 
         loop {
-            drain_pending_events(app, run_loop_mode);
+            event_pump.drain_pending_events(app);
             handle_settings_menu_commands(
                 diagnostics_layer,
                 &settings_menu,
                 &mut diagnostics_visible,
                 &mut mouse_enabled,
                 &mut microphone_enabled,
+                &mut camera_enabled,
                 &mut selected_expression_index,
                 &mut mouse_preset,
                 &mut mouth_preset,
+                &mut camera_preset,
                 &config,
                 &model,
                 &mut motion_controller,
                 &mut microphone,
+                &mut camera_input,
             )?;
-            lifecycle_monitor.poll(app, window, started_at);
+            lifecycle_monitor.poll(app, window, &config.app, started_at);
             begin_immediate_layer_update();
             let now = Instant::now();
+            let camera_sample = camera_input.latest_sample();
+            let camera_status = camera_input.status();
             motion_controller.apply(
                 &mut cubism_runtime,
                 now.saturating_duration_since(last_frame_at),
                 &MotionInput {
                     pointer: normalized_mouse_position(window, &config.input.mouse),
                     mouth_level: microphone.as_ref().map(MicrophoneInput::level),
+                    camera: camera_sample,
                 },
             );
             last_frame_at = now;
@@ -280,6 +310,14 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             }
             #[cfg(not(feature = "cubism-core"))]
             draw_avatar_frame(avatar_layer, started_at.elapsed().as_secs_f64())?;
+            let camera_summary =
+                camera_debug_summary(camera_status, camera_sample, camera_input.diagnostic());
+            diagnostics.set_camera_summary(camera_summary.overlay_text);
+            update_camera_menu_status(
+                &settings_menu,
+                &camera_summary.menu_text,
+                &mut last_camera_menu_text,
+            )?;
             diagnostics.record_frame(diagnostics_layer, started_at)?;
             commit_layer_update();
             frame_clock.sleep_until_next_frame();
@@ -489,47 +527,113 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
     Ok(token)
 }
 
-unsafe fn create_avatar_window() -> Result<Id, String> {
+unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, String> {
+    let window_size = avatar_window_size(app_config);
     let rect = NSRect {
         origin: NSPoint { x: 100.0, y: 140.0 },
-        size: NSSize {
-            width: 360.0,
-            height: 480.0,
-        },
+        size: window_size,
     };
 
-    let window = msg_id(class("NSWindow")?, "alloc");
+    let window = msg_id(class("NSPanel")?, "alloc");
     let window = msg_id_rect_ulong_ulong_bool(
         window,
         "initWithContentRect:styleMask:backing:defer:",
         rect,
-        NS_BORDERLESS_WINDOW_MASK,
+        avatar_window_style_mask(),
         NS_BACKING_STORE_BUFFERED,
         NO,
     );
 
     if window.is_null() {
-        return Err("NSWindow allocation returned nil".to_string());
+        return Err("NSPanel allocation returned nil".to_string());
     }
-
-    let behavior = NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
-        | NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY
-        | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY;
 
     msg_void_bool(window, "setOpaque:", NO);
     msg_void_bool(window, "setMovableByWindowBackground:", YES);
     msg_void_bool(window, "setReleasedWhenClosed:", NO);
-    msg_void_int(window, "setLevel:", NS_FLOATING_WINDOW_LEVEL);
-    msg_void_ulong(window, "setCollectionBehavior:", behavior);
+    msg_void_bool(window, "setCanHide:", NO);
+    msg_void_bool(window, "setFloatingPanel:", YES);
+    msg_void_bool(window, "setHidesOnDeactivate:", NO);
+    msg_void_bool(window, "setWorksWhenModal:", YES);
+    msg_void_bool(window, "setBecomesKeyOnlyIfNeeded:", YES);
+    msg_void_bool(window, "setExcludedFromWindowsMenu:", YES);
+    apply_avatar_window_space_policy(window, app_config);
     println!(
-        "renderer_event=window_configured level={} collection_behavior={}",
-        NS_FLOATING_WINDOW_LEVEL, behavior
+        "renderer_event=window_configured kind=nonactivating_panel level={} level_name={} level_key={} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        avatar_window_level(app_config),
+        avatar_window_level_name(&app_config.window_level),
+        avatar_window_level_key(&app_config.window_level),
+        window_size.width,
+        window_size.height,
+        avatar_window_style_mask(),
+        avatar_window_collection_behavior()
     );
 
     let clear = ns_color(0.0, 0.0, 0.0, 0.0)?;
     msg_void_id(window, "setBackgroundColor:", clear);
 
     Ok(window)
+}
+
+fn avatar_window_style_mask() -> NSUInteger {
+    NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
+}
+
+fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
+    NSSize {
+        width: valid_window_dimension(app_config.window_width, 360.0),
+        height: valid_window_dimension(app_config.window_height, 480.0),
+    }
+}
+
+fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value >= 96.0 {
+        value.min(2400.0)
+    } else {
+        fallback
+    }
+}
+
+unsafe fn avatar_window_level(app_config: &AppRuntimeConfig) -> NSInteger {
+    CGWindowLevelForKey(avatar_window_level_key(&app_config.window_level)) as NSInteger
+}
+
+fn avatar_window_level_key(configured: &str) -> i32 {
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "maximum" | "max" => CG_MAXIMUM_WINDOW_LEVEL_KEY,
+        "overlay" => CG_OVERLAY_WINDOW_LEVEL_KEY,
+        "screen_saver" | "screensaver" | "screen-saver" | "" => CG_SCREEN_SAVER_WINDOW_LEVEL_KEY,
+        _ => CG_SCREEN_SAVER_WINDOW_LEVEL_KEY,
+    }
+}
+
+fn avatar_window_level_name(configured: &str) -> &'static str {
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "screen_saver" | "screensaver" | "screen-saver" => "screen_saver",
+        "maximum" | "max" => "maximum",
+        "overlay" => "overlay",
+        "" => "screen_saver",
+        _ => "screen_saver",
+    }
+}
+
+fn avatar_window_collection_behavior() -> NSUInteger {
+    // `transient` asks AppKit to hide the panel in Mission Control and made
+    // Space swipe transitions produce disappear/double-image frames in testing.
+    NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES
+        | NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS
+        | NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY
+        | NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE
+        | NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+}
+
+unsafe fn apply_avatar_window_space_policy(window: Id, app_config: &AppRuntimeConfig) {
+    msg_void_int(window, "setLevel:", avatar_window_level(app_config));
+    msg_void_ulong(
+        window,
+        "setCollectionBehavior:",
+        avatar_window_collection_behavior(),
+    );
 }
 
 unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
@@ -546,10 +650,11 @@ unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
 
     msg_void_bool(layer, "setNeedsDisplayOnBoundsChange:", YES);
     msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
-    let color = ns_color(0.04, 0.05, 0.07, 0.72)?;
+    let color = ns_color(0.0, 0.0, 0.0, 0.0)?;
     let cg_color = msg_id(color, "CGColor");
     msg_void_id(layer, "setBackgroundColor:", cg_color);
-    msg_void_double(layer, "setCornerRadius:", 24.0);
+    msg_void_bool(layer, "setOpaque:", NO);
+    msg_void_double(layer, "setCornerRadius:", 0.0);
 
     Ok(layer)
 }
@@ -747,9 +852,11 @@ struct RuntimeControlState {
     diagnostics_visible: bool,
     mouse_enabled: bool,
     microphone_enabled: bool,
+    camera_enabled: bool,
     selected_expression_index: Option<usize>,
     mouse_preset: InputPreset,
     mouth_preset: InputPreset,
+    camera_preset: InputPreset,
 }
 
 struct SettingsMenu {
@@ -758,9 +865,20 @@ struct SettingsMenu {
     diagnostics_item: Id,
     mouse_item: Id,
     microphone_item: Id,
+    camera_item: Id,
+    model_items: Vec<Id>,
+    model_entries: Vec<ModelMenuEntry>,
     expression_items: Vec<Id>,
     mouse_preset_items: Vec<Id>,
     mouth_preset_items: Vec<Id>,
+    camera_preset_items: Vec<Id>,
+}
+
+#[derive(Clone, Debug)]
+struct ModelMenuEntry {
+    title: String,
+    path: String,
+    current: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -826,6 +944,27 @@ unsafe fn install_settings_menu(
 
     let model_title = format!("Model: {}", model_title(model_path));
     add_disabled_menu_item(app_menu, &model_title)?;
+    add_disabled_menu_item(app_menu, "Model Selection (relaunches app)")?;
+    let model_entries = discover_model_menu_entries(model_path);
+    let mut model_items = Vec::new();
+    if model_entries.is_empty() {
+        add_disabled_menu_item(app_menu, "No local models found under public/")?;
+    } else {
+        for (index, entry) in model_entries.iter().enumerate() {
+            let item = add_tagged_action_menu_item(
+                app_menu,
+                &entry.title,
+                "selectModel:",
+                "",
+                controller,
+                index as NSInteger,
+            )?;
+            set_menu_item_checked(item, entry.current);
+            model_items.push(item);
+        }
+    }
+    add_separator_menu_item(app_menu)?;
+
     add_disabled_menu_item(app_menu, "Expression")?;
     let mut expression_items = Vec::new();
     let none_item = add_tagged_action_menu_item(
@@ -876,7 +1015,13 @@ unsafe fn install_settings_menu(
         controller,
     )?;
     let camera_title = format!("Camera Tracking: {camera_status}");
-    add_disabled_menu_item(app_menu, &camera_title)?;
+    let camera_item = add_action_menu_item(
+        app_menu,
+        &camera_title,
+        "toggleCameraTracking:",
+        "c",
+        controller,
+    )?;
     add_separator_menu_item(app_menu)?;
 
     add_disabled_menu_item(app_menu, "Mouse Calibration")?;
@@ -930,6 +1075,33 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, &mouth_detail)?;
     add_separator_menu_item(app_menu)?;
 
+    add_disabled_menu_item(app_menu, "Camera Calibration")?;
+    let mut camera_preset_items = Vec::new();
+    for preset in InputPreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectCameraPreset:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        camera_preset_items.push(item);
+    }
+    let camera_detail = format!(
+        "Base: {} | dead {:.2} | eye {:.1}/{:.1} | angle {:.0}/{:.0}/{:.0} | mouth gain {:.1}",
+        config.input.camera.pose_mode,
+        config.input.camera.dead_zone,
+        config.input.camera.eye_x_range,
+        config.input.camera.eye_y_range,
+        config.input.camera.angle_x_degrees,
+        config.input.camera.angle_y_degrees,
+        config.input.camera.angle_z_degrees,
+        config.input.camera.mouth_gain
+    );
+    add_disabled_menu_item(app_menu, &camera_detail)?;
+    add_separator_menu_item(app_menu)?;
+
     let msaa_title = format!(
         "Renderer MSAA: {}",
         if config.renderer.enable_msaa(config.app.runtime_profile) {
@@ -960,7 +1132,7 @@ unsafe fn install_settings_menu(
         ",",
         controller,
     )?;
-    add_disabled_menu_item(app_menu, "Model switching UI: planned")?;
+    add_disabled_menu_item(app_menu, "Model selection relaunches the app")?;
     add_separator_menu_item(app_menu)?;
 
     let quit_item = ns_menu_item("Quit vtube-studio-rs", Some("terminate:"), "q")?;
@@ -975,9 +1147,13 @@ unsafe fn install_settings_menu(
         diagnostics_item,
         mouse_item,
         microphone_item,
+        camera_item,
+        model_items,
+        model_entries,
         expression_items,
         mouse_preset_items,
         mouth_preset_items,
+        camera_preset_items,
     };
     update_settings_menu_state(&menu, state);
     println!("renderer_event=settings_menu_installed kind=main_menu status_item=VT");
@@ -990,13 +1166,16 @@ unsafe fn handle_settings_menu_commands(
     diagnostics_visible: &mut bool,
     mouse_enabled: &mut bool,
     microphone_enabled: &mut bool,
+    camera_enabled: &mut bool,
     selected_expression_index: &mut Option<usize>,
     mouse_preset: &mut InputPreset,
     mouth_preset: &mut InputPreset,
+    camera_preset: &mut InputPreset,
     config: &AppConfig,
     model: &Live2dModel,
     motion_controller: &mut crate::motion::MotionController,
     microphone: &mut Option<MicrophoneInput>,
+    camera_input: &mut CameraInput,
 ) -> Result<(), String> {
     let commands = MENU_COMMANDS.swap(0, Ordering::AcqRel);
     if commands == 0 {
@@ -1050,6 +1229,20 @@ unsafe fn handle_settings_menu_commands(
         );
     }
 
+    if commands & MENU_TOGGLE_CAMERA != 0 {
+        let next_enabled = !*camera_enabled;
+        let mut camera_config = runtime_camera_config(&config.input.camera, *camera_preset);
+        camera_config.enabled = next_enabled;
+        *camera_input = CameraInput::from_config(&camera_config);
+        *camera_enabled = camera_runtime_active(camera_input.status());
+        motion_controller.set_camera_enabled(*camera_enabled, &camera_config);
+        println!(
+            "renderer_event=settings_changed camera_enabled={} status={}",
+            *camera_enabled,
+            camera_input.status_label()
+        );
+    }
+
     if commands & MENU_SELECT_MOUSE_PRESET != 0 {
         let selected = MENU_SELECTED_MOUSE_PRESET.swap(INPUT_PRESET_UNCHANGED, Ordering::AcqRel);
         if let Some(preset) = InputPreset::from_tag(selected) {
@@ -1078,6 +1271,37 @@ unsafe fn handle_settings_menu_commands(
                 "renderer_event=settings_changed mouth_preset={}",
                 mouth_preset.label()
             );
+        }
+    }
+
+    if commands & MENU_SELECT_CAMERA_PRESET != 0 {
+        let selected = MENU_SELECTED_CAMERA_PRESET.swap(INPUT_PRESET_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = InputPreset::from_tag(selected) {
+            *camera_preset = preset;
+            let camera_config = runtime_camera_config(&config.input.camera, *camera_preset);
+            motion_controller.set_camera_config(&camera_config);
+            println!(
+                "renderer_event=settings_changed camera_preset={}",
+                camera_preset.label()
+            );
+        }
+    }
+
+    if commands & MENU_SELECT_MODEL != 0 {
+        let selected = MENU_SELECTED_MODEL_INDEX.swap(MODEL_INDEX_UNCHANGED, Ordering::AcqRel);
+        if selected >= 0 {
+            let selected = selected as usize;
+            if let Some(entry) = settings_menu.model_entries.get(selected) {
+                write_selected_model_to_active_config(&entry.path)?;
+                update_model_menu_selection(settings_menu, selected);
+                schedule_model_relaunch(&entry.path)?;
+                println!(
+                    "renderer_event=settings_changed selected_model=\"{}\" apply=relaunch config=\"{}\"",
+                    entry.path,
+                    crate::config::active_config_path()
+                );
+                terminate_current_app()?;
+            }
         }
     }
 
@@ -1124,9 +1348,11 @@ unsafe fn handle_settings_menu_commands(
             diagnostics_visible: *diagnostics_visible,
             mouse_enabled: *mouse_enabled,
             microphone_enabled: *microphone_enabled,
+            camera_enabled: *camera_enabled,
             selected_expression_index: *selected_expression_index,
             mouse_preset: *mouse_preset,
             mouth_preset: *mouth_preset,
+            camera_preset: *camera_preset,
         },
     );
     Ok(())
@@ -1136,6 +1362,7 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
     set_menu_item_checked(menu.diagnostics_item, state.diagnostics_visible);
     set_menu_item_checked(menu.mouse_item, state.mouse_enabled);
     set_menu_item_checked(menu.microphone_item, state.microphone_enabled);
+    set_menu_item_checked(menu.camera_item, state.camera_enabled);
     for (item_index, item) in menu.expression_items.iter().enumerate() {
         let checked = match state.selected_expression_index {
             None => item_index == 0,
@@ -1149,6 +1376,29 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
     for (index, item) in menu.mouth_preset_items.iter().enumerate() {
         set_menu_item_checked(*item, InputPreset::ALL[index] == state.mouth_preset);
     }
+    for (index, item) in menu.camera_preset_items.iter().enumerate() {
+        set_menu_item_checked(*item, InputPreset::ALL[index] == state.camera_preset);
+    }
+}
+
+unsafe fn update_model_menu_selection(menu: &SettingsMenu, selected_index: usize) {
+    for (index, item) in menu.model_items.iter().enumerate() {
+        set_menu_item_checked(*item, index == selected_index);
+    }
+}
+
+unsafe fn update_camera_menu_status(
+    menu: &SettingsMenu,
+    title: &str,
+    last_title: &mut String,
+) -> Result<(), String> {
+    if last_title == title {
+        return Ok(());
+    }
+
+    msg_void_id(menu.camera_item, "setTitle:", ns_string(title)?);
+    *last_title = title.to_string();
+    Ok(())
 }
 
 unsafe fn install_status_bar_item(menu: Id) -> Result<Id, String> {
@@ -1260,6 +1510,266 @@ fn model_title(model_path: &str) -> &str {
         .unwrap_or(model_path)
 }
 
+fn discover_model_menu_entries(current_model_path: &str) -> Vec<ModelMenuEntry> {
+    let mut paths = Vec::new();
+    if let Err(error) = collect_model3_paths(Path::new("public"), &mut paths) {
+        eprintln!("Failed to scan local models for settings menu: {error}");
+        return Vec::new();
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let path = relative_display_path(&path);
+            ModelMenuEntry {
+                title: model_menu_title(&path),
+                current: model_paths_match(&path, current_model_path),
+                path,
+            }
+        })
+        .collect()
+}
+
+fn collect_model3_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !root.exists() {
+        return Ok(());
+    }
+
+    if root.is_file() {
+        if is_model3_path(root) {
+            paths.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| format!("Failed to read {}: {error}", root.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Failed to read entry in {}: {error}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            collect_model3_paths(&path, paths)?;
+        } else if file_type.is_file() && is_model3_path(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_model3_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".model3.json"))
+}
+
+fn relative_display_path(path: &Path) -> String {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+        .unwrap_or(path);
+    relative.to_string_lossy().replace('\\', "/")
+}
+
+fn model_menu_title(path: &str) -> String {
+    let name = model_title(path);
+    let parent = Path::new(path)
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} ({parent})")
+    }
+}
+
+fn model_paths_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let left = absolute_path_for_compare(left);
+    let right = absolute_path_for_compare(right);
+    left == right
+}
+
+fn absolute_path_for_compare(path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn write_selected_model_to_active_config(model_path: &str) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let updated =
+        set_toml_section_value(&content, "model", "path", &toml_string_literal(model_path));
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
+fn schedule_model_relaunch(model_path: &str) -> Result<(), String> {
+    let command_args = relaunch_command_args(model_path)?;
+    if command_args.is_empty() {
+        return Err("Failed to build relaunch command".to_string());
+    }
+
+    let script =
+        r#"pid="$1"; shift; while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done; exec "$@""#;
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("vtube-studio-rs-relaunch")
+        .arg(std::process::id().to_string())
+        .args(command_args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to schedule model relaunch: {error}"))
+}
+
+fn relaunch_command_args(model_path: &str) -> Result<Vec<String>, String> {
+    let model_path = absolute_path_for_compare(model_path);
+    let config_path = absolute_path_for_compare(crate::config::active_config_path());
+    let mut args = Vec::new();
+
+    if let Some(app_bundle) = current_app_bundle_path() {
+        args.push("/usr/bin/open".to_string());
+        args.push("-n".to_string());
+        push_open_env_arg(&mut args, "CUBISM_CORE_INCLUDE_DIR");
+        push_open_env_arg(&mut args, "CUBISM_CORE_LIB_DIR");
+        args.push(app_bundle.to_string_lossy().to_string());
+        args.push("--args".to_string());
+    } else {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Failed to resolve current executable: {error}"))?;
+        args.push(executable.to_string_lossy().to_string());
+    }
+
+    args.push("--config".to_string());
+    args.push(config_path.to_string_lossy().to_string());
+    args.push(model_path.to_string_lossy().to_string());
+    Ok(args)
+}
+
+fn push_open_env_arg(args: &mut Vec<String>, name: &str) {
+    if let Ok(value) = std::env::var(name) {
+        args.push("--env".to_string());
+        args.push(format!("{name}={value}"));
+    }
+}
+
+fn current_app_bundle_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    executable
+        .ancestors()
+        .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("app"))
+        .map(Path::to_path_buf)
+}
+
+unsafe fn terminate_current_app() -> Result<(), String> {
+    let app = msg_id(class("NSApplication")?, "sharedApplication");
+    msg_void_id(app, "terminate:", NIL);
+    Ok(())
+}
+
+fn set_toml_section_value(content: &str, section: &str, key: &str, value: &str) -> String {
+    let section_header = format!("[{section}]");
+    let mut output = String::new();
+    let mut found_section = false;
+    let mut in_target_section = false;
+    let mut found_key = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if in_target_section
+            && trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && trimmed != section_header
+        {
+            if !found_key {
+                output.push_str(key);
+                output.push_str(" = ");
+                output.push_str(value);
+                output.push('\n');
+                found_key = true;
+            }
+            in_target_section = false;
+        }
+
+        if trimmed == section_header {
+            found_section = true;
+            in_target_section = true;
+        }
+
+        if in_target_section {
+            let trimmed_start = line.trim_start();
+            if trimmed_start.starts_with(key)
+                && trimmed_start[key.len()..].trim_start().starts_with('=')
+            {
+                let indent_len = line.len() - trimmed_start.len();
+                output.push_str(&line[..indent_len]);
+                output.push_str(key);
+                output.push_str(" = ");
+                output.push_str(value);
+                output.push('\n');
+                found_key = true;
+                continue;
+            }
+        }
+
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    if found_section && in_target_section && !found_key {
+        output.push_str(key);
+        output.push_str(" = ");
+        output.push_str(value);
+        output.push('\n');
+    } else if !found_section {
+        if !output.is_empty() && !output.ends_with("\n\n") {
+            output.push('\n');
+        }
+        output.push_str(&section_header);
+        output.push('\n');
+        output.push_str(key);
+        output.push_str(" = ");
+        output.push_str(value);
+        output.push('\n');
+    }
+
+    output
+}
+
+fn toml_string_literal(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 fn mouse_coordinate_space_label(config: &MouseConfig) -> &'static str {
     let coordinate_space = config.coordinate_space.trim();
     if coordinate_space.eq_ignore_ascii_case("window") {
@@ -1331,6 +1841,39 @@ fn runtime_microphone_config(base: &MicrophoneConfig, preset: InputPreset) -> Mi
     config
 }
 
+fn runtime_camera_config(base: &CameraConfig, preset: InputPreset) -> CameraConfig {
+    let mut config = base.clone();
+    config.enabled = true;
+    match preset {
+        InputPreset::Soft => {
+            config.smoothing = (config.smoothing * 0.8).max(1.0);
+            config.eye_x_range *= 0.7;
+            config.eye_y_range *= 0.7;
+            config.angle_x_degrees *= 0.7;
+            config.angle_y_degrees *= 0.7;
+            config.angle_z_degrees *= 0.7;
+            config.mouth_gain *= 0.75;
+            config.mouth_max_open *= 0.85;
+        }
+        InputPreset::Normal => {}
+        InputPreset::Expressive => {
+            config.smoothing = (config.smoothing * 1.2).max(1.0);
+            config.eye_x_range *= 1.25;
+            config.eye_y_range *= 1.25;
+            config.angle_x_degrees *= 1.25;
+            config.angle_y_degrees *= 1.25;
+            config.angle_z_degrees *= 1.25;
+            config.mouth_gain *= 1.35;
+            config.mouth_max_open = (config.mouth_max_open * 1.1).min(1.0);
+        }
+    }
+    config
+}
+
+fn camera_runtime_active(status: CameraStatus) -> bool {
+    matches!(status, CameraStatus::Running | CameraStatus::NoFace)
+}
+
 unsafe fn settings_menu_controller_class() -> Result<Class, String> {
     let class_name =
         CString::new("VTubeStudioRsSettingsMenuController").map_err(|error| error.to_string())?;
@@ -1352,10 +1895,13 @@ unsafe fn settings_menu_controller_class() -> Result<Class, String> {
     add_settings_menu_method(cls, "toggleDiagnostics:", settings_toggle_diagnostics)?;
     add_settings_menu_method(cls, "toggleMouseTracking:", settings_toggle_mouse)?;
     add_settings_menu_method(cls, "toggleMicrophoneInput:", settings_toggle_microphone)?;
+    add_settings_menu_method(cls, "toggleCameraTracking:", settings_toggle_camera)?;
     add_settings_menu_method(cls, "openActiveConfig:", settings_open_active_config)?;
     add_settings_menu_method(cls, "selectExpression:", settings_select_expression)?;
     add_settings_menu_method(cls, "selectMousePreset:", settings_select_mouse_preset)?;
     add_settings_menu_method(cls, "selectMouthPreset:", settings_select_mouth_preset)?;
+    add_settings_menu_method(cls, "selectCameraPreset:", settings_select_camera_preset)?;
+    add_settings_menu_method(cls, "selectModel:", settings_select_model)?;
     objc_registerClassPair(cls);
     Ok(cls)
 }
@@ -1391,6 +1937,10 @@ extern "C" fn settings_toggle_microphone(_this: Id, _selector: Sel, _sender: Id)
     MENU_COMMANDS.fetch_or(MENU_TOGGLE_MICROPHONE, Ordering::AcqRel);
 }
 
+extern "C" fn settings_toggle_camera(_this: Id, _selector: Sel, _sender: Id) {
+    MENU_COMMANDS.fetch_or(MENU_TOGGLE_CAMERA, Ordering::AcqRel);
+}
+
 extern "C" fn settings_open_active_config(_this: Id, _selector: Sel, _sender: Id) {
     MENU_COMMANDS.fetch_or(MENU_OPEN_ACTIVE_CONFIG, Ordering::AcqRel);
 }
@@ -1419,23 +1969,70 @@ extern "C" fn settings_select_mouth_preset(_this: Id, _selector: Sel, sender: Id
     }
 }
 
-unsafe fn drain_pending_events(app: Id, run_loop_mode: Id) {
-    loop {
-        let event = msg_id_mask_date_mode_bool(
-            app,
-            "nextEventMatchingMask:untilDate:inMode:dequeue:",
-            NS_EVENT_MASK_ANY,
-            NIL,
-            run_loop_mode,
-            YES,
-        );
+extern "C" fn settings_select_camera_preset(_this: Id, _selector: Sel, sender: Id) {
+    unsafe {
+        let tag = msg_int(sender, "tag") as i32;
+        MENU_SELECTED_CAMERA_PRESET.store(tag, Ordering::Release);
+        MENU_COMMANDS.fetch_or(MENU_SELECT_CAMERA_PRESET, Ordering::AcqRel);
+    }
+}
 
-        if event.is_null() {
-            break;
+extern "C" fn settings_select_model(_this: Id, _selector: Sel, sender: Id) {
+    unsafe {
+        let tag = msg_int(sender, "tag") as i32;
+        MENU_SELECTED_MODEL_INDEX.store(tag, Ordering::Release);
+        MENU_COMMANDS.fetch_or(MENU_SELECT_MODEL, Ordering::AcqRel);
+    }
+}
+
+struct EventPump {
+    modes: [Id; 3],
+    nonblocking_date: Id,
+}
+
+impl EventPump {
+    const RUN_LOOP_MODE_NAMES: [&'static str; 3] = [
+        "NSDefaultRunLoopMode",
+        "NSEventTrackingRunLoopMode",
+        "NSModalPanelRunLoopMode",
+    ];
+
+    unsafe fn new() -> Result<Self, String> {
+        let nonblocking_date = msg_id(class("NSDate")?, "distantPast");
+        if nonblocking_date.is_null() {
+            return Err("NSDate distantPast returned nil".to_string());
         }
 
-        msg_void_id(app, "sendEvent:", event);
-        msg_void(app, "updateWindows");
+        Ok(Self {
+            modes: [
+                ns_string(Self::RUN_LOOP_MODE_NAMES[0])?,
+                ns_string(Self::RUN_LOOP_MODE_NAMES[1])?,
+                ns_string(Self::RUN_LOOP_MODE_NAMES[2])?,
+            ],
+            nonblocking_date,
+        })
+    }
+
+    unsafe fn drain_pending_events(&self, app: Id) {
+        for mode in self.modes {
+            loop {
+                let event = msg_id_mask_date_mode_bool(
+                    app,
+                    "nextEventMatchingMask:untilDate:inMode:dequeue:",
+                    NS_EVENT_MASK_ANY,
+                    self.nonblocking_date,
+                    mode,
+                    YES,
+                );
+
+                if event.is_null() {
+                    break;
+                }
+
+                msg_void_id(app, "sendEvent:", event);
+                msg_void(app, "updateWindows");
+            }
+        }
     }
 }
 
@@ -1483,6 +2080,112 @@ struct Diagnostics {
     last_report: Instant,
 }
 
+struct CameraDebugSummary {
+    overlay_text: String,
+    menu_text: String,
+}
+
+fn camera_debug_summary(
+    status: CameraStatus,
+    sample: Option<crate::motion::CameraMotionSample>,
+    diagnostic: Option<&str>,
+) -> CameraDebugSummary {
+    let status_label = status.label();
+    let Some(sample) = sample else {
+        let detail = camera_status_detail(status, diagnostic);
+        let overlay_text = match detail.as_deref() {
+            Some(detail) => {
+                format!("Camera: {status_label} | sample none\nCamera detail: {detail}")
+            }
+            None => format!("Camera: {status_label} | sample none"),
+        };
+        return CameraDebugSummary {
+            overlay_text,
+            menu_text: camera_status_menu_text(status),
+        };
+    };
+
+    let gaze = sample
+        .gaze
+        .map(|gaze| format!("{:+.2}/{:+.2}", gaze[0], gaze[1]))
+        .unwrap_or_else(|| "none".to_string());
+    let mouth = sample
+        .mouth_open
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "none".to_string());
+    let eye = sample
+        .eye_open
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "none".to_string());
+    let face_angle = sample
+        .face_angle
+        .map(|angle| format!("{:+.2}/{:+.2}", angle[0], angle[1]))
+        .unwrap_or_else(|| "none".to_string());
+
+    CameraDebugSummary {
+        overlay_text: format!(
+            "Camera: {status_label} | face {:+.2}/{:+.2} | angle {face_angle} | roll {:+.2}\nCamera sample: gaze {gaze} | mouth {mouth} | eye {eye}",
+            sample.face_offset[0], sample.face_offset[1], sample.face_roll,
+        ),
+        menu_text: format!("Camera Tracking: {status_label} | mouth {mouth} | gaze {gaze}"),
+    }
+}
+
+fn camera_status_detail(status: CameraStatus, diagnostic: Option<&str>) -> Option<String> {
+    match status {
+        CameraStatus::Disabled | CameraStatus::Running => None,
+        CameraStatus::NoFace => Some(
+            "No face detected; improve lighting, center your face, or check camera framing."
+                .to_string(),
+        ),
+        CameraStatus::WaitingForPermission
+        | CameraStatus::PermissionDenied
+        | CameraStatus::NoCamera
+        | CameraStatus::BackendPending
+        | CameraStatus::Failed => diagnostic
+            .and_then(first_non_empty_line)
+            .map(str::to_string)
+            .or_else(|| Some(camera_status_fallback_detail(status).to_string())),
+    }
+}
+
+fn first_non_empty_line(value: &str) -> Option<&str> {
+    value.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn camera_status_fallback_detail(status: CameraStatus) -> &'static str {
+    match status {
+        CameraStatus::Disabled => "Camera tracking is disabled.",
+        CameraStatus::WaitingForPermission => "Approve the macOS camera permission prompt.",
+        CameraStatus::PermissionDenied => {
+            "Enable Camera permission for vtube-studio-rs Dev in System Settings."
+        }
+        CameraStatus::NoCamera => "No matching camera was found.",
+        CameraStatus::BackendPending => "Rebuild with the camera-tracking feature.",
+        CameraStatus::Running => "Camera tracking is running.",
+        CameraStatus::NoFace => "No face detected.",
+        CameraStatus::Failed => "Camera setup failed; check the terminal log.",
+    }
+}
+
+fn camera_status_menu_text(status: CameraStatus) -> String {
+    let status_label = status.label();
+    let hint = match status {
+        CameraStatus::Disabled | CameraStatus::Running => None,
+        CameraStatus::WaitingForPermission => Some("approve prompt"),
+        CameraStatus::PermissionDenied => Some("open Camera privacy"),
+        CameraStatus::NoCamera => Some("check device"),
+        CameraStatus::BackendPending => Some("camera feature missing"),
+        CameraStatus::NoFace => Some("adjust framing"),
+        CameraStatus::Failed => Some("see diagnostics"),
+    };
+
+    match hint {
+        Some(hint) => format!("Camera Tracking: {status_label} | {hint}"),
+        None => format!("Camera Tracking: {status_label}"),
+    }
+}
+
 struct AppLifecycleMonitor {
     last_poll: Instant,
     app_active: Option<bool>,
@@ -1502,7 +2205,13 @@ impl AppLifecycleMonitor {
         }
     }
 
-    unsafe fn poll(&mut self, app: Id, window: Id, started_at: Instant) {
+    unsafe fn poll(
+        &mut self,
+        app: Id,
+        window: Id,
+        app_config: &AppRuntimeConfig,
+        started_at: Instant,
+    ) {
         let now = Instant::now();
         if now.duration_since(self.last_poll) < Self::POLL_INTERVAL {
             return;
@@ -1536,7 +2245,20 @@ impl AppLifecycleMonitor {
             );
             self.window_occlusion_state = Some(occlusion_state);
         }
+
+        if !window_visible || !window_occlusion_visible(occlusion_state) {
+            apply_avatar_window_space_policy(window, app_config);
+            msg_void(window, "orderFrontRegardless");
+            println!(
+                "renderer_event=window_reasserted visible={} occlusion_state={} uptime_s={uptime:.1}",
+                window_visible, occlusion_state
+            );
+        }
     }
+}
+
+fn window_occlusion_visible(occlusion_state: NSUInteger) -> bool {
+    occlusion_state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0
 }
 
 #[derive(Debug, Clone)]
@@ -1633,6 +2355,10 @@ impl Diagnostics {
             last_frame_at: None,
             last_report: now,
         }
+    }
+
+    fn set_camera_summary(&mut self, camera_summary: String) {
+        self.camera_summary = camera_summary;
     }
 
     unsafe fn record_frame(&mut self, layer: Id, started_at: Instant) -> Result<(), String> {
@@ -1935,12 +2661,24 @@ unsafe fn msg_id_double_double_double_double(
 #[cfg(all(test, feature = "metal-renderer"))]
 mod tests {
     use super::{
-        InputPreset, NSPoint, NSRect, NSSize, avatar_frame_for_bounds, model_title,
-        mouse_coordinate_space_label, normalized_point_in_rect, runtime_microphone_config,
-        runtime_mouse_config, selected_expression_index,
+        EventPump, InputPreset, NS_NONACTIVATING_PANEL_MASK,
+        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
+        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
+        NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
+        NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
+        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, avatar_frame_for_bounds,
+        avatar_window_collection_behavior, avatar_window_level_key, avatar_window_level_name,
+        avatar_window_size, avatar_window_style_mask, camera_debug_summary, camera_runtime_active,
+        is_model3_path, model_menu_title, model_paths_match, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
+        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
+        selected_expression_index, set_toml_section_value, toml_string_literal,
+        window_occlusion_visible,
     };
-    use crate::config::{MicrophoneConfig, MouseConfig};
+    use crate::camera_input::CameraStatus;
+    use crate::config::{AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig};
     use crate::live2d_model::{Live2dModel, ModelExpression};
+    use crate::motion::CameraMotionSample;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1977,12 +2715,125 @@ mod tests {
     }
 
     #[test]
+    fn avatar_window_policy_is_space_resilient_overlay() {
+        let behavior = avatar_window_collection_behavior();
+        let configured_size = avatar_window_size(&AppRuntimeConfig {
+            window_width: 540.0,
+            window_height: 720.0,
+            ..AppRuntimeConfig::default()
+        });
+        let fallback_size = avatar_window_size(&AppRuntimeConfig {
+            window_width: 0.0,
+            window_height: f64::NAN,
+            ..AppRuntimeConfig::default()
+        });
+
+        assert!(avatar_window_style_mask() & NS_NONACTIVATING_PANEL_MASK != 0);
+        assert_eq!(configured_size.width, 540.0);
+        assert_eq!(configured_size.height, 720.0);
+        assert_eq!(fallback_size.width, 360.0);
+        assert_eq!(fallback_size.height, 480.0);
+        assert_eq!(avatar_window_level_name(""), "screen_saver");
+        assert_eq!(avatar_window_level_name("screen-saver"), "screen_saver");
+        assert_eq!(avatar_window_level_name("max"), "maximum");
+        assert_eq!(avatar_window_level_key(""), 13);
+        assert_eq!(avatar_window_level_key("overlay"), 15);
+        assert_eq!(avatar_window_level_key("screen_saver"), 13);
+        assert_eq!(avatar_window_level_key("maximum"), 14);
+        assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES != 0);
+        assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS != 0);
+        assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY != 0);
+        assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE != 0);
+        assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY != 0);
+    }
+
+    #[test]
+    fn event_pump_uses_nonblocking_space_transition_modes() {
+        assert_eq!(EventPump::RUN_LOOP_MODE_NAMES.len(), 3);
+        assert!(EventPump::RUN_LOOP_MODE_NAMES.contains(&"NSDefaultRunLoopMode"));
+        assert!(EventPump::RUN_LOOP_MODE_NAMES.contains(&"NSEventTrackingRunLoopMode"));
+        assert!(EventPump::RUN_LOOP_MODE_NAMES.contains(&"NSModalPanelRunLoopMode"));
+    }
+
+    #[test]
+    fn occlusion_state_visible_bit_drives_space_reassertion() {
+        assert!(window_occlusion_visible(NS_WINDOW_OCCLUSION_STATE_VISIBLE));
+        assert!(window_occlusion_visible(
+            8192 | NS_WINDOW_OCCLUSION_STATE_VISIBLE
+        ));
+        assert!(!window_occlusion_visible(0));
+        assert!(!window_occlusion_visible(8192));
+    }
+
+    #[test]
     fn model_title_uses_file_name_when_path_has_directories() {
         assert_eq!(
             model_title("public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json"),
             "Rice.model3.json"
         );
         assert_eq!(model_title("0.model3.json"), "0.model3.json");
+    }
+
+    #[test]
+    fn model_menu_title_includes_parent_folder() {
+        assert_eq!(
+            model_menu_title("public/CubismSdkForNative/Samples/Resources/Rice/Rice.model3.json"),
+            "Rice.model3.json (Rice)"
+        );
+        assert_eq!(model_menu_title("0.model3.json"), "0.model3.json");
+    }
+
+    #[test]
+    fn model_path_helpers_match_model3_manifests() {
+        assert!(is_model3_path(std::path::Path::new(
+            "public/model/0.model3.json"
+        )));
+        assert!(!is_model3_path(std::path::Path::new(
+            "public/model/model.json"
+        )));
+        assert!(model_paths_match(
+            "public/model/0.model3.json",
+            "public/model/0.model3.json"
+        ));
+    }
+
+    #[test]
+    fn set_toml_section_value_updates_model_path_only_in_model_section() {
+        let content = "[other]\npath = \"keep\"\n\n[model]\n  path = \"old\"\n[renderer]\n";
+        let updated =
+            set_toml_section_value(content, "model", "path", "\"public/model/0.model3.json\"");
+
+        assert!(updated.contains("[other]\npath = \"keep\"\n"));
+        assert!(updated.contains("[model]\n  path = \"public/model/0.model3.json\"\n"));
+        assert!(updated.contains("[renderer]\n"));
+    }
+
+    #[test]
+    fn set_toml_section_value_appends_missing_model_section() {
+        let updated =
+            set_toml_section_value("[renderer]\n", "model", "path", "\"avatar.model3.json\"");
+
+        assert!(updated.ends_with("\n[model]\npath = \"avatar.model3.json\"\n"));
+    }
+
+    #[test]
+    fn toml_string_literal_escapes_model_paths() {
+        assert_eq!(
+            toml_string_literal(r#"public/model/"avatar"\0.model3.json"#),
+            r#""public/model/\"avatar\"\\0.model3.json""#
+        );
+    }
+
+    #[test]
+    fn relaunch_command_passes_selected_model_as_cli_argument() {
+        let args = relaunch_command_args("public/model/0.model3.json")
+            .expect("relaunch args should build");
+
+        assert!(args.iter().any(|arg| arg == "--config"));
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.ends_with("public/model/0.model3.json"))
+        );
     }
 
     #[test]
@@ -2056,6 +2907,24 @@ mod tests {
         assert!(soft_mouth.gain < microphone.gain);
         assert!(expressive_mouth.gain > microphone.gain);
         assert!(expressive_mouth.max_open > soft_mouth.max_open);
+
+        let camera = CameraConfig {
+            enabled: false,
+            angle_x_degrees: 30.0,
+            angle_y_degrees: 20.0,
+            angle_z_degrees: 10.0,
+            eye_x_range: 1.0,
+            eye_y_range: 1.0,
+            mouth_gain: 1.4,
+            mouth_max_open: 0.9,
+            ..CameraConfig::default()
+        };
+        let soft_camera = runtime_camera_config(&camera, InputPreset::Soft);
+        let expressive_camera = runtime_camera_config(&camera, InputPreset::Expressive);
+        assert!(soft_camera.enabled);
+        assert!(soft_camera.angle_x_degrees < camera.angle_x_degrees);
+        assert!(expressive_camera.angle_x_degrees > camera.angle_x_degrees);
+        assert!(expressive_camera.mouth_gain > soft_camera.mouth_gain);
     }
 
     #[test]
@@ -2090,5 +2959,63 @@ mod tests {
         assert_eq!(mouse_coordinate_space_label(&mouse), "window");
         mouse.coordinate_space = "".to_string();
         assert_eq!(mouse_coordinate_space_label(&mouse), "screen");
+    }
+
+    #[test]
+    fn camera_debug_summary_includes_status_and_sample_values() {
+        let summary = camera_debug_summary(
+            CameraStatus::Running,
+            Some(CameraMotionSample {
+                face_offset: [0.25, -0.5],
+                face_angle: Some([0.15, -0.2]),
+                face_roll: 0.125,
+                gaze: Some([0.75, -0.25]),
+                mouth_open: Some(0.42),
+                eye_open: Some(0.88),
+            }),
+            None,
+        );
+
+        assert!(summary.overlay_text.contains("Camera: running"));
+        assert!(summary.overlay_text.contains("face +0.25/-0.50"));
+        assert!(summary.overlay_text.contains("mouth 0.42"));
+        assert!(summary.menu_text.contains("Camera Tracking: running"));
+    }
+
+    #[test]
+    fn camera_debug_summary_surfaces_actionable_non_running_statuses() {
+        let permission = camera_debug_summary(
+            CameraStatus::PermissionDenied,
+            None,
+            Some("Camera permission is denied or restricted.\nCamera tracking is local-only."),
+        );
+        assert!(
+            permission
+                .overlay_text
+                .contains("Camera permission is denied or restricted.")
+        );
+        assert!(
+            permission
+                .menu_text
+                .contains("Camera Tracking: permission denied | open Camera privacy")
+        );
+
+        let no_face = camera_debug_summary(CameraStatus::NoFace, None, None);
+        assert!(no_face.overlay_text.contains("No face detected"));
+        assert!(
+            no_face
+                .menu_text
+                .contains("Camera Tracking: no face | adjust framing")
+        );
+    }
+
+    #[test]
+    fn camera_runtime_active_matches_capture_usable_states() {
+        assert!(camera_runtime_active(CameraStatus::Running));
+        assert!(camera_runtime_active(CameraStatus::NoFace));
+        assert!(!camera_runtime_active(CameraStatus::Disabled));
+        assert!(!camera_runtime_active(CameraStatus::PermissionDenied));
+        assert!(!camera_runtime_active(CameraStatus::NoCamera));
+        assert!(!camera_runtime_active(CameraStatus::Failed));
     }
 }

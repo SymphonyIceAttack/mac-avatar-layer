@@ -1,14 +1,19 @@
 #![cfg(target_os = "macos")]
 
 use crate::config::CameraConfig;
+use crate::motion::CameraMotionSample;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "camera-tracking"), allow(dead_code))]
 pub enum CameraStatus {
     Disabled,
     WaitingForPermission,
     PermissionDenied,
     NoCamera,
+    #[cfg_attr(feature = "camera-tracking", allow(dead_code))]
     BackendPending,
+    Running,
+    NoFace,
     Failed,
 }
 
@@ -20,6 +25,8 @@ impl CameraStatus {
             Self::PermissionDenied => "permission denied",
             Self::NoCamera => "no camera",
             Self::BackendPending => "backend pending",
+            Self::Running => "running",
+            Self::NoFace => "no face",
             Self::Failed => "failed",
         }
     }
@@ -27,7 +34,10 @@ impl CameraStatus {
 
 pub struct CameraInput {
     status: CameraStatus,
+    #[allow(dead_code)]
     diagnostic: Option<String>,
+    #[cfg(feature = "camera-tracking")]
+    backend: Option<crate::macos_camera::CameraRuntime>,
 }
 
 impl CameraInput {
@@ -36,6 +46,8 @@ impl CameraInput {
             return Self {
                 status: CameraStatus::Disabled,
                 diagnostic: None,
+                #[cfg(feature = "camera-tracking")]
+                backend: None,
             };
         }
 
@@ -58,8 +70,19 @@ impl CameraInput {
 
     #[cfg(feature = "camera-tracking")]
     fn from_native_probe(config: &CameraConfig) -> Self {
-        match crate::macos_camera::CameraProbe::detect(config) {
-            Ok(probe) => {
+        match crate::macos_camera::CameraRuntime::start(config) {
+            Ok(backend) => {
+                if let Some(message) = backend.diagnostic() {
+                    eprintln!("{message}");
+                }
+
+                Self {
+                    status: backend.status(),
+                    diagnostic: backend.diagnostic().map(str::to_string),
+                    backend: Some(backend),
+                }
+            }
+            Err(probe) => {
                 if let Some(message) = probe.diagnostic.as_deref() {
                     eprintln!("{message}");
                 }
@@ -67,28 +90,37 @@ impl CameraInput {
                 Self {
                     status: probe.status,
                     diagnostic: probe.diagnostic,
-                }
-            }
-            Err(error) => {
-                eprintln!("Camera tracking setup failed: {error}");
-                Self {
-                    status: CameraStatus::Failed,
-                    diagnostic: Some(error),
+                    backend: None,
                 }
             }
         }
     }
 
     pub fn status(&self) -> CameraStatus {
+        #[cfg(feature = "camera-tracking")]
+        if let Some(backend) = &self.backend {
+            return backend.status();
+        }
+
         self.status
     }
 
     pub fn status_label(&self) -> &'static str {
-        self.status.label()
+        self.status().label()
     }
 
+    #[allow(dead_code)]
     pub fn diagnostic(&self) -> Option<&str> {
         self.diagnostic.as_deref()
+    }
+
+    pub fn latest_sample(&self) -> Option<CameraMotionSample> {
+        #[cfg(feature = "camera-tracking")]
+        if let Some(backend) = &self.backend {
+            return backend.latest_sample();
+        }
+
+        None
     }
 }
 
@@ -131,6 +163,8 @@ mod tests {
         );
         assert_eq!(CameraStatus::PermissionDenied.label(), "permission denied");
         assert_eq!(CameraStatus::NoCamera.label(), "no camera");
+        assert_eq!(CameraStatus::Running.label(), "running");
+        assert_eq!(CameraStatus::NoFace.label(), "no face");
         assert_eq!(CameraStatus::Failed.label(), "failed");
     }
 }

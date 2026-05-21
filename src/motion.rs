@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, MicrophoneConfig, MouseConfig};
+use crate::config::{AppConfig, CameraConfig, MicrophoneConfig, MouseConfig};
 use crate::cubism::CubismModelRuntime;
 use crate::live2d_model::Live2dModel;
 use serde::Deserialize;
@@ -12,6 +12,8 @@ pub struct MotionController {
     idle_motion: Option<MotionPlayer>,
     expression: Option<ExpressionRuntime>,
     mouse_driver: Option<MouseDriver>,
+    camera_driver: Option<CameraDriver>,
+    pose_input_mode: PoseInputMode,
     mic_driver: Option<MicMouthDriver>,
     physics: Option<PhysicsRig>,
     elapsed: f32,
@@ -26,6 +28,17 @@ pub struct MotionController {
 pub struct MotionInput {
     pub pointer: Option<[f32; 2]>,
     pub mouth_level: Option<f32>,
+    pub camera: Option<CameraMotionSample>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CameraMotionSample {
+    pub face_offset: [f32; 2],
+    pub face_angle: Option<[f32; 2]>,
+    pub face_roll: f32,
+    pub gaze: Option<[f32; 2]>,
+    pub mouth_open: Option<f32>,
+    pub eye_open: Option<f32>,
 }
 
 impl MotionController {
@@ -57,6 +70,9 @@ impl MotionController {
         let idle_motion = load_idle_motion(model);
         let expression = load_expression(model, config.motion.expression.as_deref());
         let mouse_driver = MouseDriver::from_config(&config.input.mouse);
+        let camera_driver = CameraDriver::from_config(&config.input.camera);
+        let pose_input_mode =
+            PoseInputMode::from_config(&config.input.camera.pose_mode, camera_driver.is_some());
         let mic_driver = MicMouthDriver::from_config(&config.input.microphone);
 
         Self {
@@ -64,6 +80,8 @@ impl MotionController {
             idle_motion,
             expression,
             mouse_driver,
+            camera_driver,
+            pose_input_mode,
             mic_driver,
             physics,
             elapsed: 0.0,
@@ -101,17 +119,37 @@ impl MotionController {
             expression.apply(runtime);
         }
 
-        if let Some(mouse_driver) = &mut self.mouse_driver {
-            mouse_driver.apply(runtime, input.pointer, delta);
+        let use_camera_pose = self.pose_input_mode.use_camera_pose(input.camera);
+        if !use_camera_pose {
+            if let Some(mouse_driver) = &mut self.mouse_driver {
+                mouse_driver.apply(runtime, input.pointer, delta);
+            }
         }
 
-        if let Some(mic_driver) = &mut self.mic_driver {
-            mic_driver.apply(runtime, input.mouth_level, delta);
-        }
+        let camera_mouth = self.camera_driver.as_mut().and_then(|camera_driver| {
+            camera_driver.apply(runtime, input.camera, delta, use_camera_pose)
+        });
 
+        let mic_mouth = self
+            .mic_driver
+            .as_mut()
+            .and_then(|mic_driver| mic_driver.update(input.mouth_level, delta));
+        apply_mouth_value(
+            runtime,
+            mic_mouth,
+            camera_mouth,
+            self.camera_driver.as_ref(),
+        );
+
+        let neutralized_eye_values = if self.should_neutralize_blink_for_physics(use_camera_pose) {
+            neutralize_eye_blink_for_physics(runtime, &self.eye_blink_ids)
+        } else {
+            Vec::new()
+        };
         if let Some(physics) = &mut self.physics {
             physics.apply(runtime, delta);
         }
+        restore_eye_blink_after_physics(runtime, neutralized_eye_values);
 
         if let Some(value) = self.mouth_open_override {
             runtime.set_parameter_value("ParamMouthOpenY", value);
@@ -139,9 +177,35 @@ impl MotionController {
         };
     }
 
+    pub fn set_camera_config(&mut self, config: &CameraConfig) {
+        if self.camera_driver.is_some() {
+            self.camera_driver = Some(CameraDriver::from_runtime_config(config));
+        }
+        self.pose_input_mode =
+            PoseInputMode::from_config(&config.pose_mode, self.camera_driver.is_some());
+    }
+
+    pub fn set_camera_enabled(&mut self, enabled: bool, config: &CameraConfig) {
+        self.camera_driver = if enabled {
+            Some(CameraDriver::from_runtime_config(config))
+        } else {
+            None
+        };
+        self.pose_input_mode =
+            PoseInputMode::from_config(&config.pose_mode, self.camera_driver.is_some());
+    }
+
     pub fn set_expression(&mut self, model: &Live2dModel, requested: Option<&str>) -> bool {
         self.expression = load_expression(model, requested);
         requested.is_none() || self.expression.is_some()
+    }
+
+    fn should_neutralize_blink_for_physics(&self, use_camera_pose: bool) -> bool {
+        use_camera_pose
+            && self
+                .camera_driver
+                .as_ref()
+                .is_some_and(CameraDriver::drives_blink)
     }
 
     fn eye_open_value(&mut self) -> f32 {
@@ -316,6 +380,327 @@ impl MouseDriver {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PoseInputMode {
+    Mouse,
+    Camera,
+    CameraWhenAvailable,
+}
+
+impl PoseInputMode {
+    fn from_config(value: &str, camera_enabled: bool) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mouse" => Self::Mouse,
+            "camera" | "face" => Self::Camera,
+            "camera_when_available" | "camera-when-available" | "auto" => Self::CameraWhenAvailable,
+            _ if camera_enabled => Self::CameraWhenAvailable,
+            _ => Self::Mouse,
+        }
+    }
+
+    fn use_camera_pose(self, sample: Option<CameraMotionSample>) -> bool {
+        match self {
+            Self::Mouse => false,
+            Self::Camera => true,
+            Self::CameraWhenAvailable => sample.is_some(),
+        }
+    }
+}
+
+struct CameraDriver {
+    eye_x: f32,
+    eye_y: f32,
+    angle_x: f32,
+    angle_y: f32,
+    angle_z: f32,
+    mouth_open: f32,
+    blink_eye_open: f32,
+    blink_closed: bool,
+    smoothing: f32,
+    dead_zone: f32,
+    invert_x: bool,
+    invert_y: bool,
+    calibration: CameraCalibration,
+    eye_x_range: f32,
+    eye_y_range: f32,
+    angle_x_degrees: f32,
+    angle_y_degrees: f32,
+    angle_z_degrees: f32,
+    mouth_enabled: bool,
+    mouth_gain: f32,
+    mouth_open_offset: f32,
+    mouth_min_open: f32,
+    mouth_max_open: f32,
+    mouth_combine: MouthCombineMode,
+    blink_from_camera: bool,
+    blink_close_threshold: f32,
+    blink_open_threshold: f32,
+}
+
+impl CameraDriver {
+    fn from_config(config: &CameraConfig) -> Option<Self> {
+        config.enabled.then(|| {
+            println!("Camera tracking enabled: waiting for native face samples");
+            Self::from_runtime_config(config)
+        })
+    }
+
+    fn from_runtime_config(config: &CameraConfig) -> Self {
+        Self {
+            eye_x: 0.0,
+            eye_y: 0.0,
+            angle_x: 0.0,
+            angle_y: 0.0,
+            angle_z: 0.0,
+            mouth_open: 0.0,
+            blink_eye_open: 1.0,
+            blink_closed: false,
+            smoothing: config.smoothing.clamp(1.0, 60.0),
+            dead_zone: config.dead_zone.clamp(0.0, 0.95),
+            invert_x: config.invert_x,
+            invert_y: config.invert_y,
+            calibration: CameraCalibration::from_config(config),
+            eye_x_range: config.eye_x_range.clamp(0.0, 3.0),
+            eye_y_range: config.eye_y_range.clamp(0.0, 3.0),
+            angle_x_degrees: config.angle_x_degrees.clamp(-90.0, 90.0),
+            angle_y_degrees: config.angle_y_degrees.clamp(-90.0, 90.0),
+            angle_z_degrees: config.angle_z_degrees.clamp(-90.0, 90.0),
+            mouth_enabled: config.mouth_enabled,
+            mouth_gain: config.mouth_gain.clamp(0.1, 10.0),
+            mouth_open_offset: config.mouth_open_offset.clamp(-1.0, 1.0),
+            mouth_min_open: config.mouth_min_open.clamp(0.0, 1.0),
+            mouth_max_open: config.mouth_max_open.clamp(0.0, 1.0),
+            mouth_combine: MouthCombineMode::from_config(&config.mouth_combine),
+            blink_from_camera: config.blink_from_camera,
+            blink_close_threshold: config.blink_close_threshold.clamp(0.0, 1.0),
+            blink_open_threshold: config.blink_open_threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    fn apply(
+        &mut self,
+        runtime: &mut CubismModelRuntime,
+        sample: Option<CameraMotionSample>,
+        delta: f32,
+        apply_pose: bool,
+    ) -> Option<f32> {
+        let alpha = (1.0 - (-self.smoothing * delta).exp()).clamp(0.0, 1.0);
+
+        if apply_pose {
+            let target = camera_pose_target(
+                sample,
+                self.dead_zone,
+                self.invert_x,
+                self.invert_y,
+                self.calibration,
+            );
+            self.eye_x = lerp(self.eye_x, target.eye_x * self.eye_x_range, alpha);
+            self.eye_y = lerp(self.eye_y, target.eye_y * self.eye_y_range, alpha);
+            self.angle_x = lerp(self.angle_x, target.angle_x * self.angle_x_degrees, alpha);
+            self.angle_y = lerp(self.angle_y, target.angle_y * self.angle_y_degrees, alpha);
+            self.angle_z = lerp(self.angle_z, target.angle_z * self.angle_z_degrees, alpha);
+
+            runtime.set_parameter_value("ParamEyeBallX", self.eye_x);
+            runtime.set_parameter_value("ParamEyeBallY", self.eye_y);
+            runtime.set_parameter_value("ParamAngleX", self.angle_x);
+            runtime.set_parameter_value("ParamAngleY", self.angle_y);
+            runtime.set_parameter_value("ParamAngleZ", self.angle_z);
+        }
+
+        if apply_pose && self.blink_from_camera {
+            if let Some(eye_open) = self.update_blink(sample, alpha) {
+                runtime.set_parameter_value("ParamEyeLOpen", eye_open);
+                runtime.set_parameter_value("ParamEyeROpen", eye_open);
+            }
+        }
+
+        self.update_mouth(sample, alpha)
+    }
+
+    fn update_mouth(&mut self, sample: Option<CameraMotionSample>, alpha: f32) -> Option<f32> {
+        if !self.mouth_enabled {
+            return None;
+        }
+
+        let target =
+            sample.and_then(|sample| sample.mouth_open).unwrap_or(0.0) + self.mouth_open_offset;
+        let target = target.clamp(0.0, 1.0) * self.mouth_gain;
+        let min_open = self.mouth_min_open.min(self.mouth_max_open);
+        let max_open = self.mouth_min_open.max(self.mouth_max_open);
+        let target = min_open + target.clamp(0.0, 1.0) * (max_open - min_open);
+        self.mouth_open = lerp(self.mouth_open, target, alpha);
+        Some(self.mouth_open)
+    }
+
+    fn update_blink(&mut self, sample: Option<CameraMotionSample>, alpha: f32) -> Option<f32> {
+        let raw = sample.and_then(|sample| sample.eye_open)?.clamp(0.0, 1.0);
+        let close_threshold = self.blink_close_threshold.min(self.blink_open_threshold);
+        let open_threshold = self.blink_close_threshold.max(self.blink_open_threshold);
+
+        if raw <= close_threshold {
+            self.blink_closed = true;
+        } else if raw >= open_threshold {
+            self.blink_closed = false;
+        }
+
+        let target = if raw <= close_threshold {
+            0.0
+        } else if open_threshold > close_threshold {
+            ((raw - close_threshold) / (open_threshold - close_threshold)).clamp(0.0, 1.0)
+        } else {
+            raw
+        };
+        self.blink_eye_open = lerp(self.blink_eye_open, target, alpha);
+        Some(self.blink_eye_open)
+    }
+
+    fn mouth_combine(&self) -> MouthCombineMode {
+        self.mouth_combine
+    }
+
+    fn drives_blink(&self) -> bool {
+        self.blink_from_camera
+    }
+}
+
+fn neutralize_eye_blink_for_physics(
+    runtime: &mut CubismModelRuntime,
+    eye_blink_ids: &[String],
+) -> Vec<(String, f32)> {
+    let mut previous_values = Vec::new();
+    for id in eye_blink_ids {
+        if let Some(parameter) = runtime.parameter(id) {
+            previous_values.push((id.clone(), parameter.value));
+            runtime.set_parameter_value(id, 1.0);
+        }
+    }
+    previous_values
+}
+
+fn restore_eye_blink_after_physics(
+    runtime: &mut CubismModelRuntime,
+    previous_values: Vec<(String, f32)>,
+) {
+    for (id, value) in previous_values {
+        runtime.set_parameter_value(&id, value);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CameraCalibration {
+    face_x_offset: f32,
+    face_y_offset: f32,
+    gaze_x_offset: f32,
+    gaze_y_offset: f32,
+    roll_offset: f32,
+}
+
+impl CameraCalibration {
+    fn from_config(config: &CameraConfig) -> Self {
+        Self {
+            face_x_offset: config.face_x_offset.clamp(-1.0, 1.0),
+            face_y_offset: config.face_y_offset.clamp(-1.0, 1.0),
+            gaze_x_offset: config.gaze_x_offset.clamp(-1.0, 1.0),
+            gaze_y_offset: config.gaze_y_offset.clamp(-1.0, 1.0),
+            roll_offset: config.roll_offset.clamp(-1.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouthCombineMode {
+    Max,
+    Camera,
+    Microphone,
+}
+
+impl MouthCombineMode {
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "camera" => Self::Camera,
+            "microphone" | "mic" => Self::Microphone,
+            _ => Self::Max,
+        }
+    }
+
+    fn combine(self, camera: f32, microphone: f32) -> f32 {
+        match self {
+            Self::Max => camera.max(microphone),
+            Self::Camera => camera,
+            Self::Microphone => microphone,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraPoseTarget {
+    eye_x: f32,
+    eye_y: f32,
+    angle_x: f32,
+    angle_y: f32,
+    angle_z: f32,
+}
+
+fn camera_pose_target(
+    sample: Option<CameraMotionSample>,
+    dead_zone: f32,
+    invert_x: bool,
+    invert_y: bool,
+    calibration: CameraCalibration,
+) -> CameraPoseTarget {
+    let Some(sample) = sample else {
+        return CameraPoseTarget {
+            eye_x: 0.0,
+            eye_y: 0.0,
+            angle_x: 0.0,
+            angle_y: 0.0,
+            angle_z: 0.0,
+        };
+    };
+
+    let offset_calibrated = [
+        (sample.face_offset[0] + calibration.face_x_offset).clamp(-1.0, 1.0),
+        (sample.face_offset[1] + calibration.face_y_offset).clamp(-1.0, 1.0),
+    ];
+    let angle_source = sample.face_angle.unwrap_or(sample.face_offset);
+    let face_raw = [
+        (angle_source[0] + calibration.face_x_offset).clamp(-1.0, 1.0),
+        (angle_source[1] + calibration.face_y_offset).clamp(-1.0, 1.0),
+    ];
+    let mut face_x = apply_dead_zone(face_raw[0], dead_zone);
+    let mut face_y = apply_dead_zone(face_raw[1], dead_zone);
+    if invert_x {
+        face_x = -face_x;
+    }
+    if invert_y {
+        face_y = -face_y;
+    }
+
+    let gaze = sample.gaze.unwrap_or(offset_calibrated);
+    let mut gaze_x = apply_dead_zone(
+        (gaze[0] + calibration.gaze_x_offset).clamp(-1.0, 1.0),
+        dead_zone,
+    );
+    let mut gaze_y = apply_dead_zone(
+        (gaze[1] + calibration.gaze_y_offset).clamp(-1.0, 1.0),
+        dead_zone,
+    );
+    if invert_x {
+        gaze_x = -gaze_x;
+    }
+    if invert_y {
+        gaze_y = -gaze_y;
+    }
+
+    CameraPoseTarget {
+        eye_x: gaze_x,
+        eye_y: gaze_y,
+        angle_x: face_x,
+        angle_y: face_y,
+        angle_z: (sample.face_roll + calibration.roll_offset).clamp(-1.0, 1.0),
+    }
+}
+
 struct MicMouthDriver {
     parameter: String,
     value: f32,
@@ -352,10 +737,8 @@ impl MicMouthDriver {
         }
     }
 
-    fn apply(&mut self, runtime: &mut CubismModelRuntime, level: Option<f32>, delta: f32) {
-        let Some(level) = level else {
-            return;
-        };
+    fn update(&mut self, level: Option<f32>, delta: f32) -> Option<MouthValue> {
+        let level = level?;
         let level = level.clamp(0.0, 1.0);
         let mut target = if level <= self.noise_gate {
             0.0
@@ -374,8 +757,50 @@ impl MicMouthDriver {
         };
         let alpha = (1.0 - (-smoothing * delta).exp()).clamp(0.0, 1.0);
         self.value = lerp(self.value, target, alpha);
-        runtime.set_parameter_value(&self.parameter, self.value);
+        Some(MouthValue {
+            parameter: self.parameter.clone(),
+            value: self.value,
+        })
     }
+}
+
+#[derive(Debug, Clone)]
+struct MouthValue {
+    parameter: String,
+    value: f32,
+}
+
+fn apply_mouth_value(
+    runtime: &mut CubismModelRuntime,
+    microphone: Option<MouthValue>,
+    camera: Option<f32>,
+    camera_driver: Option<&CameraDriver>,
+) {
+    const CAMERA_MOUTH_PARAMETER: &str = "ParamMouthOpenY";
+
+    let Some(camera) = camera else {
+        if let Some(microphone) = microphone {
+            runtime.set_parameter_value(&microphone.parameter, microphone.value);
+        }
+        return;
+    };
+
+    let Some(microphone) = microphone else {
+        runtime.set_parameter_value(CAMERA_MOUTH_PARAMETER, camera);
+        return;
+    };
+
+    if microphone.parameter != CAMERA_MOUTH_PARAMETER {
+        runtime.set_parameter_value(&microphone.parameter, microphone.value);
+        runtime.set_parameter_value(CAMERA_MOUTH_PARAMETER, camera);
+        return;
+    }
+
+    let combine_mode = camera_driver
+        .map(CameraDriver::mouth_combine)
+        .unwrap_or(MouthCombineMode::Max);
+    let value = combine_mode.combine(camera, microphone.value);
+    runtime.set_parameter_value(CAMERA_MOUTH_PARAMETER, value);
 }
 
 fn lerp(current: f32, target: f32, alpha: f32) -> f32 {
@@ -398,7 +823,11 @@ fn positive_or(value: f32, fallback: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_dead_zone, positive_or};
+    use super::{
+        CameraCalibration, CameraDriver, CameraMotionSample, MouthCombineMode, PoseInputMode,
+        apply_dead_zone, camera_pose_target, positive_or,
+    };
+    use crate::config::CameraConfig;
 
     #[test]
     fn dead_zone_zeroes_center_and_rescales_remaining_range() {
@@ -416,6 +845,203 @@ mod tests {
         assert_eq!(positive_or(12.0, 18.0), 12.0);
         assert_eq!(positive_or(0.0, 18.0), 18.0);
         assert_eq!(positive_or(-1.0, 18.0), 18.0);
+    }
+
+    #[test]
+    fn camera_pose_uses_gaze_when_available_and_face_for_head_angles() {
+        let target = camera_pose_target(
+            Some(CameraMotionSample {
+                face_offset: [0.52, -0.33],
+                face_angle: None,
+                face_roll: 0.25,
+                gaze: Some([-0.42, 0.24]),
+                mouth_open: None,
+                eye_open: None,
+            }),
+            0.02,
+            false,
+            false,
+            CameraCalibration::default(),
+        );
+
+        assert!(target.angle_x > 0.5);
+        assert!(target.angle_y < -0.3);
+        assert!(target.eye_x < -0.4);
+        assert!(target.eye_y > 0.2);
+        assert_eq!(target.angle_z, 0.25);
+    }
+
+    #[test]
+    fn camera_pose_decays_to_neutral_without_sample() {
+        let target = camera_pose_target(None, 0.02, false, false, CameraCalibration::default());
+
+        assert_eq!(target.angle_x, 0.0);
+        assert_eq!(target.angle_y, 0.0);
+        assert_eq!(target.angle_z, 0.0);
+        assert_eq!(target.eye_x, 0.0);
+        assert_eq!(target.eye_y, 0.0);
+    }
+
+    #[test]
+    fn camera_calibration_offsets_adjust_pose_targets() {
+        let target = camera_pose_target(
+            Some(CameraMotionSample {
+                face_offset: [0.10, -0.10],
+                face_angle: None,
+                face_roll: 0.10,
+                gaze: Some([0.20, -0.20]),
+                mouth_open: None,
+                eye_open: None,
+            }),
+            0.0,
+            false,
+            false,
+            CameraCalibration {
+                face_x_offset: 0.25,
+                face_y_offset: -0.15,
+                gaze_x_offset: -0.10,
+                gaze_y_offset: 0.30,
+                roll_offset: 0.20,
+            },
+        );
+
+        assert!((target.angle_x - 0.35).abs() < 0.001);
+        assert!((target.angle_y + 0.25).abs() < 0.001);
+        assert!((target.eye_x - 0.10).abs() < 0.001);
+        assert!((target.eye_y - 0.10).abs() < 0.001);
+        assert!((target.angle_z - 0.30).abs() < 0.001);
+    }
+
+    #[test]
+    fn camera_pose_prefers_face_angles_over_face_center_for_head_rotation() {
+        let target = camera_pose_target(
+            Some(CameraMotionSample {
+                face_offset: [0.80, -0.80],
+                face_angle: Some([-0.20, 0.30]),
+                face_roll: 0.0,
+                gaze: None,
+                mouth_open: None,
+                eye_open: None,
+            }),
+            0.0,
+            false,
+            false,
+            CameraCalibration::default(),
+        );
+
+        assert!((target.angle_x + 0.20).abs() < 0.001);
+        assert!((target.angle_y - 0.30).abs() < 0.001);
+        assert_eq!(target.eye_x, 0.80);
+        assert_eq!(target.eye_y, -0.80);
+    }
+
+    #[test]
+    fn camera_blink_uses_threshold_hysteresis() {
+        let config = CameraConfig {
+            enabled: true,
+            blink_from_camera: true,
+            blink_close_threshold: 0.20,
+            blink_open_threshold: 0.38,
+            smoothing: 60.0,
+            ..CameraConfig::default()
+        };
+        let mut driver = CameraDriver::from_runtime_config(&config);
+        let closed = driver.update_blink(
+            Some(CameraMotionSample {
+                face_offset: [0.0, 0.0],
+                face_angle: None,
+                face_roll: 0.0,
+                gaze: None,
+                mouth_open: None,
+                eye_open: Some(0.10),
+            }),
+            1.0,
+        );
+        assert_eq!(closed, Some(0.0));
+
+        let reopening = driver.update_blink(
+            Some(CameraMotionSample {
+                face_offset: [0.0, 0.0],
+                face_angle: None,
+                face_roll: 0.0,
+                gaze: None,
+                mouth_open: None,
+                eye_open: Some(0.29),
+            }),
+            1.0,
+        );
+        assert!(reopening.unwrap() > 0.0);
+        assert!(driver.blink_closed);
+
+        let open = driver.update_blink(
+            Some(CameraMotionSample {
+                face_offset: [0.0, 0.0],
+                face_angle: None,
+                face_roll: 0.0,
+                gaze: None,
+                mouth_open: None,
+                eye_open: Some(0.45),
+            }),
+            1.0,
+        );
+        assert!(open.unwrap() > 0.9);
+        assert!(!driver.blink_closed);
+    }
+
+    #[test]
+    fn camera_blink_marks_eye_inputs_for_physics_neutralization() {
+        let enabled = CameraConfig {
+            enabled: true,
+            blink_from_camera: true,
+            ..CameraConfig::default()
+        };
+        let disabled = CameraConfig {
+            enabled: true,
+            blink_from_camera: false,
+            ..CameraConfig::default()
+        };
+
+        assert!(CameraDriver::from_runtime_config(&enabled).drives_blink());
+        assert!(!CameraDriver::from_runtime_config(&disabled).drives_blink());
+    }
+
+    #[test]
+    fn camera_mouth_combine_modes_are_stable() {
+        assert_eq!(MouthCombineMode::from_config("max"), MouthCombineMode::Max);
+        assert_eq!(
+            MouthCombineMode::from_config("camera"),
+            MouthCombineMode::Camera
+        );
+        assert_eq!(
+            MouthCombineMode::from_config("mic"),
+            MouthCombineMode::Microphone
+        );
+        assert_eq!(
+            MouthCombineMode::from_config("unknown"),
+            MouthCombineMode::Max
+        );
+
+        assert_eq!(MouthCombineMode::Max.combine(0.3, 0.7), 0.7);
+        assert_eq!(MouthCombineMode::Camera.combine(0.3, 0.7), 0.3);
+        assert_eq!(MouthCombineMode::Microphone.combine(0.3, 0.7), 0.7);
+    }
+
+    #[test]
+    fn pose_input_mode_avoids_mouse_camera_parameter_fights() {
+        let sample = Some(CameraMotionSample {
+            face_offset: [0.1, 0.2],
+            face_angle: None,
+            face_roll: 0.0,
+            gaze: None,
+            mouth_open: None,
+            eye_open: None,
+        });
+
+        assert!(!PoseInputMode::from_config("mouse", true).use_camera_pose(sample));
+        assert!(PoseInputMode::from_config("camera", true).use_camera_pose(None));
+        assert!(PoseInputMode::from_config("auto", true).use_camera_pose(sample));
+        assert!(!PoseInputMode::from_config("auto", true).use_camera_pose(None));
+        assert!(!PoseInputMode::from_config("", false).use_camera_pose(sample));
     }
 }
 

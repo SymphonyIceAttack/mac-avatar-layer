@@ -11,8 +11,17 @@ motion, expressions, physics, mouse input, and microphone volume.
 ## Current Prototype
 
 - Creates a native AppKit borderless floating window from Rust.
-- Sets macOS Space behavior with `canJoinAllSpaces`, `stationary`, and
-  `fullScreenAuxiliary`.
+- Uses a non-activating `NSPanel` overlay with configurable CoreGraphics window
+  level; the default is `window_level = "screen_saver"`.
+- Reads `window_width` and `window_height` from `[app]`; the local configs are
+  set to `540x720`, which is 1.5x the original prototype window.
+- Applies `canJoinAllSpaces`, `canJoinAllApplications`, `stationary`,
+  `ignoresCycle`, and `fullScreenAuxiliary` so the avatar behaves less like a
+  normal desktop window during Space transitions.
+- Pumps AppKit events in non-blocking default, event-tracking, and modal run
+  loop modes so the render loop is less likely to stall during Space gestures.
+- Uses a transparent avatar window by default; diagnostics are off in the local
+  dev/build config so the visible surface is just the Live2D model.
 - Runs a manual 60 FPS frame loop and logs long frame gaps over 250 ms.
 - Requests an `NSProcessInfo` activity token to reduce App Nap while rendering.
 - Loads `model3.json` from local `public/` assets and validates referenced
@@ -153,13 +162,20 @@ With no argument it uses `[model].path` from the active profile config, falling
 back to `public/model/0.model3.json` when unset. It auto-detects
 `public/CubismSdkForNative`, sets `CUBISM_CORE_LIB_DIR` and
 `CUBISM_CORE_INCLUDE_DIR`, and closes old `vtube-studio-rs` instances before
-launching. By default it runs the development profile and reads
-`vtube-studio-rs.dev.toml`. Pass `--release` to run an optimized build profile
-that reads `vtube-studio-rs.build.toml`:
+launching through the local `.app` wrapper so camera permissions use the stable
+`rs.vtube-studio.dev` identity. By default it runs the development profile and
+reads `vtube-studio-rs.dev.toml`. Pass `--release` to run an optimized build
+profile that reads `vtube-studio-rs.build.toml`:
 
 ```bash
 cargo xtask run-metal --release
 ```
+
+`run-metal` always compiles both `metal-renderer` and `camera-tracking`; the
+active TOML decides whether the camera opens through `[input.camera].enabled`.
+The local build config enables camera input by default, so `cargo xtask
+run-metal --release` is the optimized camera-capable run path. App stdout/stderr
+are written under `target/camera-test/run-metal-*.log`.
 
 Pass a different model path as an argument to override local config for that
 run:
@@ -193,11 +209,14 @@ right side of the menu bar. Its menu shows the active model, expression count,
 and renderer quality state, and it can toggle diagnostics, mouse tracking, and
 microphone mouth input for the current session. When the model declares
 `.exp3.json` expressions, the menu lists them and switches the active expression
-without restarting. The menu also includes Soft/Normal/Expressive mouse and
-mouth calibration presets for quick runtime tuning before committing values to
-TOML. `Open Active Config...` opens the dev/build TOML file that will be used
-on the next launch. Renderer quality and model switching are visible there
-first; full hot switching is still planned.
+without restarting. The menu lists local `.model3.json` files found under
+`public/`; selecting one writes `[model].path` to the active dev/build TOML and
+relaunches the local `.app` with that model so command-line model overrides do
+not keep the old avatar loaded. The menu also includes Soft/Normal/Expressive
+mouse, mouth, and camera calibration presets for quick runtime tuning before
+committing values to TOML. `Open Active Config...` opens the dev/build TOML file
+that will be used on the next launch. In-process hot model switching is still
+planned.
 
 To keep old instances alive during development:
 
@@ -363,12 +382,15 @@ by Git. Copy `vtube-studio-rs.dev.example.toml` or
 ```toml
 [app]
 runtime_profile = "development"
+window_level = "screen_saver"
+window_width = 540.0
+window_height = 720.0
 
 [model]
 path = "public/model/0.model3.json"
 
 [diagnostics]
-show = true
+show = false
 
 [renderer]
 disable_masks = false
@@ -421,10 +443,16 @@ max_open = 1.0
 enabled = false
 device = ""
 target_fps = 30
+pose_mode = "camera_when_available"
 smoothing = 12.0
 dead_zone = 0.03
-invert_x = false
+invert_x = true
 invert_y = false
+face_x_offset = 0.0
+face_y_offset = 0.0
+gaze_x_offset = 0.0
+gaze_y_offset = 0.0
+roll_offset = 0.0
 angle_x_degrees = 30.0
 angle_y_degrees = 22.0
 angle_z_degrees = 12.0
@@ -432,10 +460,13 @@ eye_x_range = 1.0
 eye_y_range = 1.0
 mouth_enabled = true
 mouth_gain = 1.4
+mouth_open_offset = 0.0
 mouth_min_open = 0.0
 mouth_max_open = 1.0
 mouth_combine = "max"
 blink_from_camera = false
+blink_close_threshold = 0.20
+blink_open_threshold = 0.38
 
 [overrides]
 # mouth_open = 1.0
@@ -458,22 +489,92 @@ volume into
 `response_curve` values such as `0.45` make quiet speech open the mouth more;
 higher values such as `1.0` behave closer to linear RMS.
 
-Camera tracking is being implemented behind the optional `camera-tracking`
-feature. The `[input.camera]` block, `VT` menu status line, and diagnostics
-overlay status are already part of the app surface. With `enabled = false`, it
-has no runtime effect. With `enabled = true` and no `camera-tracking` feature,
-the app prints a backend-pending message and keeps rendering without camera
-tracking. With `--features camera-tracking`, the app links AVFoundation/Vision
-and probes camera permission plus matching device availability, but frame
-capture and Vision landmark tracking are still pending.
+Mouse tracking and camera tracking both target head angle and eye-ball
+parameters, so `[input.camera].pose_mode` decides which source owns those
+parameters:
+
+- `camera_when_available` uses the camera when a face sample exists, then falls
+  back to mouse tracking when no face is available.
+- `camera` always lets the camera own head/eye pose, even when no face is
+  detected.
+- `mouse` keeps mouse tracking in charge of head/eye pose while still allowing
+  camera mouth tracking to combine with microphone mouth input.
+
+Camera calibration offsets are normalized values applied before camera smoothing
+and parameter scaling. Use `face_x_offset` / `face_y_offset` when a centered
+face makes the avatar look away from neutral, `gaze_x_offset` /
+`gaze_y_offset` when pupil landmarks drift, `roll_offset` when the head tilt
+zero point is biased, and `mouth_open_offset` when the camera mouth signal is
+too closed or too open at rest. Head tracking prefers Vision `yaw` / `pitch`
+when available and falls back to face-center movement otherwise.
+`blink_from_camera` enables camera eye-open tracking; `blink_close_threshold`
+and `blink_open_threshold` add hysteresis so blinks close decisively without
+fluttering while the eyes are half open. When camera blink is active, eye-open
+parameters are neutralized only for the lightweight physics sampling step and
+then restored before the Cubism update, which avoids blink-driven secondary
+body/part pulses on models that wire `ParamEyeLOpen/ROpen` into physics.
+
+Camera tracking is implemented behind the optional `camera-tracking` feature.
+`cargo xtask run-metal` always compiles it and launches through
+`target/dev-app/vtube-studio-rs Dev.app`, which declares
+`NSCameraUsageDescription` / `NSMicrophoneUsageDescription` and uses the stable
+bundle identifier `rs.vtube-studio.dev`. The active TOML controls whether the
+camera opens through `[input.camera].enabled`. If macOS asks for permission,
+allow `vtube-studio-rs Dev`, then restart `cargo xtask run-metal`. If a previous
+denial is cached, reset just the dev bundle identity and run again:
+
+```bash
+tccutil reset Camera rs.vtube-studio.dev
+cargo xtask run-metal
+```
+
+To force a specific local signing identity:
+
+```bash
+security find-identity -v -p codesigning
+VTUBE_RS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
+  cargo xtask run-metal
+```
+
+With `--features camera-tracking`, the app links AVFoundation/Vision through
+the `objc2` bindings and probes camera permission plus matching device
+availability. If camera permission is still undecided, the native backend asks
+macOS for access and logs `renderer_event=camera_permission_response`. The
+backend also verifies that an `AVCaptureSession` can be configured with a
+camera input, video data output, serial sample callback queue, and
+`AVCaptureVideoDataOutputSampleBufferDelegate`. When permission/device setup
+succeeds, the native runtime starts the capture session, throttles frames by
+`[input.camera].target_fps`, and runs a first-pass
+`VNDetectFaceLandmarksRequest` on sample buffers. The delegate maps Vision face
+observations into `CameraMotionSample` using bounding box center, roll,
+pupil-vs-eye geometry, eye openness, and lip openness. It does not retain,
+write, or log frame image data. The mapping is still first-pass and needs
+real-camera calibration. When diagnostics are visible, the overlay shows the
+current camera status plus face offset, roll, gaze, mouth, and eye sample
+values; the `VT` menu also updates the camera status line while the app is
+running. Use the same `VT` menu to toggle Camera Tracking on/off at runtime.
+Permission denied, no camera, no face, missing backend, and setup failure states
+show short menu hints and actionable diagnostics overlay text.
+
+The motion layer already has the safe camera sample contract wired in:
+`VNDetectFaceRectanglesRequest` revision 3 supplies native yaw/pitch/roll for
+`ParamAngleX/Y/Z`, landmark nose/eye geometry is the yaw fallback, and
+`face_offset` remains the last fallback. `gaze` drives `ParamEyeBallX/Y`, and
+camera mouth samples can combine with the microphone mouth driver using
+`[input.camera].mouth_combine`. Camera yaw/pitch are normalized so roughly 30
+degrees of real head turn reaches the configured Live2D head range; roll uses a
+roughly 45 degree range. Camera `invert_x` defaults to `true` so webcam tracking
+behaves like a mirrored avatar view; set it to `false` if your camera pipeline is
+already mirrored. The `VT` menu's Camera Calibration presets scale camera
+head/eye ranges and mouth gain for the current session. If Camera Tracking is
+off, choosing a preset is remembered and applied the next time the menu toggle
+starts camera tracking.
 
 To test the current native camera probe:
 
 ```bash
 # First set [input.camera].enabled = true in vtube-studio-rs.dev.toml.
-CUBISM_CORE_LIB_DIR="$PWD/public/CubismSdkForNative/Core/lib/macos/arm64" \
-CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
-  cargo run --features "metal-renderer camera-tracking" -- public/model/0.model3.json
+cargo xtask run-metal public/model/0.model3.json
 ```
 
 If microphone input is enabled and macOS denies access, the app prints a
@@ -485,6 +586,9 @@ For lower-overhead build/release-style runs, use `vtube-studio-rs.build.toml`:
 ```toml
 [app]
 runtime_profile = "release"
+window_level = "screen_saver"
+window_width = 540.0
+window_height = 720.0
 
 [diagnostics]
 show = false
@@ -515,6 +619,15 @@ CUBISM_CORE_INCLUDE_DIR="$PWD/public/CubismSdkForNative/Core/include" \
    - `Frame delta max` and `Slow frames` show transition stalls.
 5. Confirm startup logs include `renderer_event=app_nap_guard_started` and
    `renderer_event=window_configured`.
+   The current overlay policy logs `level_name=screen_saver`, the resolved
+   CoreGraphics level, and collection behavior with all-space,
+   all-applications, stationary, ignores-cycle, and full-screen auxiliary bits
+   enabled. It should also log `kind=nonactivating_panel` and `style_mask=128`.
+   `transient` is intentionally not enabled because it caused hidden/double-image
+   frames during Space swipe testing. If Space switching hides the avatar
+   temporarily, look for `renderer_event=window_reasserted`. If the overlay
+   disappears and the frame counter also stops, collect a new report so we can
+   distinguish window composition loss from render-loop stalls.
 6. Check the terminal for `renderer_event=long_frame_gap` lines and any
    `renderer_event=next_drawable_unavailable` / `next_drawable_recovered`
    pairs.
