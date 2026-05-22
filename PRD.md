@@ -777,9 +777,11 @@ Status: next product milestone.
   dev/build TOML and relaunches the local `.app`.
 - Done: expose `VT` menu Window Mode presets. `Desktop Overlay` preserves the
   normal transparent avatar window; `OBS Capture (offscreen)` keeps the window
-  alive and rendered but moves it outside the visible desktop so OBS Window
-  Capture can target it without showing the avatar on the desktop. This is a
-  first-pass capture workflow, not a hidden/minimized-window guarantee.
+  alive and rendered, switches the app from accessory to regular activation
+  policy, gives the window a stable `vtube-studio-rs OBS Capture` title, and
+  moves it outside the visible desktop so OBS Application/Window Capture can
+  target it without showing the avatar on the desktop. This is a first-pass
+  capture workflow, not a hidden/minimized-window guarantee.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process

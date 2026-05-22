@@ -231,12 +231,13 @@ folder, creating it first if needed. The menu also includes Window Size presets
 that write `[app].window_width` / `[app].window_height` and relaunch with 100%,
 125%, 150%, or 200% sizing. Window Mode presets write `[app].window_mode` and
 relaunch between desktop overlay and OBS capture mode. OBS capture mode keeps
-the avatar window rendered but places it offscreen, so OBS Window Capture can
-target it without showing the model on the desktop. Renderer Quality presets
-write `[renderer]` quality fields and relaunch with Performance, Balanced, or
-High Quality settings. The menu also includes Soft/Normal/Expressive mouse,
-mouth, and camera calibration presets for quick runtime tuning before committing
-values to TOML.
+the avatar window rendered but places it offscreen, switches the app to regular
+macOS application policy, and exposes a stable `vtube-studio-rs OBS Capture`
+window title so OBS can enumerate it for Application/Window Capture without
+showing the model on the desktop. Renderer Quality presets write `[renderer]`
+quality fields and relaunch with Performance, Balanced, or High Quality
+settings. The menu also includes Soft/Normal/Expressive mouse, mouth, and camera
+calibration presets for quick runtime tuning before committing values to TOML.
 `Open Camera Privacy...` and `Open Microphone Privacy...` jump to the matching
 macOS privacy panes for permission repair. `Open Active Config...` opens the
 dev/build TOML file that will be used on the next launch. In-process hot model

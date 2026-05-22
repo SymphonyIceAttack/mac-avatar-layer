@@ -63,6 +63,8 @@ pub struct PanelStyle {
     pub style_mask: u64,
     pub level: i64,
     pub collection_behavior: u64,
+    pub title: &'static str,
+    pub excluded_from_windows_menu: bool,
 }
 
 #[cfg(feature = "camera-tracking")]
@@ -131,7 +133,13 @@ pub unsafe fn create_transparent_panel(style: PanelStyle) -> Result<*mut c_void,
         NSBackingStoreType::Buffered,
         false,
     );
-    configure_transparent_panel(&panel, style.level, style.collection_behavior);
+    configure_transparent_panel(
+        &panel,
+        style.level,
+        style.collection_behavior,
+        style.title,
+        style.excluded_from_windows_menu,
+    );
     Ok(ObjcRetained::into_raw(panel).cast())
 }
 
@@ -522,8 +530,15 @@ fn configure_transparent_root_layer(layer: &CALayer, background_color: &CGColor)
     layer.setCornerRadius(0.0);
 }
 
-fn configure_transparent_panel(panel: &NSPanel, level: i64, collection_behavior: u64) {
+fn configure_transparent_panel(
+    panel: &NSPanel,
+    level: i64,
+    collection_behavior: u64,
+    title: &str,
+    excluded_from_windows_menu: bool,
+) {
     panel.setOpaque(false);
+    panel.setTitle(&NSString::from_str(title));
     panel.setMovableByWindowBackground(true);
     unsafe {
         panel.setReleasedWhenClosed(false);
@@ -533,7 +548,7 @@ fn configure_transparent_panel(panel: &NSPanel, level: i64, collection_behavior:
     panel.setHidesOnDeactivate(false);
     panel.setWorksWhenModal(true);
     panel.setBecomesKeyOnlyIfNeeded(true);
-    panel.setExcludedFromWindowsMenu(true);
+    panel.setExcludedFromWindowsMenu(excluded_from_windows_menu);
     unsafe {
         set_panel_space_policy(
             (panel as *const NSPanel).cast_mut().cast(),

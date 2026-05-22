@@ -30,6 +30,7 @@ type CGFloat = c_double;
 
 const NIL: Id = ptr::null_mut();
 
+const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: NSInteger = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
@@ -152,7 +153,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         msg_void_id(
             app,
             "setActivationPolicy:",
-            NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+            app_activation_policy(&config.app),
         );
         let _activity_token = prevent_app_nap()?;
         let model = Live2dModel::load(model_path)?;
@@ -542,6 +543,8 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
             style_mask: avatar_window_style_mask(),
             level: avatar_window_level(app_config),
             collection_behavior: avatar_window_collection_behavior(),
+            title: avatar_window_title(app_config),
+            excluded_from_windows_menu: avatar_window_excluded_from_windows_menu(app_config),
         })?;
 
     println!(
@@ -563,6 +566,27 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
 
 fn avatar_window_style_mask() -> NSUInteger {
     NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
+}
+
+fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
+    match WindowModePreset::from_config(app_config) {
+        WindowModePreset::Desktop => NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+        WindowModePreset::ObsCapture => NS_APPLICATION_ACTIVATION_POLICY_REGULAR,
+    }
+}
+
+fn avatar_window_title(app_config: &AppRuntimeConfig) -> &'static str {
+    match WindowModePreset::from_config(app_config) {
+        WindowModePreset::Desktop => "vtube-studio-rs",
+        WindowModePreset::ObsCapture => "vtube-studio-rs OBS Capture",
+    }
+}
+
+fn avatar_window_excluded_from_windows_menu(app_config: &AppRuntimeConfig) -> bool {
+    !matches!(
+        WindowModePreset::from_config(app_config),
+        WindowModePreset::ObsCapture
+    )
 }
 
 fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
@@ -3048,21 +3072,24 @@ unsafe fn msg_id_double_double_double_double(
 #[cfg(all(test, feature = "metal-renderer"))]
 mod tests {
     use super::{
-        EventPump, InputPreset, NS_NONACTIVATING_PANEL_MASK,
+        EventPump, InputPreset, NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+        NS_APPLICATION_ACTIVATION_POLICY_REGULAR, NS_NONACTIVATING_PANEL_MASK,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
         NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, PrivacySettingsPane,
-        RendererQualityPreset, WindowModePreset, WindowSizePreset, avatar_frame_for_bounds,
-        avatar_window_collection_behavior, avatar_window_level_key, avatar_window_level_name,
-        avatar_window_origin, avatar_window_size, avatar_window_style_mask, camera_debug_summary,
-        camera_runtime_active, finder_open_command_args, finder_reveal_command_args,
-        is_model3_path, model_menu_title, model_paths_match, model_title,
-        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
-        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
-        selected_expression_index, set_toml_section_value, set_toml_section_values,
-        toml_string_literal, valid_window_coordinate, window_occlusion_visible,
+        RendererQualityPreset, WindowModePreset, WindowSizePreset, app_activation_policy,
+        avatar_frame_for_bounds, avatar_window_collection_behavior,
+        avatar_window_excluded_from_windows_menu, avatar_window_level_key,
+        avatar_window_level_name, avatar_window_origin, avatar_window_size,
+        avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
+        finder_open_command_args, finder_reveal_command_args, is_model3_path, model_menu_title,
+        model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
+        relaunch_command_args, runtime_camera_config, runtime_microphone_config,
+        runtime_mouse_config, selected_expression_index, set_toml_section_value,
+        set_toml_section_values, toml_string_literal, valid_window_coordinate,
+        window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
@@ -3181,6 +3208,27 @@ mod tests {
         assert_eq!(obs_origin.x, -12_000.0);
         assert_eq!(obs_origin.y, -9_000.0);
         assert_eq!(valid_window_coordinate(f64::NAN, -10_000.0), -10_000.0);
+    }
+
+    #[test]
+    fn obs_capture_mode_uses_regular_app_policy_and_window_listing() {
+        let desktop = AppRuntimeConfig::default();
+        let obs = AppRuntimeConfig {
+            window_mode: "obs_capture".to_string(),
+            ..AppRuntimeConfig::default()
+        };
+
+        assert_eq!(
+            app_activation_policy(&desktop),
+            NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+        );
+        assert_eq!(
+            app_activation_policy(&obs),
+            NS_APPLICATION_ACTIVATION_POLICY_REGULAR
+        );
+        assert_eq!(avatar_window_title(&obs), "vtube-studio-rs OBS Capture");
+        assert!(avatar_window_excluded_from_windows_menu(&desktop));
+        assert!(!avatar_window_excluded_from_windows_menu(&obs));
     }
 
     #[test]
