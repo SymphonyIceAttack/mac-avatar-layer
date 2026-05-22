@@ -39,6 +39,7 @@ fn main() {
 fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
+        Some("build-app") => build_app(args.collect()),
         Some("clean") => clean(args.collect()),
         Some("capture-mask-matrix") => capture_mask_matrix(args.collect()),
         Some("capture-offscreen-matrix") => capture_offscreen_matrix(args.collect()),
@@ -74,6 +75,7 @@ fn print_help() {
 vtube-studio-rs xtask
 
 Usage:
+  cargo xtask build-app [--release]
   cargo xtask clean [--generated|--all]
   cargo xtask capture-full-matrix
   cargo xtask capture-metal [MODEL_PATH]
@@ -97,6 +99,7 @@ Usage:
   cargo xtask select-model [--dev|--build] MODEL_PATH
 
 Commands:
+  build-app          Build and sign the local macOS .app wrapper without launching it.
   clean              Remove generated target artifacts; --all also runs cargo clean.
   capture-full-matrix
                      Run the complete render regression capture and report matrix.
@@ -680,6 +683,36 @@ fn rice_stress_audit(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn build_app(args: Vec<String>) -> Result<()> {
+    let options = parse_build_app_args(args)?;
+    let root = project_root()?;
+    let (include_dir, lib_dir) = cubism_core_paths(&root)?;
+    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
+    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
+    let config_path = if options.release {
+        root.join(BUILD_CONFIG_PATH)
+    } else {
+        root.join(DEVELOPMENT_CONFIG_PATH)
+    };
+
+    println!("App wrapper: {}", bundle_dir.display());
+    println!(
+        "Profile: {}",
+        if options.release {
+            "release"
+        } else {
+            "development"
+        }
+    );
+    println!("Config: {}", relative_display(&root, &config_path));
+    println!("Bundle id: {DEV_CAMERA_BUNDLE_ID}");
+    println!(
+        "Run it with: cargo xtask run-metal{}",
+        if options.release { " --release" } else { "" }
+    );
+    Ok(())
+}
+
 fn run_metal(args: Vec<String>) -> Result<()> {
     let options = parse_run_metal_args(args)?;
 
@@ -691,34 +724,7 @@ fn run_metal(args: Vec<String>) -> Result<()> {
         let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
     }
 
-    let mut command = Command::new("cargo");
-    command.arg("build");
-    if options.release {
-        command.arg("--release");
-    }
-    command
-        .arg("--features")
-        .arg("metal-renderer camera-tracking");
-    let status = command
-        .current_dir(&root)
-        .env("CUBISM_CORE_INCLUDE_DIR", &include_dir)
-        .env("CUBISM_CORE_LIB_DIR", &lib_dir)
-        .status()?;
-    if !status.success() {
-        let profile = if options.release { " --release" } else { "" };
-        return Err(
-            format!(
-                "cargo build{profile} --features \"metal-renderer camera-tracking\" failed with status {status}"
-            )
-            .into(),
-        );
-    }
-
-    let profile_dir = if options.release { "release" } else { "debug" };
-    let executable = root
-        .join("target")
-        .join(profile_dir)
-        .join("vtube-studio-rs");
+    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
     let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
     println!("App wrapper: {}", bundle_dir.display());
 
@@ -741,6 +747,42 @@ fn run_metal(args: Vec<String>) -> Result<()> {
         options.model_path.as_deref(),
         log_stem,
     )
+}
+
+fn build_metal_executable(
+    root: &Path,
+    release: bool,
+    include_dir: &Path,
+    lib_dir: &Path,
+) -> Result<PathBuf> {
+    let mut command = Command::new("cargo");
+    command.arg("build");
+    if release {
+        command.arg("--release");
+    }
+    command
+        .arg("--features")
+        .arg("metal-renderer camera-tracking");
+    let status = command
+        .current_dir(&root)
+        .env("CUBISM_CORE_INCLUDE_DIR", &include_dir)
+        .env("CUBISM_CORE_LIB_DIR", &lib_dir)
+        .status()?;
+    if !status.success() {
+        let profile = if release { " --release" } else { "" };
+        return Err(
+            format!(
+                "cargo build{profile} --features \"metal-renderer camera-tracking\" failed with status {status}"
+            )
+            .into(),
+        );
+    }
+
+    let profile_dir = if release { "release" } else { "debug" };
+    Ok(root
+        .join("target")
+        .join(profile_dir)
+        .join("vtube-studio-rs"))
 }
 
 fn install_camera_app_wrapper(root: &Path, executable: &Path) -> Result<PathBuf> {
@@ -932,6 +974,39 @@ fn find_codesign_identity_line(text: &str, needle: &str) -> Option<String> {
 struct RunMetalOptions {
     release: bool,
     model_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct BuildAppOptions {
+    release: bool,
+}
+
+fn parse_build_app_args(args: Vec<String>) -> Result<BuildAppOptions> {
+    let mut release = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--release" => {
+                if release {
+                    return Err("usage: cargo xtask build-app [--release]".into());
+                }
+                release = true;
+            }
+            "--dev" => {
+                if release {
+                    return Err("usage: cargo xtask build-app [--release]".into());
+                }
+            }
+            "-h" | "--help" => {
+                return Err("usage: cargo xtask build-app [--release]".into());
+            }
+            value => {
+                return Err(format!("unknown build-app option: {value}").into());
+            }
+        }
+    }
+
+    Ok(BuildAppOptions { release })
 }
 
 fn parse_run_metal_args(args: Vec<String>) -> Result<RunMetalOptions> {
@@ -5702,6 +5777,29 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
         assert_eq!(
             options.model_path.as_deref(),
             Some("public/model/0.model3.json")
+        );
+    }
+
+    #[test]
+    fn build_app_args_support_dev_and_release_profiles() {
+        let options = parse_build_app_args(Vec::new()).expect("default build-app should parse");
+        assert!(!options.release);
+
+        let options = parse_build_app_args(vec!["--release".to_string()])
+            .expect("release build-app should parse");
+        assert!(options.release);
+
+        let options =
+            parse_build_app_args(vec!["--dev".to_string()]).expect("dev build-app should parse");
+        assert!(!options.release);
+    }
+
+    #[test]
+    fn build_app_args_reject_unknown_options_and_paths() {
+        assert!(parse_build_app_args(vec!["--fast".to_string()]).is_err());
+        assert!(parse_build_app_args(vec!["public/model/0.model3.json".to_string()]).is_err());
+        assert!(
+            parse_build_app_args(vec!["--release".to_string(), "--release".to_string()]).is_err()
         );
     }
 

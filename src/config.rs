@@ -4,6 +4,8 @@ use std::path::Path;
 
 const DEVELOPMENT_CONFIG_PATH: &str = "vtube-studio-rs.dev.toml";
 const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
+const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml";
+const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
 const DEFAULT_MODEL_PATH: &str = "public/model/0.model3.json";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,6 +23,14 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Result<Self, String> {
         let path = Path::new(default_config_path());
+        let example_path = Path::new(default_example_config_path());
+        if ensure_config_file_from_example(path, example_path)? {
+            println!(
+                "Created local config: {} from {}",
+                path.display(),
+                example_path.display()
+            );
+        }
         if path.is_file() {
             return Self::load_from_path(path);
         }
@@ -65,6 +75,39 @@ pub fn active_select_model_flag() -> &'static str {
 
 fn default_config_path() -> &'static str {
     active_config_path()
+}
+
+fn default_example_config_path() -> &'static str {
+    if cfg!(debug_assertions) {
+        DEVELOPMENT_EXAMPLE_CONFIG_PATH
+    } else {
+        BUILD_EXAMPLE_CONFIG_PATH
+    }
+}
+
+fn ensure_config_file_from_example(
+    config_path: &Path,
+    example_path: &Path,
+) -> Result<bool, String> {
+    if config_path.is_file() || !example_path.is_file() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+    fs::copy(example_path, config_path).map_err(|error| {
+        format!(
+            "Failed to create local config {} from {}: {error}",
+            config_path.display(),
+            example_path.display()
+        )
+    })?;
+    Ok(true)
 }
 
 fn default_runtime_profile() -> RuntimeProfile {
@@ -118,8 +161,11 @@ impl Default for RuntimeProfile {
 pub struct AppRuntimeConfig {
     pub runtime_profile: RuntimeProfile,
     pub window_level: String,
+    pub window_mode: String,
     pub window_width: f64,
     pub window_height: f64,
+    pub obs_capture_x: f64,
+    pub obs_capture_y: f64,
 }
 
 impl Default for AppRuntimeConfig {
@@ -127,8 +173,11 @@ impl Default for AppRuntimeConfig {
         Self {
             runtime_profile: RuntimeProfile::default(),
             window_level: "screen_saver".to_string(),
+            window_mode: "desktop".to_string(),
             window_width: 360.0,
             window_height: 480.0,
+            obs_capture_x: -10_000.0,
+            obs_capture_y: -10_000.0,
         }
     }
 }
@@ -369,7 +418,12 @@ pub struct OverridesConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, CameraConfig, RendererConfig, RuntimeProfile};
+    use super::{
+        AppConfig, CameraConfig, RendererConfig, RuntimeProfile, ensure_config_file_from_example,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_partial_config_toml() {
@@ -381,8 +435,11 @@ path = "public/model/custom.model3.json"
 [app]
 runtime_profile = "release"
 window_level = "screen_saver"
+window_mode = "obs_capture"
 window_width = 540.0
 window_height = 720.0
+obs_capture_x = -12000.0
+obs_capture_y = -9000.0
 
 [diagnostics]
 show = false
@@ -472,8 +529,11 @@ mouth_open = 0.7
         );
         assert_eq!(config.app.runtime_profile, RuntimeProfile::Release);
         assert_eq!(config.app.window_level, "screen_saver");
+        assert_eq!(config.app.window_mode, "obs_capture");
         assert_eq!(config.app.window_width, 540.0);
         assert_eq!(config.app.window_height, 720.0);
+        assert_eq!(config.app.obs_capture_x, -12000.0);
+        assert_eq!(config.app.obs_capture_y, -9000.0);
         assert!(!config.diagnostics.show);
         assert!(config.renderer.disable_masks);
         assert!(config.renderer.high_precision_masks);
@@ -566,6 +626,61 @@ path = "public/model/from-config.model3.json"
             config_model.resolved_model_path(Some("public/model/from-cli.model3.json")),
             "public/model/from-cli.model3.json"
         );
+    }
+
+    #[test]
+    fn creates_missing_local_config_from_example() {
+        let root = unique_temp_dir("config-create");
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        let config_path = root.join("vtube-studio-rs.dev.toml");
+        let example_path = root.join("vtube-studio-rs.dev.example.toml");
+        fs::write(
+            &example_path,
+            "[model]\npath = \"public/model/from-example.model3.json\"\n",
+        )
+        .expect("example config should be written");
+
+        assert!(
+            ensure_config_file_from_example(&config_path, &example_path)
+                .expect("config should be created")
+        );
+        assert_eq!(
+            fs::read_to_string(&config_path).expect("created config should be readable"),
+            fs::read_to_string(&example_path).expect("example config should be readable")
+        );
+        assert!(
+            !ensure_config_file_from_example(&config_path, &example_path)
+                .expect("existing config should be preserved")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_example_keeps_default_config_path_optional() {
+        let root = unique_temp_dir("config-missing-example");
+        fs::create_dir_all(&root).expect("temp dir should be created");
+        let config_path = root.join("vtube-studio-rs.dev.toml");
+        let example_path = root.join("missing.example.toml");
+
+        assert!(
+            !ensure_config_file_from_example(&config_path, &example_path)
+                .expect("missing example should not be fatal")
+        );
+        assert!(!config_path.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "vtube-studio-rs-{name}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 
     #[test]

@@ -84,6 +84,9 @@ static MENU_COMMANDS: AtomicU32 = AtomicU32::new(0);
 static MENU_SELECTED_EXPRESSION_INDEX: AtomicI32 = AtomicI32::new(EXPRESSION_INDEX_UNCHANGED);
 static MENU_SELECTED_MODEL_INDEX: AtomicI32 = AtomicI32::new(MODEL_INDEX_UNCHANGED);
 static MENU_SELECTED_WINDOW_SIZE_INDEX: AtomicI32 = AtomicI32::new(WINDOW_SIZE_INDEX_UNCHANGED);
+static MENU_SELECTED_WINDOW_MODE_INDEX: AtomicI32 = AtomicI32::new(WINDOW_MODE_INDEX_UNCHANGED);
+static MENU_SELECTED_RENDERER_QUALITY_INDEX: AtomicI32 =
+    AtomicI32::new(RENDERER_QUALITY_INDEX_UNCHANGED);
 
 const MENU_TOGGLE_DIAGNOSTICS: u32 = 1 << 0;
 const MENU_TOGGLE_MOUSE: u32 = 1 << 1;
@@ -96,8 +99,16 @@ const MENU_SELECT_MOUTH_PRESET: u32 = 1 << 7;
 const MENU_SELECT_CAMERA_PRESET: u32 = 1 << 8;
 const MENU_SELECT_MODEL: u32 = 1 << 9;
 const MENU_SELECT_WINDOW_SIZE: u32 = 1 << 10;
+const MENU_SELECT_RENDERER_QUALITY: u32 = 1 << 11;
+const MENU_OPEN_CAMERA_PRIVACY: u32 = 1 << 12;
+const MENU_OPEN_MICROPHONE_PRIVACY: u32 = 1 << 13;
+const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
+const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
+const MENU_SELECT_WINDOW_MODE: u32 = 1 << 16;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
+const WINDOW_MODE_INDEX_UNCHANGED: i32 = -1;
+const RENDERER_QUALITY_INDEX_UNCHANGED: i32 = -1;
 const EXPRESSION_INDEX_UNCHANGED: i32 = -2;
 const EXPRESSION_INDEX_NONE: i32 = -1;
 const INPUT_PRESET_UNCHANGED: i32 = -1;
@@ -217,6 +228,8 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 camera_enabled,
                 selected_expression_index,
                 window_size_preset: WindowSizePreset::from_config(&config.app),
+                window_mode_preset: WindowModePreset::from_config(&config.app),
+                renderer_quality_preset: RendererQualityPreset::from_config(&config),
                 mouse_preset: InputPreset::Normal,
                 mouth_preset: InputPreset::Normal,
                 camera_preset: InputPreset::Normal,
@@ -517,11 +530,12 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
 
 unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
+    let window_origin = avatar_window_origin(app_config);
     let window =
         crate::apple_platform::create_transparent_panel(crate::apple_platform::PanelStyle {
             frame: crate::apple_platform::LayerFrame {
-                x: 100.0,
-                y: 140.0,
+                x: window_origin.x,
+                y: window_origin.y,
                 width: window_size.width,
                 height: window_size.height,
             },
@@ -531,10 +545,13 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
         })?;
 
     println!(
-        "renderer_event=window_configured kind=nonactivating_panel level={} level_name={} level_key={} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        "renderer_event=window_configured kind=nonactivating_panel mode={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        WindowModePreset::from_config(app_config).config_value(),
         avatar_window_level(app_config),
         avatar_window_level_name(&app_config.window_level),
         avatar_window_level_key(&app_config.window_level),
+        window_origin.x,
+        window_origin.y,
         window_size.width,
         window_size.height,
         avatar_window_style_mask(),
@@ -555,9 +572,27 @@ fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
     }
 }
 
+fn avatar_window_origin(app_config: &AppRuntimeConfig) -> NSPoint {
+    match WindowModePreset::from_config(app_config) {
+        WindowModePreset::Desktop => NSPoint { x: 100.0, y: 140.0 },
+        WindowModePreset::ObsCapture => NSPoint {
+            x: valid_window_coordinate(app_config.obs_capture_x, -10_000.0),
+            y: valid_window_coordinate(app_config.obs_capture_y, -10_000.0),
+        },
+    }
+}
+
 fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
     if value.is_finite() && value >= 96.0 {
         value.min(2400.0)
+    } else {
+        fallback
+    }
+}
+
+fn valid_window_coordinate(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(-100_000.0, 100_000.0)
     } else {
         fallback
     }
@@ -768,6 +803,8 @@ struct RuntimeControlState {
     camera_enabled: bool,
     selected_expression_index: Option<usize>,
     window_size_preset: WindowSizePreset,
+    window_mode_preset: WindowModePreset,
+    renderer_quality_preset: RendererQualityPreset,
     mouse_preset: InputPreset,
     mouth_preset: InputPreset,
     camera_preset: InputPreset,
@@ -783,6 +820,8 @@ struct SettingsMenu {
     model_items: Vec<Id>,
     model_entries: Vec<ModelMenuEntry>,
     window_size_items: Vec<Id>,
+    window_mode_items: Vec<Id>,
+    renderer_quality_items: Vec<Id>,
     expression_items: Vec<Id>,
     mouse_preset_items: Vec<Id>,
     mouth_preset_items: Vec<Id>,
@@ -869,6 +908,141 @@ impl WindowSizePreset {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowModePreset {
+    Desktop,
+    ObsCapture,
+}
+
+impl WindowModePreset {
+    const ALL: [Self; 2] = [Self::Desktop, Self::ObsCapture];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Desktop => "Desktop Overlay",
+            Self::ObsCapture => "OBS Capture (offscreen)",
+        }
+    }
+
+    fn tag(self) -> NSInteger {
+        match self {
+            Self::Desktop => 0,
+            Self::ObsCapture => 1,
+        }
+    }
+
+    fn from_tag(tag: i32) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Desktop),
+            1 => Some(Self::ObsCapture),
+            _ => None,
+        }
+    }
+
+    fn from_config(config: &AppRuntimeConfig) -> Self {
+        match config.window_mode.trim().to_ascii_lowercase().as_str() {
+            "obs" | "obs_capture" | "obs-capture" | "offscreen" | "capture" => Self::ObsCapture,
+            _ => Self::Desktop,
+        }
+    }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::ObsCapture => "obs_capture",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RendererQualityPreset {
+    Performance,
+    Balanced,
+    HighQuality,
+}
+
+impl RendererQualityPreset {
+    const ALL: [Self; 3] = [Self::Performance, Self::Balanced, Self::HighQuality];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Performance => "Performance",
+            Self::Balanced => "Balanced",
+            Self::HighQuality => "High Quality",
+        }
+    }
+
+    fn tag(self) -> NSInteger {
+        match self {
+            Self::Performance => 0,
+            Self::Balanced => 1,
+            Self::HighQuality => 2,
+        }
+    }
+
+    fn from_tag(tag: i32) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Performance),
+            1 => Some(Self::Balanced),
+            2 => Some(Self::HighQuality),
+            _ => None,
+        }
+    }
+
+    fn from_config(config: &AppConfig) -> Self {
+        let renderer = &config.renderer;
+        if renderer.high_precision_masks || renderer.atlas_mipmaps || renderer.atlas_anisotropy >= 8
+        {
+            return Self::HighQuality;
+        }
+
+        let msaa = renderer.enable_msaa(config.app.runtime_profile);
+        let log_events = renderer.log_events.unwrap_or_else(|| {
+            matches!(
+                config.app.runtime_profile,
+                crate::config::RuntimeProfile::Development
+            )
+        });
+        if !msaa && !log_events && renderer.atlas_anisotropy <= 1 {
+            Self::Performance
+        } else {
+            Self::Balanced
+        }
+    }
+
+    fn enable_msaa(self, runtime_profile: crate::config::RuntimeProfile) -> bool {
+        match self {
+            Self::Performance => false,
+            Self::Balanced => runtime_profile.default_enable_msaa(),
+            Self::HighQuality => true,
+        }
+    }
+
+    fn log_events(self, runtime_profile: crate::config::RuntimeProfile) -> bool {
+        match self {
+            Self::Performance => false,
+            Self::Balanced | Self::HighQuality => {
+                matches!(runtime_profile, crate::config::RuntimeProfile::Development)
+            }
+        }
+    }
+
+    fn high_precision_masks(self) -> bool {
+        matches!(self, Self::HighQuality)
+    }
+
+    fn atlas_mipmaps(self) -> bool {
+        false
+    }
+
+    fn atlas_anisotropy(self) -> u64 {
+        match self {
+            Self::Performance | Self::Balanced => 1,
+            Self::HighQuality => 8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputPreset {
     Soft,
     Normal,
@@ -931,6 +1105,20 @@ unsafe fn install_settings_menu(
 
     let model_title = format!("Model: {}", model_title(model_path));
     add_disabled_menu_item(app_menu, &model_title)?;
+    add_action_menu_item(
+        app_menu,
+        "Reveal Active Model...",
+        "revealActiveModel:",
+        "",
+        controller,
+    )?;
+    add_action_menu_item(
+        app_menu,
+        "Open Models Folder...",
+        "openModelsFolder:",
+        "",
+        controller,
+    )?;
     add_disabled_menu_item(app_menu, "Model Selection (relaunches app)")?;
     let model_entries = discover_model_menu_entries(model_path);
     let mut model_items = Vec::new();
@@ -965,6 +1153,22 @@ unsafe fn install_settings_menu(
         )?;
         window_size_items.push(item);
     }
+    add_separator_menu_item(app_menu)?;
+
+    add_disabled_menu_item(app_menu, "Window Mode (relaunches app)")?;
+    let mut window_mode_items = Vec::new();
+    for preset in WindowModePreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectWindowMode:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        window_mode_items.push(item);
+    }
+    add_disabled_menu_item(app_menu, "OBS mode keeps the window offscreen for capture")?;
     add_separator_menu_item(app_menu)?;
 
     add_disabled_menu_item(app_menu, "Expression")?;
@@ -1022,6 +1226,20 @@ unsafe fn install_settings_menu(
         &camera_title,
         "toggleCameraTracking:",
         "c",
+        controller,
+    )?;
+    add_action_menu_item(
+        app_menu,
+        "Open Camera Privacy...",
+        "openCameraPrivacy:",
+        "",
+        controller,
+    )?;
+    add_action_menu_item(
+        app_menu,
+        "Open Microphone Privacy...",
+        "openMicrophonePrivacy:",
+        "",
         controller,
     )?;
     add_separator_menu_item(app_menu)?;
@@ -1104,6 +1322,21 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, &camera_detail)?;
     add_separator_menu_item(app_menu)?;
 
+    add_disabled_menu_item(app_menu, "Renderer Quality (relaunches app)")?;
+    let mut renderer_quality_items = Vec::new();
+    for preset in RendererQualityPreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectRendererQuality:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        renderer_quality_items.push(item);
+    }
+    add_separator_menu_item(app_menu)?;
+
     let msaa_title = format!(
         "Renderer MSAA: {}",
         if config.renderer.enable_msaa(config.app.runtime_profile) {
@@ -1153,6 +1386,8 @@ unsafe fn install_settings_menu(
         model_items,
         model_entries,
         window_size_items,
+        window_mode_items,
+        renderer_quality_items,
         expression_items,
         mouse_preset_items,
         mouth_preset_items,
@@ -1322,6 +1557,52 @@ unsafe fn handle_settings_menu_commands(
         }
     }
 
+    if commands & MENU_SELECT_WINDOW_MODE != 0 {
+        let selected =
+            MENU_SELECTED_WINDOW_MODE_INDEX.swap(WINDOW_MODE_INDEX_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = WindowModePreset::from_tag(selected) {
+            write_window_mode_to_active_config(preset)?;
+            schedule_model_relaunch(model_path)?;
+            println!(
+                "renderer_event=settings_changed window_mode={} apply=relaunch config=\"{}\"",
+                preset.config_value(),
+                crate::config::active_config_path()
+            );
+            terminate_current_app()?;
+        }
+    }
+
+    if commands & MENU_SELECT_RENDERER_QUALITY != 0 {
+        let selected = MENU_SELECTED_RENDERER_QUALITY_INDEX
+            .swap(RENDERER_QUALITY_INDEX_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = RendererQualityPreset::from_tag(selected) {
+            write_renderer_quality_to_active_config(preset, config.app.runtime_profile)?;
+            schedule_model_relaunch(model_path)?;
+            println!(
+                "renderer_event=settings_changed renderer_quality={} apply=relaunch config=\"{}\"",
+                preset.label(),
+                crate::config::active_config_path()
+            );
+            terminate_current_app()?;
+        }
+    }
+
+    if commands & MENU_OPEN_CAMERA_PRIVACY != 0 {
+        open_privacy_settings(PrivacySettingsPane::Camera);
+    }
+
+    if commands & MENU_OPEN_MICROPHONE_PRIVACY != 0 {
+        open_privacy_settings(PrivacySettingsPane::Microphone);
+    }
+
+    if commands & MENU_REVEAL_ACTIVE_MODEL != 0 {
+        reveal_path_in_finder(Path::new(model_path));
+    }
+
+    if commands & MENU_OPEN_MODELS_FOLDER != 0 {
+        open_models_folder();
+    }
+
     if commands & MENU_OPEN_ACTIVE_CONFIG != 0 {
         if let Err(error) = Command::new("open")
             .arg(crate::config::active_config_path())
@@ -1368,6 +1649,8 @@ unsafe fn handle_settings_menu_commands(
             camera_enabled: *camera_enabled,
             selected_expression_index: *selected_expression_index,
             window_size_preset: WindowSizePreset::from_config(&config.app),
+            window_mode_preset: WindowModePreset::from_config(&config.app),
+            renderer_quality_preset: RendererQualityPreset::from_config(config),
             mouse_preset: *mouse_preset,
             mouth_preset: *mouth_preset,
             camera_preset: *camera_preset,
@@ -1392,6 +1675,18 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
         set_menu_item_checked(
             *item,
             WindowSizePreset::ALL[index] == state.window_size_preset,
+        );
+    }
+    for (index, item) in menu.window_mode_items.iter().enumerate() {
+        set_menu_item_checked(
+            *item,
+            WindowModePreset::ALL[index] == state.window_mode_preset,
+        );
+    }
+    for (index, item) in menu.renderer_quality_items.iter().enumerate() {
+        set_menu_item_checked(
+            *item,
+            RendererQualityPreset::ALL[index] == state.renderer_quality_preset,
         );
     }
     for (index, item) in menu.mouse_preset_items.iter().enumerate() {
@@ -1636,6 +1931,146 @@ fn write_window_size_to_active_config(preset: WindowSizePreset) -> Result<(), St
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
 }
 
+fn write_window_mode_to_active_config(preset: WindowModePreset) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = set_toml_section_values(
+        &content,
+        "app",
+        &[
+            ("window_mode", toml_string_literal(preset.config_value())),
+            ("obs_capture_x", "-10000.0".to_string()),
+            ("obs_capture_y", "-10000.0".to_string()),
+        ],
+    );
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
+fn write_renderer_quality_to_active_config(
+    preset: RendererQualityPreset,
+    runtime_profile: crate::config::RuntimeProfile,
+) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = set_toml_section_values(
+        &content,
+        "renderer",
+        &[
+            ("disable_masks", "false".to_string()),
+            (
+                "high_precision_masks",
+                toml_bool_literal(preset.high_precision_masks()).to_string(),
+            ),
+            (
+                "enable_msaa",
+                toml_bool_literal(preset.enable_msaa(runtime_profile)).to_string(),
+            ),
+            (
+                "log_events",
+                toml_bool_literal(preset.log_events(runtime_profile)).to_string(),
+            ),
+            (
+                "atlas_mipmaps",
+                toml_bool_literal(preset.atlas_mipmaps()).to_string(),
+            ),
+            ("atlas_anisotropy", preset.atlas_anisotropy().to_string()),
+        ],
+    );
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivacySettingsPane {
+    Camera,
+    Microphone,
+}
+
+impl PrivacySettingsPane {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Camera => "Camera",
+            Self::Microphone => "Microphone",
+        }
+    }
+
+    fn url(self) -> &'static str {
+        match self {
+            Self::Camera => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
+            }
+            Self::Microphone => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            }
+        }
+    }
+}
+
+fn open_privacy_settings(pane: PrivacySettingsPane) {
+    if let Err(error) = Command::new("open").arg(pane.url()).spawn() {
+        eprintln!(
+            "Failed to open macOS {} privacy settings: {error}",
+            pane.label()
+        );
+    }
+}
+
+fn reveal_path_in_finder(path: &Path) {
+    let args = finder_reveal_command_args(path);
+    if let Err(error) = Command::new(&args[0]).args(&args[1..]).spawn() {
+        eprintln!("Failed to reveal {} in Finder: {error}", path.display());
+    }
+}
+
+fn open_models_folder() {
+    let path = Path::new("public");
+    if let Err(error) = std::fs::create_dir_all(path) {
+        eprintln!(
+            "Failed to create local models folder {}: {error}",
+            path.display()
+        );
+        return;
+    }
+
+    let args = finder_open_command_args(path);
+    if let Err(error) = Command::new(&args[0]).args(&args[1..]).spawn() {
+        eprintln!(
+            "Failed to open local models folder {}: {error}",
+            path.display()
+        );
+    }
+}
+
+fn finder_reveal_command_args(path: &Path) -> Vec<String> {
+    vec![
+        "open".to_string(),
+        "-R".to_string(),
+        absolute_path_for_compare(&path.to_string_lossy())
+            .to_string_lossy()
+            .to_string(),
+    ]
+}
+
+fn finder_open_command_args(path: &Path) -> Vec<String> {
+    vec![
+        "open".to_string(),
+        absolute_path_for_compare(&path.to_string_lossy())
+            .to_string_lossy()
+            .to_string(),
+    ]
+}
+
 fn schedule_model_relaunch(model_path: &str) -> Result<(), String> {
     let command_args = relaunch_command_args(model_path)?;
     if command_args.is_empty() {
@@ -1769,6 +2204,18 @@ fn set_toml_section_value(content: &str, section: &str, key: &str, value: &str) 
     output
 }
 
+fn set_toml_section_values(content: &str, section: &str, values: &[(&str, String)]) -> String {
+    values
+        .iter()
+        .fold(content.to_string(), |content, (key, value)| {
+            set_toml_section_value(&content, section, key, value)
+        })
+}
+
+fn toml_bool_literal(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
 fn toml_string_literal(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
@@ -1886,6 +2333,10 @@ fn settings_menu_controller_class() -> Result<Class, String> {
             ("toggleMouseTracking:", settings_toggle_mouse),
             ("toggleMicrophoneInput:", settings_toggle_microphone),
             ("toggleCameraTracking:", settings_toggle_camera),
+            ("openCameraPrivacy:", settings_open_camera_privacy),
+            ("openMicrophonePrivacy:", settings_open_microphone_privacy),
+            ("revealActiveModel:", settings_reveal_active_model),
+            ("openModelsFolder:", settings_open_models_folder),
             ("openActiveConfig:", settings_open_active_config),
             ("selectExpression:", settings_select_expression),
             ("selectMousePreset:", settings_select_mouse_preset),
@@ -1893,6 +2344,8 @@ fn settings_menu_controller_class() -> Result<Class, String> {
             ("selectCameraPreset:", settings_select_camera_preset),
             ("selectModel:", settings_select_model),
             ("selectWindowSize:", settings_select_window_size),
+            ("selectWindowMode:", settings_select_window_mode),
+            ("selectRendererQuality:", settings_select_renderer_quality),
         ],
     )
 }
@@ -1935,6 +2388,38 @@ extern "C-unwind" fn settings_open_active_config(
     _sender: *mut objc2::runtime::AnyObject,
 ) {
     MENU_COMMANDS.fetch_or(MENU_OPEN_ACTIVE_CONFIG, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_open_camera_privacy(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_OPEN_CAMERA_PRIVACY, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_open_microphone_privacy(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_OPEN_MICROPHONE_PRIVACY, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_reveal_active_model(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_REVEAL_ACTIVE_MODEL, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_open_models_folder(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_OPEN_MODELS_FOLDER, Ordering::AcqRel);
 }
 
 extern "C-unwind" fn settings_select_expression(
@@ -1995,6 +2480,26 @@ extern "C-unwind" fn settings_select_window_size(
     let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
     MENU_SELECTED_WINDOW_SIZE_INDEX.store(tag, Ordering::Release);
     MENU_COMMANDS.fetch_or(MENU_SELECT_WINDOW_SIZE, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_select_window_mode(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_WINDOW_MODE_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_WINDOW_MODE, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_select_renderer_quality(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_RENDERER_QUALITY_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_RENDERER_QUALITY, Ordering::AcqRel);
 }
 
 struct EventPump {
@@ -2548,18 +3053,23 @@ mod tests {
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
-        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, WindowSizePreset,
-        avatar_frame_for_bounds, avatar_window_collection_behavior, avatar_window_level_key,
-        avatar_window_level_name, avatar_window_size, avatar_window_style_mask,
-        camera_debug_summary, camera_runtime_active, is_model3_path, model_menu_title,
-        model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
-        relaunch_command_args, runtime_camera_config, runtime_microphone_config,
-        runtime_mouse_config, selected_expression_index, set_toml_section_value,
-        toml_string_literal, window_occlusion_visible,
+        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, PrivacySettingsPane,
+        RendererQualityPreset, WindowModePreset, WindowSizePreset, avatar_frame_for_bounds,
+        avatar_window_collection_behavior, avatar_window_level_key, avatar_window_level_name,
+        avatar_window_origin, avatar_window_size, avatar_window_style_mask, camera_debug_summary,
+        camera_runtime_active, finder_open_command_args, finder_reveal_command_args,
+        is_model3_path, model_menu_title, model_paths_match, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
+        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
+        selected_expression_index, set_toml_section_value, set_toml_section_values,
+        toml_string_literal, valid_window_coordinate, window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
-    use crate::config::{AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig};
+    use crate::config::{
+        AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, RendererConfig,
+        RuntimeProfile,
+    };
     use crate::live2d_model::{Live2dModel, ModelExpression};
     use crate::motion::CameraMotionSample;
     use std::collections::HashMap;
@@ -2644,6 +3154,73 @@ mod tests {
     }
 
     #[test]
+    fn window_mode_presets_drive_desktop_and_obs_capture_origins() {
+        assert_eq!(
+            WindowModePreset::from_tag(1),
+            Some(WindowModePreset::ObsCapture)
+        );
+        assert_eq!(WindowModePreset::ObsCapture.config_value(), "obs_capture");
+        assert_eq!(
+            WindowModePreset::from_config(&AppRuntimeConfig {
+                window_mode: "offscreen".to_string(),
+                ..AppRuntimeConfig::default()
+            }),
+            WindowModePreset::ObsCapture
+        );
+
+        let desktop_origin = avatar_window_origin(&AppRuntimeConfig::default());
+        assert_eq!(desktop_origin.x, 100.0);
+        assert_eq!(desktop_origin.y, 140.0);
+
+        let obs_origin = avatar_window_origin(&AppRuntimeConfig {
+            window_mode: "obs_capture".to_string(),
+            obs_capture_x: -12_000.0,
+            obs_capture_y: -9_000.0,
+            ..AppRuntimeConfig::default()
+        });
+        assert_eq!(obs_origin.x, -12_000.0);
+        assert_eq!(obs_origin.y, -9_000.0);
+        assert_eq!(valid_window_coordinate(f64::NAN, -10_000.0), -10_000.0);
+    }
+
+    #[test]
+    fn renderer_quality_presets_map_to_config_values() {
+        assert_eq!(
+            RendererQualityPreset::from_tag(2),
+            Some(RendererQualityPreset::HighQuality)
+        );
+        assert!(!RendererQualityPreset::Performance.enable_msaa(RuntimeProfile::Development));
+        assert!(!RendererQualityPreset::Performance.log_events(RuntimeProfile::Development));
+        assert!(RendererQualityPreset::Balanced.log_events(RuntimeProfile::Development));
+        assert!(!RendererQualityPreset::Balanced.log_events(RuntimeProfile::Release));
+        assert!(RendererQualityPreset::HighQuality.enable_msaa(RuntimeProfile::Release));
+        assert!(RendererQualityPreset::HighQuality.high_precision_masks());
+        assert_eq!(RendererQualityPreset::HighQuality.atlas_anisotropy(), 8);
+    }
+
+    #[test]
+    fn renderer_quality_from_config_detects_current_preset() {
+        let mut config = AppConfig::default();
+        config.app.runtime_profile = RuntimeProfile::Release;
+        config.renderer = RendererConfig {
+            enable_msaa: Some(false),
+            log_events: Some(false),
+            atlas_anisotropy: 1,
+            ..RendererConfig::default()
+        };
+        assert_eq!(
+            RendererQualityPreset::from_config(&config),
+            RendererQualityPreset::Performance
+        );
+
+        config.renderer.high_precision_masks = true;
+        assert_eq!(
+            RendererQualityPreset::from_config(&config),
+            RendererQualityPreset::HighQuality
+        );
+    }
+
+    #[test]
     fn event_pump_uses_nonblocking_space_transition_modes() {
         assert_eq!(EventPump::RUN_LOOP_MODE_NAMES.len(), 3);
         assert!(EventPump::RUN_LOOP_MODE_NAMES.contains(&"NSDefaultRunLoopMode"));
@@ -2713,6 +3290,52 @@ mod tests {
     }
 
     #[test]
+    fn set_toml_section_values_updates_renderer_quality_fields() {
+        let updated = set_toml_section_values(
+            "[renderer]\nenable_msaa = true\n",
+            "renderer",
+            &[
+                ("enable_msaa", "false".to_string()),
+                ("high_precision_masks", "true".to_string()),
+                ("atlas_anisotropy", "8".to_string()),
+            ],
+        );
+
+        assert!(updated.contains("[renderer]\nenable_msaa = false\n"));
+        assert!(updated.contains("high_precision_masks = true\n"));
+        assert!(updated.contains("atlas_anisotropy = 8\n"));
+    }
+
+    #[test]
+    fn set_toml_section_values_updates_window_mode_fields() {
+        let updated = set_toml_section_values(
+            "[app]\nwindow_mode = \"desktop\"\n",
+            "app",
+            &[
+                ("window_mode", toml_string_literal("obs_capture")),
+                ("obs_capture_x", "-10000.0".to_string()),
+                ("obs_capture_y", "-10000.0".to_string()),
+            ],
+        );
+
+        assert!(updated.contains("window_mode = \"obs_capture\"\n"));
+        assert!(updated.contains("obs_capture_x = -10000.0\n"));
+        assert!(updated.contains("obs_capture_y = -10000.0\n"));
+    }
+
+    #[test]
+    fn privacy_settings_panes_use_macos_privacy_urls() {
+        assert_eq!(PrivacySettingsPane::Camera.label(), "Camera");
+        assert_eq!(PrivacySettingsPane::Microphone.label(), "Microphone");
+        assert!(PrivacySettingsPane::Camera.url().contains("Privacy_Camera"));
+        assert!(
+            PrivacySettingsPane::Microphone
+                .url()
+                .contains("Privacy_Microphone")
+        );
+    }
+
+    #[test]
     fn toml_string_literal_escapes_model_paths() {
         assert_eq!(
             toml_string_literal(r#"public/model/"avatar"\0.model3.json"#),
@@ -2730,6 +3353,27 @@ mod tests {
             args.last()
                 .is_some_and(|arg| arg.ends_with("public/model/0.model3.json"))
         );
+    }
+
+    #[test]
+    fn finder_reveal_command_selects_active_model_manifest() {
+        let args = finder_reveal_command_args(std::path::Path::new("public/model/0.model3.json"));
+
+        assert_eq!(args[0], "open");
+        assert_eq!(args[1], "-R");
+        assert!(
+            args.last()
+                .is_some_and(|arg| arg.ends_with("public/model/0.model3.json"))
+        );
+    }
+
+    #[test]
+    fn finder_open_command_opens_local_models_folder() {
+        let args = finder_open_command_args(std::path::Path::new("public"));
+
+        assert_eq!(args[0], "open");
+        assert_eq!(args.len(), 2);
+        assert!(args.last().is_some_and(|arg| arg.ends_with("public")));
     }
 
     #[test]

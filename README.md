@@ -129,6 +129,8 @@ Local tooling is exposed through the Rust `xtask` crate:
 ```bash
 cargo xtask clean --generated
 cargo xtask clean --all
+cargo xtask build-app
+cargo xtask build-app --release
 cargo xtask capture-full-matrix
 cargo xtask capture-metal public/model/0.model3.json
 cargo xtask capture-mask-matrix
@@ -171,6 +173,17 @@ profile that reads `vtube-studio-rs.build.toml`:
 cargo xtask run-metal --release
 ```
 
+To build and sign the local `.app` wrapper without launching it:
+
+```bash
+cargo xtask build-app
+cargo xtask build-app --release
+```
+
+This uses the same `metal-renderer camera-tracking` feature set, Cubism Core SDK
+auto-detection, stable `rs.vtube-studio.dev` bundle identity, and local
+codesigning path as `run-metal`.
+
 `run-metal` always compiles both `metal-renderer` and `camera-tracking`; the
 active TOML decides whether the camera opens through `[input.camera].enabled`.
 The local build config enables camera input by default, so `cargo xtask
@@ -212,13 +225,22 @@ microphone mouth input for the current session. When the model declares
 without restarting. The menu lists local `.model3.json` files found under
 `public/`; selecting one writes `[model].path` to the active dev/build TOML and
 relaunches the local `.app` with that model so command-line model overrides do
-not keep the old avatar loaded. The menu also includes Window Size presets that
-write `[app].window_width` / `[app].window_height` and relaunch with 100%, 125%,
-150%, or 200% sizing. The menu also includes Soft/Normal/Expressive
-mouse, mouth, and camera calibration presets for quick runtime tuning before
-committing values to TOML. `Open Active Config...` opens the dev/build TOML file
-that will be used on the next launch. In-process hot model switching is still
-planned.
+not keep the old avatar loaded. `Reveal Active Model...` selects the loaded
+`.model3.json` in Finder, and `Open Models Folder...` opens the local `public/`
+folder, creating it first if needed. The menu also includes Window Size presets
+that write `[app].window_width` / `[app].window_height` and relaunch with 100%,
+125%, 150%, or 200% sizing. Window Mode presets write `[app].window_mode` and
+relaunch between desktop overlay and OBS capture mode. OBS capture mode keeps
+the avatar window rendered but places it offscreen, so OBS Window Capture can
+target it without showing the model on the desktop. Renderer Quality presets
+write `[renderer]` quality fields and relaunch with Performance, Balanced, or
+High Quality settings. The menu also includes Soft/Normal/Expressive mouse,
+mouth, and camera calibration presets for quick runtime tuning before committing
+values to TOML.
+`Open Camera Privacy...` and `Open Microphone Privacy...` jump to the matching
+macOS privacy panes for permission repair. `Open Active Config...` opens the
+dev/build TOML file that will be used on the next launch. In-process hot model
+switching and hot renderer reconfiguration are still planned.
 
 To keep old instances alive during development:
 
@@ -378,15 +400,20 @@ and a Markdown checklist/report to `target/space-test/*.md`.
 Runtime options are read once at startup from a profile-specific local config in
 the project root. Debug/development runs use `vtube-studio-rs.dev.toml`; release
 builds use `vtube-studio-rs.build.toml`. Both files are local-only and ignored
-by Git. Copy `vtube-studio-rs.dev.example.toml` or
-`vtube-studio-rs.build.example.toml` when you want to customize a run.
+by Git. If the active local config is missing, startup creates it from the
+matching committed example before loading. You can also copy or edit
+`vtube-studio-rs.dev.example.toml` or `vtube-studio-rs.build.example.toml` when
+you want to customize a run.
 
 ```toml
 [app]
 runtime_profile = "development"
 window_level = "screen_saver"
+window_mode = "desktop"
 window_width = 540.0
 window_height = 720.0
+obs_capture_x = -10000.0
+obs_capture_y = -10000.0
 
 [model]
 path = "public/model/0.model3.json"

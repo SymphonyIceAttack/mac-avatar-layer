@@ -192,11 +192,14 @@ Priority 1: Model And Runtime Usability
   model manifests, and Cubism Core SDK paths before launching.
 - Validate the selected `.model3.json` before opening the avatar window and
   print the active config path plus repair commands when it is missing.
-- Expand the first-pass status bar settings menu into a small settings UI for
-  renderer quality and local model selection; diagnostics, expression
-  selection, and input toggles are already available as session controls.
-- Keep improving missing SDK/model/microphone permission messages so failures
-  are visible to non-developer users beyond the terminal.
+- Continue growing the first-pass status bar settings menu into a small
+  settings UI. Local model selection, window size presets, renderer quality
+  presets, diagnostics, expression selection, and input toggles are already
+  available as menu controls.
+- Keep improving missing SDK/model/microphone/camera permission messages so
+  failures are visible to non-developer users beyond the terminal. The first
+  pass now includes `VT` menu shortcuts to macOS Camera and Microphone privacy
+  settings.
 
 Priority 2: Tracking And Input
 
@@ -752,6 +755,9 @@ Status: next product milestone.
 - Keep startup model selection available through `[model].path` in
   `vtube-studio-rs.dev.toml` / `vtube-studio-rs.build.toml`; command-line model
   paths override TOML for one run.
+- Done: when the active dev/build TOML is missing, startup creates it from the
+  matching committed example config before loading. If the example is also
+  missing, the app still falls back to built-in defaults.
 - Reuse the local model discovery path currently exposed by
   `cargo xtask list-models`.
 - Reuse the local model selection path currently exposed by
@@ -760,18 +766,42 @@ Status: next product milestone.
   writes the selected `.model3.json` to the active profile TOML, relaunches the
   local `.app` with that selected model, and avoids stale command-line model
   overrides; full in-process hot switching remains planned.
+- Done: expose `VT` menu `Reveal Active Model...` so users can locate the
+  loaded `.model3.json` in Finder and inspect local `public/` resources without
+  reading terminal paths.
+- Done: expose `VT` menu `Open Models Folder...`; it opens the local `public/`
+  folder and creates it first when missing, so model resource setup does not
+  require terminal directory work.
 - Done: expose `VT` menu Window Size presets. Selecting 100%, 125%, 150%, or
   200% writes `[app].window_width` / `[app].window_height` to the active
   dev/build TOML and relaunches the local `.app`.
-- Expand the status bar controls into a settings surface for renderer quality
-  and selected model. The first-pass `VT` menu already shows renderer/model
-  state and toggles diagnostics, expression selection, mouse tracking,
-  microphone input, and input calibration presets for the current session.
-- Improve user-facing permission and missing-file messages beyond the current
-  startup terminal diagnostics.
+- Done: expose `VT` menu Window Mode presets. `Desktop Overlay` preserves the
+  normal transparent avatar window; `OBS Capture (offscreen)` keeps the window
+  alive and rendered but moves it outside the visible desktop so OBS Window
+  Capture can target it without showing the avatar on the desktop. This is a
+  first-pass capture workflow, not a hidden/minimized-window guarantee.
+- Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
+  Performance, Balanced, or High Quality writes `[renderer]` quality fields to
+  the active dev/build TOML and relaunches the local `.app`; full in-process
+  renderer reconfiguration remains planned.
+- Continue expanding the status bar controls into a broader settings surface.
+  The first-pass `VT` menu already shows renderer/model state and controls
+  diagnostics, expression selection, mouse tracking, microphone input, camera
+  tracking, input calibration presets, local model selection, window size, and
+  renderer quality.
+- Done: add first-pass `VT` menu shortcuts for Camera and Microphone privacy
+  settings so users can repair macOS permission issues without searching
+  terminal logs.
+- Continue improving user-facing permission and missing-file messages beyond
+  the current startup terminal diagnostics.
 - Prototype the selected AVFoundation + Vision camera-tracking path and expose
   it through `[input.camera]` plus the `VT` status bar menu.
-- Prepare packaging/signing/launch-at-login decisions.
+- Done: add `cargo xtask build-app [--release]` as the first packaging/signing
+  entry point. It builds the Metal + camera app wrapper, signs it with the same
+  stable local bundle identity as `run-metal`, prints the active profile config,
+  and does not launch the app.
+- Continue packaging/signing/launch-at-login decisions; launch-at-login remains
+  intentionally unimplemented until the app bundle/install location is settled.
 - Start the objc2 AppKit/Foundation migration phase from section 3a before
   adding more large macOS UI features, so future menu/settings/window work is
   built on typed framework bindings instead of expanding hand-written
