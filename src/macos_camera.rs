@@ -107,7 +107,7 @@ impl CameraRuntime {
         match setup_camera(config, true) {
             Ok(setup) => Ok(Self {
                 pipeline: setup.pipeline,
-                diagnostic: camera_setup_message(
+                diagnostic: crate::apple_platform::local_only_camera_message(
                     "Camera permission, device probing, capture session configuration, sample buffer delegate wiring, capture session startup, Vision landmark sampling, and first-pass landmark-to-parameter mapping succeeded.",
                 ),
             }),
@@ -143,7 +143,7 @@ struct CameraSetup {
 fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetup, CameraProbe> {
     let media_type_video = video_media_type().map_err(|error| CameraProbe {
         status: CameraStatus::Failed,
-        diagnostic: Some(camera_setup_message(&format!(
+        diagnostic: Some(crate::apple_platform::local_only_camera_message(&format!(
             "Camera tracking setup failed: {error}"
         ))),
     })?;
@@ -155,7 +155,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
             Ok(false) => {
                 return Err(CameraProbe {
                     status: CameraStatus::PermissionDenied,
-                    diagnostic: Some(camera_setup_message(
+                    diagnostic: Some(crate::apple_platform::local_only_camera_message(
                         "Camera permission was denied. Enable camera access for vtube-studio-rs Dev in System Settings > Privacy & Security > Camera.",
                     )),
                 });
@@ -163,7 +163,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
             Err(error) => {
                 return Err(CameraProbe {
                     status: CameraStatus::WaitingForPermission,
-                    diagnostic: Some(camera_setup_message(&format!(
+                    diagnostic: Some(crate::apple_platform::local_only_camera_message(&format!(
                         "Camera permission has not been granted yet. macOS has been asked for access, but no response arrived before startup continued: {error}. Approve camera access for vtube-studio-rs Dev, then run the app again if the camera did not start.",
                     ))),
                 });
@@ -172,7 +172,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
         AVAuthorizationStatus::Restricted | AVAuthorizationStatus::Denied => {
             return Err(CameraProbe {
                 status: CameraStatus::PermissionDenied,
-                diagnostic: Some(camera_setup_message(
+                diagnostic: Some(crate::apple_platform::local_only_camera_message(
                     "Camera permission is denied or restricted. Enable camera access for the terminal/app that launches vtube-studio-rs in System Settings > Privacy & Security > Camera.",
                 )),
             });
@@ -198,7 +198,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
     let Some(device) = device else {
         return Err(CameraProbe {
             status: CameraStatus::NoCamera,
-            diagnostic: Some(camera_setup_message(
+            diagnostic: Some(crate::apple_platform::local_only_camera_message(
                 "No matching macOS camera was found. Check that a webcam is connected and available to AVFoundation.",
             )),
         });
@@ -207,7 +207,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
     configure_vision_throttle(config.target_fps);
     let pipeline = build_capture_session(&device).map_err(|error| CameraProbe {
         status: CameraStatus::Failed,
-        diagnostic: Some(camera_setup_message(&format!(
+        diagnostic: Some(crate::apple_platform::local_only_camera_message(&format!(
             "Camera tracking setup failed: {error}"
         ))),
     })?;
@@ -216,7 +216,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
         if !pipeline.is_running() {
             return Err(CameraProbe {
                 status: CameraStatus::Failed,
-                diagnostic: Some(camera_setup_message(
+                diagnostic: Some(crate::apple_platform::local_only_camera_message(
                     "AVCaptureSession did not report running after startup.",
                 )),
             });
@@ -285,7 +285,9 @@ fn named_video_device(
     let devices = unsafe { AVCaptureDevice::devicesWithMediaType(media_type_video) };
     for index in 0..devices.len() {
         let device = devices.objectAtIndex(index);
-        if unsafe { device.localizedName() }.to_string() == requested_name {
+        if crate::apple_platform::foundation_string(&unsafe { device.localizedName() })
+            == requested_name
+        {
             return Some(device);
         }
     }
@@ -295,8 +297,13 @@ fn named_video_device(
 
 fn build_capture_session(device: &AVCaptureDevice) -> Result<CameraCapturePipeline, String> {
     let session = unsafe { AVCaptureSession::new() };
-    let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(device) }
-        .map_err(|error| format!("Failed to create AVCaptureDeviceInput: {}", ns_error(error)))?;
+    let input =
+        unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(device) }.map_err(|error| {
+            format!(
+                "Failed to create AVCaptureDeviceInput: {}",
+                crate::apple_platform::ns_error_description(error)
+            )
+        })?;
     let output = unsafe { AVCaptureVideoDataOutput::new() };
     let delegate = CameraSampleBufferDelegate::new();
     let queue = DispatchQueue::new("rs.vtube-studio.camera.samples", None);
@@ -456,7 +463,10 @@ fn merge_pose_sample(
 fn log_vision_request_error(label: &str, error: Retained<NSError>) {
     let previous = VISION_FAILURES.fetch_add(1, Ordering::Relaxed);
     if previous == 0 {
-        eprintln!("Camera Vision {label} request failed: {}", ns_error(error));
+        eprintln!(
+            "Camera Vision {label} request failed: {}",
+            crate::apple_platform::ns_error_description(error)
+        );
     }
 }
 
@@ -794,28 +804,9 @@ fn configure_capture_session(
     Ok(())
 }
 
-fn ns_error(error: Retained<NSError>) -> String {
-    error.localizedDescription().to_string()
-}
-
-fn camera_setup_message(detail: &str) -> String {
-    format!(
-        "{detail}\nCamera tracking is local-only: frames are not stored, written to disk, or logged."
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn camera_setup_message_mentions_local_privacy_boundary() {
-        let message = camera_setup_message("Probe detail.");
-
-        assert!(message.contains("Probe detail."));
-        assert!(message.contains("frames are not stored"));
-        assert!(message.contains("not"));
-    }
 
     #[test]
     fn landmark_geometry_maps_mouth_open_to_normalized_range() {

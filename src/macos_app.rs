@@ -22,17 +22,15 @@ use std::time::{Duration, Instant};
 type Id = *mut c_void;
 type Class = *mut c_void;
 type Sel = *mut c_void;
+#[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 type Bool = i8;
 type NSInteger = c_long;
 type NSUInteger = c_ulong;
 type CGFloat = c_double;
 
-const YES: Bool = 1;
-const NO: Bool = 0;
 const NIL: Id = ptr::null_mut();
 
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
-const NS_BACKING_STORE_BUFFERED: NSUInteger = 2;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
 const NS_EVENT_MASK_ANY: NSUInteger = NSUInteger::MAX;
@@ -47,9 +45,6 @@ const CG_MAXIMUM_WINDOW_LEVEL_KEY: i32 = 14;
 const CG_OVERLAY_WINDOW_LEVEL_KEY: i32 = 15;
 const NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED: NSUInteger = 1 << 15;
 const NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP: NSUInteger = 0x00ff_ffff;
-const NS_CONTROL_STATE_VALUE_OFF: NSInteger = 0;
-const NS_CONTROL_STATE_VALUE_ON: NSInteger = 1;
-const NS_VARIABLE_STATUS_ITEM_LENGTH: CGFloat = -1.0;
 const TARGET_FPS: f64 = 60.0;
 #[cfg(feature = "metal-renderer")]
 const AVATAR_HORIZONTAL_MARGIN: CGFloat = 36.0;
@@ -82,15 +77,13 @@ struct NSRect {
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
-    fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra_bytes: usize) -> Class;
-    fn objc_registerClassPair(cls: Class);
-    fn class_addMethod(cls: Class, name: Sel, imp: *const c_void, types: *const c_char) -> Bool;
     fn objc_msgSend();
 }
 
 static MENU_COMMANDS: AtomicU32 = AtomicU32::new(0);
 static MENU_SELECTED_EXPRESSION_INDEX: AtomicI32 = AtomicI32::new(EXPRESSION_INDEX_UNCHANGED);
 static MENU_SELECTED_MODEL_INDEX: AtomicI32 = AtomicI32::new(MODEL_INDEX_UNCHANGED);
+static MENU_SELECTED_WINDOW_SIZE_INDEX: AtomicI32 = AtomicI32::new(WINDOW_SIZE_INDEX_UNCHANGED);
 
 const MENU_TOGGLE_DIAGNOSTICS: u32 = 1 << 0;
 const MENU_TOGGLE_MOUSE: u32 = 1 << 1;
@@ -102,7 +95,9 @@ const MENU_SELECT_MOUSE_PRESET: u32 = 1 << 6;
 const MENU_SELECT_MOUTH_PRESET: u32 = 1 << 7;
 const MENU_SELECT_CAMERA_PRESET: u32 = 1 << 8;
 const MENU_SELECT_MODEL: u32 = 1 << 9;
+const MENU_SELECT_WINDOW_SIZE: u32 = 1 << 10;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
+const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
 const EXPRESSION_INDEX_UNCHANGED: i32 = -2;
 const EXPRESSION_INDEX_NONE: i32 = -1;
 const INPUT_PRESET_UNCHANGED: i32 = -1;
@@ -116,11 +111,6 @@ unsafe extern "C" {}
 
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGWindowLevelForKey(key: i32) -> i32;
-}
 
 #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -203,14 +193,10 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let avatar_layer = create_avatar_layer(&model)?;
         let diagnostics_layer = create_diagnostics_layer()?;
         #[cfg(not(feature = "metal-renderer"))]
-        msg_void_id(root_layer, "addSublayer:", avatar_layer);
-        msg_void_id(root_layer, "addSublayer:", diagnostics_layer);
+        crate::apple_platform::add_sublayer(root_layer, avatar_layer);
+        crate::apple_platform::add_sublayer(root_layer, diagnostics_layer);
         let mut diagnostics_visible = config.diagnostics.show;
-        msg_void_bool(
-            diagnostics_layer,
-            "setHidden:",
-            bool_to_objc(!diagnostics_visible),
-        );
+        crate::apple_platform::set_layer_hidden(diagnostics_layer, !diagnostics_visible);
         let mut selected_expression_index =
             selected_expression_index(&model, config.motion.expression.as_deref());
         let mut camera_input = CameraInput::from_config(&config.input.camera);
@@ -230,13 +216,14 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 microphone_enabled,
                 camera_enabled,
                 selected_expression_index,
+                window_size_preset: WindowSizePreset::from_config(&config.app),
                 mouse_preset: InputPreset::Normal,
                 mouth_preset: InputPreset::Normal,
                 camera_preset: InputPreset::Normal,
             },
         )?;
 
-        msg_void(window, "orderFrontRegardless");
+        crate::apple_platform::order_panel_front_regardless(window);
 
         let event_pump = EventPump::new()?;
         let mut frame_clock = FrameClock::new(TARGET_FPS);
@@ -283,6 +270,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut motion_controller,
                 &mut microphone,
                 &mut camera_input,
+                model_path,
             )?;
             lifecycle_monitor.poll(app, window, &config.app, started_at);
             begin_immediate_layer_update();
@@ -529,35 +517,19 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
 
 unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
-    let rect = NSRect {
-        origin: NSPoint { x: 100.0, y: 140.0 },
-        size: window_size,
-    };
+    let window =
+        crate::apple_platform::create_transparent_panel(crate::apple_platform::PanelStyle {
+            frame: crate::apple_platform::LayerFrame {
+                x: 100.0,
+                y: 140.0,
+                width: window_size.width,
+                height: window_size.height,
+            },
+            style_mask: avatar_window_style_mask(),
+            level: avatar_window_level(app_config),
+            collection_behavior: avatar_window_collection_behavior(),
+        })?;
 
-    let window = msg_id(class("NSPanel")?, "alloc");
-    let window = msg_id_rect_ulong_ulong_bool(
-        window,
-        "initWithContentRect:styleMask:backing:defer:",
-        rect,
-        avatar_window_style_mask(),
-        NS_BACKING_STORE_BUFFERED,
-        NO,
-    );
-
-    if window.is_null() {
-        return Err("NSPanel allocation returned nil".to_string());
-    }
-
-    msg_void_bool(window, "setOpaque:", NO);
-    msg_void_bool(window, "setMovableByWindowBackground:", YES);
-    msg_void_bool(window, "setReleasedWhenClosed:", NO);
-    msg_void_bool(window, "setCanHide:", NO);
-    msg_void_bool(window, "setFloatingPanel:", YES);
-    msg_void_bool(window, "setHidesOnDeactivate:", NO);
-    msg_void_bool(window, "setWorksWhenModal:", YES);
-    msg_void_bool(window, "setBecomesKeyOnlyIfNeeded:", YES);
-    msg_void_bool(window, "setExcludedFromWindowsMenu:", YES);
-    apply_avatar_window_space_policy(window, app_config);
     println!(
         "renderer_event=window_configured kind=nonactivating_panel level={} level_name={} level_key={} width={:.1} height={:.1} style_mask={} collection_behavior={}",
         avatar_window_level(app_config),
@@ -568,9 +540,6 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
         avatar_window_style_mask(),
         avatar_window_collection_behavior()
     );
-
-    let clear = ns_color(0.0, 0.0, 0.0, 0.0)?;
-    msg_void_id(window, "setBackgroundColor:", clear);
 
     Ok(window)
 }
@@ -595,7 +564,8 @@ fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
 }
 
 unsafe fn avatar_window_level(app_config: &AppRuntimeConfig) -> NSInteger {
-    CGWindowLevelForKey(avatar_window_level_key(&app_config.window_level)) as NSInteger
+    crate::apple_platform::window_level_for_key(avatar_window_level_key(&app_config.window_level))
+        as NSInteger
 }
 
 fn avatar_window_level_key(configured: &str) -> i32 {
@@ -628,59 +598,38 @@ fn avatar_window_collection_behavior() -> NSUInteger {
 }
 
 unsafe fn apply_avatar_window_space_policy(window: Id, app_config: &AppRuntimeConfig) {
-    msg_void_int(window, "setLevel:", avatar_window_level(app_config));
-    msg_void_ulong(
+    crate::apple_platform::set_panel_space_policy(
         window,
-        "setCollectionBehavior:",
+        avatar_window_level(app_config),
         avatar_window_collection_behavior(),
     );
 }
 
 unsafe fn create_root_layer(window: Id) -> Result<Id, String> {
-    let content_view = msg_id(window, "contentView");
-    if content_view.is_null() {
-        return Err("window contentView returned nil".to_string());
-    }
+    let content_view = crate::apple_platform::window_content_view(window)?;
 
-    msg_void_bool(content_view, "setWantsLayer:", YES);
-    let layer = msg_id(content_view, "layer");
-    if layer.is_null() {
-        return Err("contentView layer returned nil".to_string());
-    }
-
-    msg_void_bool(layer, "setNeedsDisplayOnBoundsChange:", YES);
-    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
     let color = ns_color(0.0, 0.0, 0.0, 0.0)?;
     let cg_color = msg_id(color, "CGColor");
-    msg_void_id(layer, "setBackgroundColor:", cg_color);
-    msg_void_bool(layer, "setOpaque:", NO);
-    msg_void_double(layer, "setCornerRadius:", 0.0);
-
-    Ok(layer)
+    crate::apple_platform::configure_view_backed_root_layer(content_view, cg_color)
 }
 
 #[cfg(not(feature = "metal-renderer"))]
 unsafe fn create_avatar_layer(model: &Live2dModel) -> Result<Id, String> {
-    let layer = msg_id(class("CALayer")?, "layer");
-    if layer.is_null() {
-        return Err("CALayer allocation returned nil".to_string());
-    }
-
-    let frame = NSRect {
-        origin: NSPoint { x: 76.0, y: 72.0 },
-        size: NSSize {
-            width: 208.0,
-            height: 288.0,
-        },
-    };
-    msg_void_rect(layer, "setFrame:", frame);
-    msg_void_double(layer, "setCornerRadius:", 104.0);
-    msg_void_bool(layer, "setMasksToBounds:", YES);
-    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
-    msg_void_id(layer, "setContentsGravity:", ns_string("resizeAspectFill")?);
+    let layer =
+        crate::apple_platform::create_image_layer(crate::apple_platform::ImageLayerStyle {
+            frame: crate::apple_platform::LayerFrame {
+                x: 76.0,
+                y: 72.0,
+                width: 208.0,
+                height: 288.0,
+            },
+            corner_radius: 104.0,
+            masks_to_bounds: true,
+            allows_edge_antialiasing: true,
+        })?;
 
     if let Some(texture) = model.primary_texture() {
-        set_layer_image(layer, texture)?;
+        crate::apple_platform::set_layer_image_from_file(layer, texture)?;
     }
 
     Ok(layer)
@@ -693,12 +642,9 @@ unsafe fn install_metal_layer(root_layer: Id, renderer: &mut MetalRenderer) -> R
         return Err("CAMetalLayer allocation returned nil".to_string());
     }
 
-    let frame = avatar_frame_for_bounds(msg_rect(root_layer, "bounds"));
-    renderer.set_drawable_size(frame.size.width, frame.size.height);
-    msg_void_rect(layer, "setFrame:", frame);
-    msg_void_double(layer, "setZPosition:", 1.0);
-    msg_void_bool(layer, "setAllowsEdgeAntialiasing:", YES);
-    msg_void_id(root_layer, "addSublayer:", layer);
+    let frame = avatar_frame_for_bounds(crate::apple_platform::layer_bounds(root_layer));
+    renderer.set_drawable_size(frame.width, frame.height);
+    crate::apple_platform::install_metal_layer(root_layer, layer, frame);
     Ok(())
 }
 
@@ -713,91 +659,59 @@ unsafe fn sync_metal_layer_geometry(
         return Err("CAMetalLayer pointer became nil".to_string());
     }
 
-    let contents_scale = msg_double(window, "backingScaleFactor").max(1.0);
-    let frame = avatar_frame_for_bounds(msg_rect(root_layer, "bounds"));
-    msg_void_rect(layer, "setFrame:", frame);
-    msg_void_double(layer, "setContentsScale:", contents_scale);
+    let contents_scale = crate::apple_platform::window_backing_scale_factor(window).max(1.0);
+    let frame = avatar_frame_for_bounds(crate::apple_platform::layer_bounds(root_layer));
+    crate::apple_platform::sync_metal_layer_geometry(layer, frame, contents_scale);
     renderer.set_contents_scale(contents_scale);
-    renderer.set_drawable_size(frame.size.width, frame.size.height);
+    renderer.set_drawable_size(frame.width, frame.height);
     Ok(())
 }
 
 #[cfg(feature = "metal-renderer")]
-fn avatar_frame_for_bounds(bounds: NSRect) -> NSRect {
-    let available_width = (bounds.size.width - AVATAR_HORIZONTAL_MARGIN * 2.0).max(1.0);
-    let available_height =
-        (bounds.size.height - AVATAR_BOTTOM_RESERVED - AVATAR_TOP_RESERVED).max(1.0);
+fn avatar_frame_for_bounds(
+    bounds: crate::apple_platform::LayerFrame,
+) -> crate::apple_platform::LayerFrame {
+    let available_width = (bounds.width - AVATAR_HORIZONTAL_MARGIN * 2.0).max(1.0);
+    let available_height = (bounds.height - AVATAR_BOTTOM_RESERVED - AVATAR_TOP_RESERVED).max(1.0);
     let size = available_width.min(available_height).max(1.0);
-    let x = bounds.origin.x + ((bounds.size.width - size) * 0.5).max(0.0);
-    let y = bounds.origin.y + AVATAR_BOTTOM_RESERVED.min((bounds.size.height - size).max(0.0));
+    let x = bounds.x + ((bounds.width - size) * 0.5).max(0.0);
+    let y = bounds.y + AVATAR_BOTTOM_RESERVED.min((bounds.height - size).max(0.0));
 
-    NSRect {
-        origin: NSPoint { x, y },
-        size: NSSize {
-            width: size,
-            height: size,
-        },
+    crate::apple_platform::LayerFrame {
+        x,
+        y,
+        width: size,
+        height: size,
     }
 }
 
 unsafe fn create_diagnostics_layer() -> Result<Id, String> {
-    let layer = msg_id(class("CATextLayer")?, "layer");
-    if layer.is_null() {
-        return Err("CATextLayer allocation returned nil".to_string());
-    }
-
-    let frame = NSRect {
-        origin: NSPoint { x: 18.0, y: 18.0 },
-        size: NSSize {
-            width: 660.0,
-            height: 286.0,
-        },
-    };
-
     let text_color = ns_color(0.92, 0.97, 1.0, 0.92)?;
     let text_cg_color = msg_id(text_color, "CGColor");
-    msg_void_rect(layer, "setFrame:", frame);
-    msg_void_id(layer, "setForegroundColor:", text_cg_color);
-    msg_void_double(layer, "setFontSize:", 13.0);
-    msg_void_double(layer, "setContentsScale:", 2.0);
-    msg_void_double(layer, "setZPosition:", 10.0);
-    msg_void_bool(layer, "setWrapped:", YES);
-    set_layer_text(
-        layer,
+    crate::apple_platform::create_text_layer(
+        crate::apple_platform::TextLayerStyle {
+            frame: crate::apple_platform::LayerFrame {
+                x: 18.0,
+                y: 18.0,
+                width: 660.0,
+                height: 286.0,
+            },
+            foreground_color: text_cg_color,
+            font_size: 13.0,
+            contents_scale: 2.0,
+            z_position: 10.0,
+            wrapped: true,
+        },
         "Model: loading\nCubism Core: loading\nRenderer: loading\nCamera: loading\nFPS: warming up\nFrame delta: warming up\nSlow frames: 0\nFrames: 0\nApp Nap guard: active",
-    )?;
-
-    Ok(layer)
+    )
 }
 
-#[cfg(not(feature = "metal-renderer"))]
-unsafe fn set_layer_image(layer: Id, path: &Path) -> Result<(), String> {
-    let path_string = path
-        .to_str()
-        .ok_or_else(|| format!("Texture path is not valid UTF-8: {}", path.display()))?;
-    let ns_path = ns_string(path_string)?;
-    let image = msg_id_id(
-        msg_id(class("NSImage")?, "alloc"),
-        "initWithContentsOfFile:",
-        ns_path,
-    );
-    if image.is_null() {
-        return Err(format!("Failed to load texture image: {}", path.display()));
-    }
-
-    msg_void_id(layer, "setContents:", image);
-    Ok(())
+fn begin_immediate_layer_update() {
+    crate::apple_platform::begin_immediate_layer_update();
 }
 
-unsafe fn begin_immediate_layer_update() {
-    let transaction = class("CATransaction").expect("CATransaction must exist on macOS");
-    msg_void(transaction, "begin");
-    msg_void_bool(transaction, "setDisableActions:", YES);
-}
-
-unsafe fn commit_layer_update() {
-    let transaction = class("CATransaction").expect("CATransaction must exist on macOS");
-    msg_void(transaction, "commit");
+fn commit_layer_update() {
+    crate::apple_platform::commit_layer_update();
 }
 
 unsafe fn normalized_mouse_position(window: Id, config: &MouseConfig) -> Option<[f32; 2]> {
@@ -834,16 +748,15 @@ unsafe fn draw_avatar_frame(layer: Id, elapsed_seconds: f64) -> Result<(), Strin
     let blue = 0.86 + breathe * 0.08;
     let color = ns_color(red, green, blue, 0.94)?;
     let cg_color = msg_id(color, "CGColor");
-    msg_void_id(layer, "setBackgroundColor:", cg_color);
+    crate::apple_platform::set_layer_background_color(layer, cg_color);
 
     let y = 216.0 + (elapsed_seconds * 1.7).sin() * 8.0;
-    msg_void_point(layer, "setPosition:", NSPoint { x: 180.0, y });
+    crate::apple_platform::set_layer_position(layer, 180.0, y);
     Ok(())
 }
 
 unsafe fn set_layer_text(layer: Id, text: &str) -> Result<(), String> {
-    let text = ns_string(text)?;
-    msg_void_id(layer, "setString:", text);
+    crate::apple_platform::set_text_layer_text(layer, text);
     Ok(())
 }
 
@@ -854,6 +767,7 @@ struct RuntimeControlState {
     microphone_enabled: bool,
     camera_enabled: bool,
     selected_expression_index: Option<usize>,
+    window_size_preset: WindowSizePreset,
     mouse_preset: InputPreset,
     mouth_preset: InputPreset,
     camera_preset: InputPreset,
@@ -868,6 +782,7 @@ struct SettingsMenu {
     camera_item: Id,
     model_items: Vec<Id>,
     model_entries: Vec<ModelMenuEntry>,
+    window_size_items: Vec<Id>,
     expression_items: Vec<Id>,
     mouse_preset_items: Vec<Id>,
     mouth_preset_items: Vec<Id>,
@@ -879,6 +794,78 @@ struct ModelMenuEntry {
     title: String,
     path: String,
     current: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowSizePreset {
+    Compact,
+    Normal,
+    Large,
+    XLarge,
+}
+
+impl WindowSizePreset {
+    const ALL: [Self; 4] = [Self::Compact, Self::Normal, Self::Large, Self::XLarge];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "100% (360x480)",
+            Self::Normal => "125% (450x600)",
+            Self::Large => "150% (540x720)",
+            Self::XLarge => "200% (720x960)",
+        }
+    }
+
+    fn tag(self) -> NSInteger {
+        match self {
+            Self::Compact => 0,
+            Self::Normal => 1,
+            Self::Large => 2,
+            Self::XLarge => 3,
+        }
+    }
+
+    fn from_tag(tag: i32) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Compact),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Large),
+            3 => Some(Self::XLarge),
+            _ => None,
+        }
+    }
+
+    fn from_config(config: &AppRuntimeConfig) -> Self {
+        let width = valid_window_dimension(config.window_width, 360.0);
+        Self::ALL
+            .into_iter()
+            .min_by(|left, right| {
+                let left_delta = (left.width() - width).abs();
+                let right_delta = (right.width() - width).abs();
+                left_delta
+                    .partial_cmp(&right_delta)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(Self::Large)
+    }
+
+    fn width(self) -> f64 {
+        match self {
+            Self::Compact => 360.0,
+            Self::Normal => 450.0,
+            Self::Large => 540.0,
+            Self::XLarge => 720.0,
+        }
+    }
+
+    fn height(self) -> f64 {
+        match self {
+            Self::Compact => 480.0,
+            Self::Normal => 600.0,
+            Self::Large => 720.0,
+            Self::XLarge => 960.0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -927,17 +914,17 @@ unsafe fn install_settings_menu(
     state: RuntimeControlState,
 ) -> Result<SettingsMenu, String> {
     let controller_class = settings_menu_controller_class()?;
-    let controller = msg_id(controller_class, "new");
+    let controller = crate::apple_platform::new_object_from_class(controller_class)?;
     if controller.is_null() {
         return Err("SettingsMenuController allocation returned nil".to_string());
     }
 
     let main_menu = ns_menu("")?;
-    let app_menu_item = msg_id(msg_id(class("NSMenuItem")?, "alloc"), "init");
-    msg_void_id(main_menu, "addItem:", app_menu_item);
+    let app_menu_item = ns_menu_item("", None, "")?;
+    crate::apple_platform::add_menu_item(main_menu, app_menu_item);
 
     let app_menu = ns_menu("vtube-studio-rs")?;
-    msg_void_id(app_menu_item, "setSubmenu:", app_menu);
+    crate::apple_platform::set_menu_item_submenu(app_menu_item, app_menu);
 
     add_disabled_menu_item(app_menu, "vtube-studio-rs")?;
     add_separator_menu_item(app_menu)?;
@@ -962,6 +949,21 @@ unsafe fn install_settings_menu(
             set_menu_item_checked(item, entry.current);
             model_items.push(item);
         }
+    }
+    add_separator_menu_item(app_menu)?;
+
+    add_disabled_menu_item(app_menu, "Window Size (relaunches app)")?;
+    let mut window_size_items = Vec::new();
+    for preset in WindowSizePreset::ALL {
+        let item = add_tagged_action_menu_item(
+            app_menu,
+            preset.label(),
+            "selectWindowSize:",
+            "",
+            controller,
+            preset.tag(),
+        )?;
+        window_size_items.push(item);
     }
     add_separator_menu_item(app_menu)?;
 
@@ -1136,7 +1138,7 @@ unsafe fn install_settings_menu(
     add_separator_menu_item(app_menu)?;
 
     let quit_item = ns_menu_item("Quit vtube-studio-rs", Some("terminate:"), "q")?;
-    msg_void_id(app_menu, "addItem:", quit_item);
+    crate::apple_platform::add_menu_item(app_menu, quit_item);
 
     msg_void_id(app, "setMainMenu:", main_menu);
     let status_item = install_status_bar_item(app_menu)?;
@@ -1150,6 +1152,7 @@ unsafe fn install_settings_menu(
         camera_item,
         model_items,
         model_entries,
+        window_size_items,
         expression_items,
         mouse_preset_items,
         mouth_preset_items,
@@ -1176,6 +1179,7 @@ unsafe fn handle_settings_menu_commands(
     motion_controller: &mut crate::motion::MotionController,
     microphone: &mut Option<MicrophoneInput>,
     camera_input: &mut CameraInput,
+    model_path: &str,
 ) -> Result<(), String> {
     let commands = MENU_COMMANDS.swap(0, Ordering::AcqRel);
     if commands == 0 {
@@ -1184,11 +1188,7 @@ unsafe fn handle_settings_menu_commands(
 
     if commands & MENU_TOGGLE_DIAGNOSTICS != 0 {
         *diagnostics_visible = !*diagnostics_visible;
-        msg_void_bool(
-            diagnostics_layer,
-            "setHidden:",
-            bool_to_objc(!*diagnostics_visible),
-        );
+        crate::apple_platform::set_layer_hidden(diagnostics_layer, !*diagnostics_visible);
         println!(
             "renderer_event=settings_changed diagnostics_visible={}",
             *diagnostics_visible
@@ -1305,6 +1305,23 @@ unsafe fn handle_settings_menu_commands(
         }
     }
 
+    if commands & MENU_SELECT_WINDOW_SIZE != 0 {
+        let selected =
+            MENU_SELECTED_WINDOW_SIZE_INDEX.swap(WINDOW_SIZE_INDEX_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = WindowSizePreset::from_tag(selected) {
+            write_window_size_to_active_config(preset)?;
+            schedule_model_relaunch(model_path)?;
+            println!(
+                "renderer_event=settings_changed window_size={} width={:.1} height={:.1} apply=relaunch config=\"{}\"",
+                preset.label(),
+                preset.width(),
+                preset.height(),
+                crate::config::active_config_path()
+            );
+            terminate_current_app()?;
+        }
+    }
+
     if commands & MENU_OPEN_ACTIVE_CONFIG != 0 {
         if let Err(error) = Command::new("open")
             .arg(crate::config::active_config_path())
@@ -1350,6 +1367,7 @@ unsafe fn handle_settings_menu_commands(
             microphone_enabled: *microphone_enabled,
             camera_enabled: *camera_enabled,
             selected_expression_index: *selected_expression_index,
+            window_size_preset: WindowSizePreset::from_config(&config.app),
             mouse_preset: *mouse_preset,
             mouth_preset: *mouth_preset,
             camera_preset: *camera_preset,
@@ -1369,6 +1387,12 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
             Some(expression_index) => item_index == expression_index + 1,
         };
         set_menu_item_checked(*item, checked);
+    }
+    for (index, item) in menu.window_size_items.iter().enumerate() {
+        set_menu_item_checked(
+            *item,
+            WindowSizePreset::ALL[index] == state.window_size_preset,
+        );
     }
     for (index, item) in menu.mouse_preset_items.iter().enumerate() {
         set_menu_item_checked(*item, InputPreset::ALL[index] == state.mouse_preset);
@@ -1396,48 +1420,23 @@ unsafe fn update_camera_menu_status(
         return Ok(());
     }
 
-    msg_void_id(menu.camera_item, "setTitle:", ns_string(title)?);
+    crate::apple_platform::set_menu_item_title(menu.camera_item, title);
     *last_title = title.to_string();
     Ok(())
 }
 
 unsafe fn install_status_bar_item(menu: Id) -> Result<Id, String> {
-    let status_bar = msg_id(class("NSStatusBar")?, "systemStatusBar");
-    if status_bar.is_null() {
-        return Err("NSStatusBar systemStatusBar returned nil".to_string());
-    }
-
-    let status_item = msg_id_double(
-        status_bar,
-        "statusItemWithLength:",
-        NS_VARIABLE_STATUS_ITEM_LENGTH,
-    );
-    if status_item.is_null() {
-        return Err("NSStatusBar statusItemWithLength: returned nil".to_string());
-    }
-
-    let button = msg_id(status_item, "button");
-    if !button.is_null() {
-        msg_void_id(button, "setTitle:", ns_string("VT")?);
-        msg_void_id(
-            button,
-            "setToolTip:",
-            ns_string("vtube-studio-rs settings")?,
-        );
-    }
-    msg_void_id(status_item, "setMenu:", menu);
-    Ok(status_item)
+    crate::apple_platform::install_status_bar_item(menu, "VT", "vtube-studio-rs settings")
 }
 
 unsafe fn ns_menu(title: &str) -> Result<Id, String> {
-    let menu = msg_id(class("NSMenu")?, "alloc");
-    Ok(msg_id_id(menu, "initWithTitle:", ns_string(title)?))
+    crate::apple_platform::new_menu(title)
 }
 
 unsafe fn add_disabled_menu_item(menu: Id, title: &str) -> Result<Id, String> {
     let item = ns_menu_item(title, None, "")?;
-    msg_void_bool(item, "setEnabled:", NO);
-    msg_void_id(menu, "addItem:", item);
+    crate::apple_platform::set_menu_item_enabled(item, false);
+    crate::apple_platform::add_menu_item(menu, item);
     Ok(item)
 }
 
@@ -1449,8 +1448,8 @@ unsafe fn add_action_menu_item(
     target: Id,
 ) -> Result<Id, String> {
     let item = ns_menu_item(title, Some(action), key_equivalent)?;
-    msg_void_id(item, "setTarget:", target);
-    msg_void_id(menu, "addItem:", item);
+    crate::apple_platform::set_menu_item_target(item, target);
+    crate::apple_platform::add_menu_item(menu, item);
     Ok(item)
 }
 
@@ -1463,13 +1462,13 @@ unsafe fn add_tagged_action_menu_item(
     tag: NSInteger,
 ) -> Result<Id, String> {
     let item = add_action_menu_item(menu, title, action, key_equivalent, target)?;
-    msg_void_int(item, "setTag:", tag);
+    crate::apple_platform::set_menu_item_tag(item, tag as isize);
     Ok(item)
 }
 
 unsafe fn add_separator_menu_item(menu: Id) -> Result<(), String> {
-    let item = msg_id(class("NSMenuItem")?, "separatorItem");
-    msg_void_id(menu, "addItem:", item);
+    let item = crate::apple_platform::new_separator_menu_item()?;
+    crate::apple_platform::add_menu_item(menu, item);
     Ok(())
 }
 
@@ -1478,29 +1477,11 @@ unsafe fn ns_menu_item(
     action: Option<&str>,
     key_equivalent: &str,
 ) -> Result<Id, String> {
-    let item = msg_id(class("NSMenuItem")?, "alloc");
-    let action = action
-        .map(|selector_name| selector(selector_name))
-        .unwrap_or(ptr::null_mut());
-    Ok(msg_id_id_sel_id(
-        item,
-        "initWithTitle:action:keyEquivalent:",
-        ns_string(title)?,
-        action,
-        ns_string(key_equivalent)?,
-    ))
+    crate::apple_platform::new_menu_item(title, action, key_equivalent)
 }
 
 unsafe fn set_menu_item_checked(item: Id, checked: bool) {
-    msg_void_int(
-        item,
-        "setState:",
-        if checked {
-            NS_CONTROL_STATE_VALUE_ON
-        } else {
-            NS_CONTROL_STATE_VALUE_OFF
-        },
-    );
+    crate::apple_platform::set_menu_item_checked(item, checked);
 }
 
 fn model_title(model_path: &str) -> &str {
@@ -1628,6 +1609,29 @@ fn write_selected_model_to_active_config(model_path: &str) -> Result<(), String>
     };
     let updated =
         set_toml_section_value(&content, "model", "path", &toml_string_literal(model_path));
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
+fn write_window_size_to_active_config(preset: WindowSizePreset) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let updated = set_toml_section_value(
+        &set_toml_section_value(
+            &content,
+            "app",
+            "window_width",
+            &format!("{:.1}", preset.width()),
+        ),
+        "app",
+        "window_height",
+        &format!("{:.1}", preset.height()),
+    );
     std::fs::write(config_path, updated)
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
 }
@@ -1874,115 +1878,123 @@ fn camera_runtime_active(status: CameraStatus) -> bool {
     matches!(status, CameraStatus::Running | CameraStatus::NoFace)
 }
 
-unsafe fn settings_menu_controller_class() -> Result<Class, String> {
-    let class_name =
-        CString::new("VTubeStudioRsSettingsMenuController").map_err(|error| error.to_string())?;
-    let existing = objc_getClass(class_name.as_ptr());
-    if !existing.is_null() {
-        return Ok(existing);
-    }
-
-    let superclass = class("NSObject")?;
-    let cls = objc_allocateClassPair(superclass, class_name.as_ptr(), 0);
-    if cls.is_null() {
-        let existing = objc_getClass(class_name.as_ptr());
-        if !existing.is_null() {
-            return Ok(existing);
-        }
-        return Err("Failed to allocate VTubeStudioRsSettingsMenuController".to_string());
-    }
-
-    add_settings_menu_method(cls, "toggleDiagnostics:", settings_toggle_diagnostics)?;
-    add_settings_menu_method(cls, "toggleMouseTracking:", settings_toggle_mouse)?;
-    add_settings_menu_method(cls, "toggleMicrophoneInput:", settings_toggle_microphone)?;
-    add_settings_menu_method(cls, "toggleCameraTracking:", settings_toggle_camera)?;
-    add_settings_menu_method(cls, "openActiveConfig:", settings_open_active_config)?;
-    add_settings_menu_method(cls, "selectExpression:", settings_select_expression)?;
-    add_settings_menu_method(cls, "selectMousePreset:", settings_select_mouse_preset)?;
-    add_settings_menu_method(cls, "selectMouthPreset:", settings_select_mouth_preset)?;
-    add_settings_menu_method(cls, "selectCameraPreset:", settings_select_camera_preset)?;
-    add_settings_menu_method(cls, "selectModel:", settings_select_model)?;
-    objc_registerClassPair(cls);
-    Ok(cls)
+fn settings_menu_controller_class() -> Result<Class, String> {
+    crate::apple_platform::settings_menu_controller_class(
+        c"VTubeStudioRsSettingsMenuController",
+        &[
+            ("toggleDiagnostics:", settings_toggle_diagnostics),
+            ("toggleMouseTracking:", settings_toggle_mouse),
+            ("toggleMicrophoneInput:", settings_toggle_microphone),
+            ("toggleCameraTracking:", settings_toggle_camera),
+            ("openActiveConfig:", settings_open_active_config),
+            ("selectExpression:", settings_select_expression),
+            ("selectMousePreset:", settings_select_mouse_preset),
+            ("selectMouthPreset:", settings_select_mouth_preset),
+            ("selectCameraPreset:", settings_select_camera_preset),
+            ("selectModel:", settings_select_model),
+            ("selectWindowSize:", settings_select_window_size),
+        ],
+    )
 }
 
-unsafe fn add_settings_menu_method(
-    cls: Class,
-    name: &str,
-    implementation: extern "C" fn(Id, Sel, Id),
-) -> Result<(), String> {
-    let types = CString::new("v@:@").map_err(|error| error.to_string())?;
-    let added = class_addMethod(
-        cls,
-        selector(name),
-        implementation as *const c_void,
-        types.as_ptr(),
-    );
-    if added == YES {
-        Ok(())
-    } else {
-        Err(format!("Failed to add settings menu action {name}"))
-    }
-}
-
-extern "C" fn settings_toggle_diagnostics(_this: Id, _selector: Sel, _sender: Id) {
+extern "C-unwind" fn settings_toggle_diagnostics(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
     MENU_COMMANDS.fetch_or(MENU_TOGGLE_DIAGNOSTICS, Ordering::AcqRel);
 }
 
-extern "C" fn settings_toggle_mouse(_this: Id, _selector: Sel, _sender: Id) {
+extern "C-unwind" fn settings_toggle_mouse(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
     MENU_COMMANDS.fetch_or(MENU_TOGGLE_MOUSE, Ordering::AcqRel);
 }
 
-extern "C" fn settings_toggle_microphone(_this: Id, _selector: Sel, _sender: Id) {
+extern "C-unwind" fn settings_toggle_microphone(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
     MENU_COMMANDS.fetch_or(MENU_TOGGLE_MICROPHONE, Ordering::AcqRel);
 }
 
-extern "C" fn settings_toggle_camera(_this: Id, _selector: Sel, _sender: Id) {
+extern "C-unwind" fn settings_toggle_camera(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
     MENU_COMMANDS.fetch_or(MENU_TOGGLE_CAMERA, Ordering::AcqRel);
 }
 
-extern "C" fn settings_open_active_config(_this: Id, _selector: Sel, _sender: Id) {
+extern "C-unwind" fn settings_open_active_config(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
     MENU_COMMANDS.fetch_or(MENU_OPEN_ACTIVE_CONFIG, Ordering::AcqRel);
 }
 
-extern "C" fn settings_select_expression(_this: Id, _selector: Sel, sender: Id) {
-    unsafe {
-        let tag = msg_int(sender, "tag") as i32;
-        MENU_SELECTED_EXPRESSION_INDEX.store(tag, Ordering::Release);
-        MENU_COMMANDS.fetch_or(MENU_SELECT_EXPRESSION, Ordering::AcqRel);
-    }
+extern "C-unwind" fn settings_select_expression(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_EXPRESSION_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_EXPRESSION, Ordering::AcqRel);
 }
 
-extern "C" fn settings_select_mouse_preset(_this: Id, _selector: Sel, sender: Id) {
-    unsafe {
-        let tag = msg_int(sender, "tag") as i32;
-        MENU_SELECTED_MOUSE_PRESET.store(tag, Ordering::Release);
-        MENU_COMMANDS.fetch_or(MENU_SELECT_MOUSE_PRESET, Ordering::AcqRel);
-    }
+extern "C-unwind" fn settings_select_mouse_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_MOUSE_PRESET.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_MOUSE_PRESET, Ordering::AcqRel);
 }
 
-extern "C" fn settings_select_mouth_preset(_this: Id, _selector: Sel, sender: Id) {
-    unsafe {
-        let tag = msg_int(sender, "tag") as i32;
-        MENU_SELECTED_MOUTH_PRESET.store(tag, Ordering::Release);
-        MENU_COMMANDS.fetch_or(MENU_SELECT_MOUTH_PRESET, Ordering::AcqRel);
-    }
+extern "C-unwind" fn settings_select_mouth_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_MOUTH_PRESET.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_MOUTH_PRESET, Ordering::AcqRel);
 }
 
-extern "C" fn settings_select_camera_preset(_this: Id, _selector: Sel, sender: Id) {
-    unsafe {
-        let tag = msg_int(sender, "tag") as i32;
-        MENU_SELECTED_CAMERA_PRESET.store(tag, Ordering::Release);
-        MENU_COMMANDS.fetch_or(MENU_SELECT_CAMERA_PRESET, Ordering::AcqRel);
-    }
+extern "C-unwind" fn settings_select_camera_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_CAMERA_PRESET.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_CAMERA_PRESET, Ordering::AcqRel);
 }
 
-extern "C" fn settings_select_model(_this: Id, _selector: Sel, sender: Id) {
-    unsafe {
-        let tag = msg_int(sender, "tag") as i32;
-        MENU_SELECTED_MODEL_INDEX.store(tag, Ordering::Release);
-        MENU_COMMANDS.fetch_or(MENU_SELECT_MODEL, Ordering::AcqRel);
-    }
+extern "C-unwind" fn settings_select_model(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_MODEL_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_MODEL, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_select_window_size(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    sender: *mut objc2::runtime::AnyObject,
+) {
+    let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
+    MENU_SELECTED_WINDOW_SIZE_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_WINDOW_SIZE, Ordering::AcqRel);
 }
 
 struct EventPump {
@@ -1998,40 +2010,24 @@ impl EventPump {
     ];
 
     unsafe fn new() -> Result<Self, String> {
-        let nonblocking_date = msg_id(class("NSDate")?, "distantPast");
-        if nonblocking_date.is_null() {
-            return Err("NSDate distantPast returned nil".to_string());
-        }
-
         Ok(Self {
             modes: [
                 ns_string(Self::RUN_LOOP_MODE_NAMES[0])?,
                 ns_string(Self::RUN_LOOP_MODE_NAMES[1])?,
                 ns_string(Self::RUN_LOOP_MODE_NAMES[2])?,
             ],
-            nonblocking_date,
+            nonblocking_date: crate::apple_platform::distant_past_date(),
         })
     }
 
     unsafe fn drain_pending_events(&self, app: Id) {
         for mode in self.modes {
-            loop {
-                let event = msg_id_mask_date_mode_bool(
-                    app,
-                    "nextEventMatchingMask:untilDate:inMode:dequeue:",
-                    NS_EVENT_MASK_ANY,
-                    self.nonblocking_date,
-                    mode,
-                    YES,
-                );
-
-                if event.is_null() {
-                    break;
-                }
-
-                msg_void_id(app, "sendEvent:", event);
-                msg_void(app, "updateWindows");
-            }
+            crate::apple_platform::drain_pending_application_events(
+                app,
+                self.nonblocking_date,
+                mode,
+                NS_EVENT_MASK_ANY,
+            );
         }
     }
 }
@@ -2219,7 +2215,7 @@ impl AppLifecycleMonitor {
         self.last_poll = now;
         let uptime = now.duration_since(started_at).as_secs_f64();
 
-        let app_active = msg_bool(app, "isActive");
+        let app_active = crate::apple_platform::application_is_active(app);
         if self.app_active != Some(app_active) {
             println!(
                 "renderer_event=app_active_changed active={} uptime_s={uptime:.1}",
@@ -2228,7 +2224,7 @@ impl AppLifecycleMonitor {
             self.app_active = Some(app_active);
         }
 
-        let window_visible = msg_bool(window, "isVisible");
+        let window_visible = crate::apple_platform::panel_is_visible(window);
         if self.window_visible != Some(window_visible) {
             println!(
                 "renderer_event=window_visible_changed visible={} uptime_s={uptime:.1}",
@@ -2237,7 +2233,7 @@ impl AppLifecycleMonitor {
             self.window_visible = Some(window_visible);
         }
 
-        let occlusion_state = msg_ulong(window, "occlusionState");
+        let occlusion_state = crate::apple_platform::panel_occlusion_state(window);
         if self.window_occlusion_state != Some(occlusion_state) {
             println!(
                 "renderer_event=window_occlusion_changed state={} uptime_s={uptime:.1}",
@@ -2248,7 +2244,7 @@ impl AppLifecycleMonitor {
 
         if !window_visible || !window_occlusion_visible(occlusion_state) {
             apply_avatar_window_space_policy(window, app_config);
-            msg_void(window, "orderFrontRegardless");
+            crate::apple_platform::order_panel_front_regardless(window);
             println!(
                 "renderer_event=window_reasserted visible={} occlusion_state={} uptime_s={uptime:.1}",
                 window_visible, occlusion_state
@@ -2451,10 +2447,6 @@ fn diagnostics_renderer_summary(summary: &str) -> String {
         .replace(" | filters ", "\nRenderer filters ")
 }
 
-fn bool_to_objc(value: bool) -> Bool {
-    if value { YES } else { NO }
-}
-
 unsafe fn class(name: &str) -> Result<Class, String> {
     let name = CString::new(name).map_err(|error| error.to_string())?;
     let class = objc_getClass(name.as_ptr());
@@ -2495,58 +2487,9 @@ unsafe fn msg_id(receiver: Id, selector_name: &str) -> Id {
     function(receiver, selector(selector_name))
 }
 
-unsafe fn msg_bool(receiver: Id, selector_name: &str) -> bool {
-    let function: extern "C" fn(Id, Sel) -> Bool = std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name)) != NO
-}
-
-unsafe fn msg_ulong(receiver: Id, selector_name: &str) -> NSUInteger {
-    let function: extern "C" fn(Id, Sel) -> NSUInteger =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
-}
-
-#[cfg(feature = "metal-renderer")]
-unsafe fn msg_double(receiver: Id, selector_name: &str) -> CGFloat {
-    let function: extern "C" fn(Id, Sel) -> CGFloat =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
-}
-
-unsafe fn msg_void(receiver: Id, selector_name: &str) {
-    let function: extern "C" fn(Id, Sel) = std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name));
-}
-
 unsafe fn msg_void_id<T>(receiver: Id, selector_name: &str, value: T) {
     let function: extern "C" fn(Id, Sel, T) = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value);
-}
-
-unsafe fn msg_void_bool(receiver: Id, selector_name: &str, value: Bool) {
-    msg_void_id(receiver, selector_name, value);
-}
-
-unsafe fn msg_void_int(receiver: Id, selector_name: &str, value: NSInteger) {
-    msg_void_id(receiver, selector_name, value);
-}
-
-unsafe fn msg_int(receiver: Id, selector_name: &str) -> NSInteger {
-    let function: extern "C" fn(Id, Sel) -> NSInteger =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
-}
-
-unsafe fn msg_void_ulong(receiver: Id, selector_name: &str, value: NSUInteger) {
-    msg_void_id(receiver, selector_name, value);
-}
-
-unsafe fn msg_void_double(receiver: Id, selector_name: &str, value: f64) {
-    msg_void_id(receiver, selector_name, value);
-}
-
-unsafe fn msg_void_rect(receiver: Id, selector_name: &str, rect: NSRect) {
-    msg_void_id(receiver, selector_name, rect);
 }
 
 unsafe fn msg_point(receiver: Id, selector_name: &str) -> NSPoint {
@@ -2558,11 +2501,6 @@ unsafe fn msg_point(receiver: Id, selector_name: &str) -> NSPoint {
 unsafe fn msg_rect(receiver: Id, selector_name: &str) -> NSRect {
     let function: extern "C" fn(Id, Sel) -> NSRect = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name))
-}
-
-#[cfg(not(feature = "cubism-core"))]
-unsafe fn msg_void_point(receiver: Id, selector_name: &str, point: NSPoint) {
-    msg_void_id(receiver, selector_name, point);
 }
 
 unsafe fn msg_id_cstr(receiver: Id, selector_name: &str, value: *const c_char) -> Id {
@@ -2578,29 +2516,6 @@ unsafe fn msg_id_bytes(receiver: Id, selector_name: &str, bytes: *const c_void, 
     function(receiver, selector(selector_name), bytes, len)
 }
 
-unsafe fn msg_id_id(receiver: Id, selector_name: &str, value: Id) -> Id {
-    let function: extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), value)
-}
-
-unsafe fn msg_id_double(receiver: Id, selector_name: &str, value: CGFloat) -> Id {
-    let function: extern "C" fn(Id, Sel, CGFloat) -> Id =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), value)
-}
-
-unsafe fn msg_id_id_sel_id(
-    receiver: Id,
-    selector_name: &str,
-    title: Id,
-    action: Sel,
-    key: Id,
-) -> Id {
-    let function: extern "C" fn(Id, Sel, Id, Sel, Id) -> Id =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), title, action, key)
-}
-
 unsafe fn msg_id_ulong_id(
     receiver: Id,
     selector_name: &str,
@@ -2610,39 +2525,6 @@ unsafe fn msg_id_ulong_id(
     let function: extern "C" fn(Id, Sel, NSUInteger, Id) -> Id =
         std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), options, reason)
-}
-
-unsafe fn msg_id_rect_ulong_ulong_bool(
-    receiver: Id,
-    selector_name: &str,
-    rect: NSRect,
-    style: NSUInteger,
-    backing: NSUInteger,
-    defer: Bool,
-) -> Id {
-    let function: extern "C" fn(Id, Sel, NSRect, NSUInteger, NSUInteger, Bool) -> Id =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(
-        receiver,
-        selector(selector_name),
-        rect,
-        style,
-        backing,
-        defer,
-    )
-}
-
-unsafe fn msg_id_mask_date_mode_bool(
-    receiver: Id,
-    selector_name: &str,
-    mask: NSUInteger,
-    date: Id,
-    mode: Id,
-    dequeue: Bool,
-) -> Id {
-    let function: extern "C" fn(Id, Sel, NSUInteger, Id, Id, Bool) -> Id =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), mask, date, mode, dequeue)
 }
 
 unsafe fn msg_id_double_double_double_double(
@@ -2666,15 +2548,16 @@ mod tests {
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
-        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, avatar_frame_for_bounds,
-        avatar_window_collection_behavior, avatar_window_level_key, avatar_window_level_name,
-        avatar_window_size, avatar_window_style_mask, camera_debug_summary, camera_runtime_active,
-        is_model3_path, model_menu_title, model_paths_match, model_title,
-        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
-        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
-        selected_expression_index, set_toml_section_value, toml_string_literal,
-        window_occlusion_visible,
+        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, WindowSizePreset,
+        avatar_frame_for_bounds, avatar_window_collection_behavior, avatar_window_level_key,
+        avatar_window_level_name, avatar_window_size, avatar_window_style_mask,
+        camera_debug_summary, camera_runtime_active, is_model3_path, model_menu_title,
+        model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
+        relaunch_command_args, runtime_camera_config, runtime_microphone_config,
+        runtime_mouse_config, selected_expression_index, set_toml_section_value,
+        toml_string_literal, window_occlusion_visible,
     };
+    use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
     use crate::config::{AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig};
     use crate::live2d_model::{Live2dModel, ModelExpression};
@@ -2684,34 +2567,32 @@ mod tests {
 
     #[test]
     fn avatar_frame_matches_default_window_layout() {
-        let frame = avatar_frame_for_bounds(NSRect {
-            origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize {
-                width: 360.0,
-                height: 480.0,
-            },
+        let frame = avatar_frame_for_bounds(LayerFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 360.0,
+            height: 480.0,
         });
 
-        assert_eq!(frame.origin.x, 36.0);
-        assert_eq!(frame.origin.y, 92.0);
-        assert_eq!(frame.size.width, 288.0);
-        assert_eq!(frame.size.height, 288.0);
+        assert_eq!(frame.x, 36.0);
+        assert_eq!(frame.y, 92.0);
+        assert_eq!(frame.width, 288.0);
+        assert_eq!(frame.height, 288.0);
     }
 
     #[test]
     fn avatar_frame_stays_positive_for_small_windows() {
-        let frame = avatar_frame_for_bounds(NSRect {
-            origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize {
-                width: 120.0,
-                height: 120.0,
-            },
+        let frame = avatar_frame_for_bounds(LayerFrame {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 120.0,
         });
 
-        assert!(frame.origin.x >= 0.0);
-        assert!(frame.origin.y >= 0.0);
-        assert!(frame.size.width >= 1.0);
-        assert_eq!(frame.size.width, frame.size.height);
+        assert!(frame.x >= 0.0);
+        assert!(frame.y >= 0.0);
+        assert!(frame.width >= 1.0);
+        assert_eq!(frame.width, frame.height);
     }
 
     #[test]
@@ -2745,6 +2626,21 @@ mod tests {
         assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY != 0);
         assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE != 0);
         assert!(behavior & NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY != 0);
+    }
+
+    #[test]
+    fn window_size_presets_map_to_config_dimensions() {
+        assert_eq!(WindowSizePreset::from_tag(2), Some(WindowSizePreset::Large));
+        assert_eq!(WindowSizePreset::Large.width(), 540.0);
+        assert_eq!(WindowSizePreset::Large.height(), 720.0);
+        assert_eq!(
+            WindowSizePreset::from_config(&AppRuntimeConfig {
+                window_width: 545.0,
+                window_height: 725.0,
+                ..AppRuntimeConfig::default()
+            }),
+            WindowSizePreset::Large
+        );
     }
 
     #[test]

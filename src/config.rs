@@ -101,6 +101,7 @@ impl RuntimeProfile {
         matches!(self, Self::Development)
     }
 
+    #[cfg(any(test, feature = "metal-renderer"))]
     pub fn default_log_renderer_events(self) -> bool {
         matches!(self, Self::Development)
     }
@@ -194,6 +195,7 @@ impl RendererConfig {
             .unwrap_or_else(|| runtime_profile.default_enable_msaa())
     }
 
+    #[cfg(any(test, feature = "metal-renderer"))]
     pub fn log_events(&self, runtime_profile: RuntimeProfile) -> bool {
         self.log_events
             .unwrap_or_else(|| runtime_profile.default_log_renderer_events())

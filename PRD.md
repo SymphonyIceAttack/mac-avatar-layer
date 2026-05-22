@@ -491,6 +491,10 @@ Acceptance criteria:
 
 ### 3a. macOS Native API Binding Strategy
 
+Status: next engineering phase. Camera capture has already moved onto the
+`objc2` ecosystem; the remaining work is to migrate the AppKit/Foundation
+surface in controlled slices without changing product behavior.
+
 Decision: use the `objc2` ecosystem as the preferred Rust bridge for macOS
 native APIs going forward. The project should stop growing broad hand-written
 Objective-C `objc_msgSend` bindings except for small, isolated compatibility
@@ -498,34 +502,80 @@ shims.
 
 Migration scope:
 
-- First migrate `src/macos_camera.rs` to `objc2-av-foundation`,
-  `objc2-vision`, `objc2-foundation`, and `block2`. This is the highest-value
-  target because camera capture, sample buffer delegates, Vision requests, and
-  permission handling are all Objective-C-heavy and still early enough to
-  change safely.
-- Later migrate AppKit/Foundation usage in `src/macos_app.rs` to
+- Done: migrate `src/macos_camera.rs` to `objc2-av-foundation`,
+  `objc2-vision`, `objc2-foundation`, and `block2` for authorization, device
+  lookup, capture session setup, sample buffer delegates, and Vision landmark
+  extraction.
+- Next: migrate AppKit/Foundation usage in `src/macos_app.rs` to
   `objc2-app-kit`, `objc2-foundation`, `objc2-quartz-core`, and
   `objc2-core-graphics` where practical. This includes `NSApplication`,
-  `NSWindow`, status/menu items, `CATextLayer`, and window/Space behavior.
+  `NSPanel`/`NSWindow`, status/menu items, `CATextLayer`, `CALayer`,
+  `CAMetalLayer` attachment, CoreGraphics window levels, and window/Space
+  behavior.
 - Keep Cubism Core on `live2d-cubism-core-sys`; `objc2` does not replace the
   Cubism C API.
 - Keep Metal rendering on the existing `metal` crate for now. Revisit only if
   renderer maintenance requires a broader Apple framework migration.
 - Keep microphone input on `cpal` unless the project later needs macOS-specific
   audio device or permission control.
+- Keep current `objc_msgSend` shims only as temporary compatibility wrappers
+  while a specific subsystem is migrated; do not add new broad untyped shims for
+  new feature work.
 
 Migration order:
 
-1. Replace the hand-written camera Objective-C probe with `objc2` crates.
-2. Add a small internal Apple platform helper layer for shared conversions such
-   as strings, errors, arrays, authorization statuses, and local-only diagnostic
-   messages.
-3. Implement AVFoundation capture and Vision landmark extraction behind safe
-   Rust-facing camera structs.
-4. Migrate status/menu/settings UI pieces from hand-written AppKit FFI to
-   `objc2-app-kit` after camera tracking is stable.
-5. Migrate the window/layer/Space behavior code only in small slices, preserving
-   the existing reliability tests and reports after each slice.
+1. Done: replace the hand-written camera Objective-C probe with `objc2` crates.
+2. Done: implement AVFoundation capture and Vision landmark extraction behind
+   safe Rust-facing camera structs.
+3. Done: add a small internal Apple platform helper layer for shared
+   conversions such as Foundation strings, `NSError` descriptions, and
+   local-only diagnostic messages.
+4. Done: migrate status bar/menu/settings UI pieces from hand-written AppKit
+   FFI to `objc2-app-kit`: typed `NSMenu` and `NSMenuItem` creation, `addItem`,
+   separator items, enabled state, submenu assignment, title/state/tag updates,
+   target assignment, `NSStatusBar` / `NSStatusItem` installation with typed
+   status button title and tooltip, and settings action target class
+   registration via `objc2::runtime::ClassBuilder`. The remaining raw
+   `objc_msgSend` usage in `src/macos_app.rs` now belongs to later window,
+   layer, event-pump, and compatibility slices.
+5. Done: migrate layer creation and frame updates to typed
+   `objc2-quartz-core` and `objc2-foundation` wrappers where practical:
+   diagnostics `CATextLayer` creation, foreground color assignment, frame,
+   font size, contents scale, z-position, wrapping, string updates, hidden
+   state, diagnostic sublayer insertion, view-backed root `CALayer`
+   configuration, software placeholder `CALayer` creation/style/position
+   updates, software placeholder `NSImage` contents loading, `CATransaction`
+   begin/commit with disabled implicit actions, root layer bounds reads, and
+   Metal layer frame/contents-scale/attachment compatibility wrappers. The
+   Metal layer object itself remains owned by the `metal` crate.
+6. Done: migrate transparent `NSPanel` creation and CoreGraphics window level
+   lookup to typed `objc2-app-kit` / `objc2-core-graphics` wrappers. The
+   wrapper owns AppKit panel allocation, transparent background configuration,
+   non-activating/floating panel flags, content view lookup, backing scale
+   lookup, and Space policy reapplication while preserving the current
+   `screen_saver`, `canJoinAllSpaces`, `canJoinAllApplications`, `stationary`,
+   `ignoresCycle`, and `fullScreenAuxiliary` behavior.
+7. Done: migrate the event pump and lifecycle polling to typed
+   `objc2-app-kit` wrappers in small slices. The platform layer now owns
+   `NSDate::distantPast`, nonblocking `nextEventMatchingMask`, `sendEvent`,
+   `updateWindows`, `NSApplication::isActive`, `NSWindow::isVisible`,
+   `NSWindow::occlusionState`, and `orderFrontRegardless`, preserving the
+   existing Space reassertion behavior and reliability diagnostics.
+
+Acceptance criteria:
+
+- `cargo fmt --check`, `cargo test --features camera-tracking`, and
+  `cargo test --features "metal-renderer camera-tracking"` pass after every
+  slice.
+- `cargo xtask run-metal --release` still launches through the stable local
+  `.app` identity, preserves camera permission behavior, and shows only the
+  transparent Live2D model by default.
+- The `VT` menu still supports diagnostics, model selection, window size
+  presets, expression selection, input toggles, and calibration presets.
+- Space reliability behavior is not regressed: no duplicate windows, startup
+  guard remains active, and `window_configured` logs the expected panel policy.
+- Any remaining hand-written Objective-C shim has a narrow owner and a clear
+  TODO pointing to the subsystem that will replace it.
 
 ### 4. CubismClippingManager And Offscreen Parity
 
@@ -710,6 +760,9 @@ Status: next product milestone.
   writes the selected `.model3.json` to the active profile TOML, relaunches the
   local `.app` with that selected model, and avoids stale command-line model
   overrides; full in-process hot switching remains planned.
+- Done: expose `VT` menu Window Size presets. Selecting 100%, 125%, 150%, or
+  200% writes `[app].window_width` / `[app].window_height` to the active
+  dev/build TOML and relaunches the local `.app`.
 - Expand the status bar controls into a settings surface for renderer quality
   and selected model. The first-pass `VT` menu already shows renderer/model
   state and toggles diagnostics, expression selection, mouse tracking,
@@ -719,6 +772,10 @@ Status: next product milestone.
 - Prototype the selected AVFoundation + Vision camera-tracking path and expose
   it through `[input.camera]` plus the `VT` status bar menu.
 - Prepare packaging/signing/launch-at-login decisions.
+- Start the objc2 AppKit/Foundation migration phase from section 3a before
+  adding more large macOS UI features, so future menu/settings/window work is
+  built on typed framework bindings instead of expanding hand-written
+  `objc_msgSend` wrappers.
 
 ## Debug Controls
 

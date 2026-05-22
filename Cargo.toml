@@ -11,11 +11,8 @@ default = []
 camera-tracking = [
     "dep:block2",
     "dep:dispatch2",
-    "dep:objc2",
     "dep:objc2-av-foundation",
-    "dep:objc2-core-foundation",
     "dep:objc2-core-media",
-    "dep:objc2-foundation",
     "dep:objc2-vision",
 ]
 cubism-core = ["dep:live2d-cubism-core-sys"]
@@ -29,11 +26,14 @@ dispatch2 = { version = "0.3.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 live2d-cubism-core-sys = { version = "0.1", optional = true }
 metal = { version = "0.33.0", optional = true }
-objc2 = { version = "0.6.2", optional = true }
+objc2 = "0.6.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSButton", "NSCell", "NSColor", "NSControl", "NSEvent", "NSGraphics", "NSImage", "NSMenu", "NSMenuItem", "NSPanel", "NSResponder", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow", "objc2-core-foundation", "objc2-quartz-core"] }
 objc2-av-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-media", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureVideoDataOutput", "AVMediaFormat"] }
-objc2-core-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColor", "CGWindowLevel"] }
 objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = ["CMSampleBuffer", "objc2"] }
-objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSArray", "NSError", "NSString", "NSValue"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDate", "NSError", "NSObjCRuntime", "NSString", "NSValue"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CATextLayer", "CATransaction", "CAMediaTiming", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-vision = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-media", "VNDetectFaceLandmarksRequest", "VNDetectFaceRectanglesRequest", "VNFaceLandmarks", "VNObservation", "VNRequest", "VNRequestHandler"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

@@ -212,7 +212,9 @@ microphone mouth input for the current session. When the model declares
 without restarting. The menu lists local `.model3.json` files found under
 `public/`; selecting one writes `[model].path` to the active dev/build TOML and
 relaunches the local `.app` with that model so command-line model overrides do
-not keep the old avatar loaded. The menu also includes Soft/Normal/Expressive
+not keep the old avatar loaded. The menu also includes Window Size presets that
+write `[app].window_width` / `[app].window_height` and relaunch with 100%, 125%,
+150%, or 200% sizing. The menu also includes Soft/Normal/Expressive
 mouse, mouth, and camera calibration presets for quick runtime tuning before
 committing values to TOML. `Open Active Config...` opens the dev/build TOML file
 that will be used on the next launch. In-process hot model switching is still

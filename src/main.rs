@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod apple_platform;
+#[cfg(target_os = "macos")]
 mod audio_input;
 #[cfg(target_os = "macos")]
 mod camera_input;
