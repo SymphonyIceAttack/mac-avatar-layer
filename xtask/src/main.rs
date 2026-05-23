@@ -702,13 +702,25 @@ fn build_app(args: Vec<String>) -> Result<()> {
     let options = parse_build_app_args(args)?;
     let root = project_root()?;
     let (include_dir, lib_dir) = cubism_core_paths(&root)?;
-    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
     let config_path = if options.release {
         root.join(BUILD_CONFIG_PATH)
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
+    let example_config_path = if options.release {
+        root.join(BUILD_EXAMPLE_CONFIG_PATH)
+    } else {
+        root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH)
+    };
+    let syphon_framework = syphon_framework_for_profile(&root, &config_path, &example_config_path)?;
+    let executable = build_metal_executable(
+        &root,
+        options.release,
+        &include_dir,
+        &lib_dir,
+        syphon_framework.as_deref(),
+    )?;
+    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
 
     println!("App wrapper: {}", bundle_dir.display());
     println!(
@@ -733,26 +745,42 @@ fn run_metal(args: Vec<String>) -> Result<()> {
 
     let root = project_root()?;
     let (include_dir, lib_dir) = cubism_core_paths(&root)?;
+    let config_path = if options.release {
+        root.join(BUILD_CONFIG_PATH)
+    } else {
+        root.join(DEVELOPMENT_CONFIG_PATH)
+    };
+    let example_config_path = if options.release {
+        root.join(BUILD_EXAMPLE_CONFIG_PATH)
+    } else {
+        root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH)
+    };
+    let syphon_framework = syphon_framework_for_profile(&root, &config_path, &example_config_path)?;
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
         terminate_app_processes(&root);
         let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
     }
 
-    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
+    let executable = build_metal_executable(
+        &root,
+        options.release,
+        &include_dir,
+        &lib_dir,
+        syphon_framework.as_deref(),
+    )?;
     let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
     println!("App wrapper: {}", bundle_dir.display());
 
-    let config_path = if options.release {
-        root.join(BUILD_CONFIG_PATH)
-    } else {
-        root.join(DEVELOPMENT_CONFIG_PATH)
-    };
     let log_stem = if options.release {
         "run-metal-release"
     } else {
         "run-metal-dev"
     };
+    let extra_env = syphon_framework
+        .as_deref()
+        .map(|path| vec![("SYPHON_FRAMEWORK_DIR", path)])
+        .unwrap_or_default();
     launch_camera_app_wrapper(
         &root,
         &bundle_dir,
@@ -761,7 +789,7 @@ fn run_metal(args: Vec<String>) -> Result<()> {
         &config_path,
         options.model_path.as_deref(),
         log_stem,
-        &[],
+        &extra_env,
     )
 }
 
@@ -882,15 +910,45 @@ fn build_metal_executable(
     release: bool,
     include_dir: &Path,
     lib_dir: &Path,
+    syphon_framework: Option<&Path>,
 ) -> Result<PathBuf> {
+    let features = if syphon_framework.is_some() {
+        "metal-renderer camera-tracking syphon-output"
+    } else {
+        "metal-renderer camera-tracking"
+    };
     build_metal_executable_with_features(
         root,
         release,
         include_dir,
         lib_dir,
-        "metal-renderer camera-tracking",
-        None,
+        features,
+        syphon_framework,
     )
+}
+
+fn syphon_framework_for_profile(
+    root: &Path,
+    config_path: &Path,
+    example_config_path: &Path,
+) -> Result<Option<PathBuf>> {
+    if profile_requests_syphon(config_path, example_config_path)? {
+        return syphon_framework_path(root).map(Some);
+    }
+
+    Ok(syphon_framework_path(root).ok())
+}
+
+fn profile_requests_syphon(config_path: &Path, example_config_path: &Path) -> Result<bool> {
+    let content = if config_path.is_file() {
+        fs::read_to_string(config_path)?
+    } else if example_config_path.is_file() {
+        fs::read_to_string(example_config_path)?
+    } else {
+        String::new()
+    };
+    let config: DoctorConfig = toml::from_str(&content).unwrap_or_default();
+    Ok(doctor_output_mode(&config.output) == Some("syphon"))
 }
 
 fn build_metal_executable_with_features(
@@ -1963,38 +2021,6 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
 
 fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> usize {
     let mut issues = 0usize;
-    let mode = app
-        .window_mode
-        .as_deref()
-        .map(normalized_window_mode)
-        .unwrap_or(Some("desktop"));
-    match mode {
-        Some(mode) => {
-            println!("[x] {} window mode: {mode}", target.label());
-            if mode == "obs_capture" {
-                let x_ok = app.obs_capture_x.map(f64::is_finite).unwrap_or(true);
-                let y_ok = app.obs_capture_y.map(f64::is_finite).unwrap_or(true);
-                if !x_ok || !y_ok {
-                    println!(
-                        "[!] {} OBS capture coordinates must be finite numbers",
-                        target.label()
-                    );
-                    issues += 1;
-                }
-            }
-        }
-        None => {
-            let configured = app.window_mode.as_deref().unwrap_or_default();
-            println!(
-                "[!] {} window_mode is invalid: {:?}",
-                target.label(),
-                configured
-            );
-            println!("    Use window_mode = \"desktop\" or window_mode = \"obs_capture\"");
-            issues += 1;
-        }
-    }
-
     for (field, value) in [
         ("window_width", app.window_width),
         ("window_height", app.window_height),
@@ -2010,15 +2036,20 @@ fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> 
         }
     }
 
-    issues
-}
-
-fn normalized_window_mode(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "desktop" | "overlay" => Some("desktop"),
-        "obs" | "obs_capture" | "obs-capture" | "offscreen" | "capture" => Some("obs_capture"),
-        _ => None,
+    if issues == 0 {
+        println!(
+            "[x] {} window size config: width {} | height {}",
+            target.label(),
+            app.window_width
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "default".to_string()),
+            app.window_height
+                .map(|value| format!("{value:.1}"))
+                .unwrap_or_else(|| "default".to_string())
+        );
     }
+
+    issues
 }
 
 fn valid_doctor_window_dimension(value: f64) -> bool {
@@ -2609,11 +2640,8 @@ struct DoctorConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorAppConfig {
-    window_mode: Option<String>,
     window_width: Option<f64>,
     window_height: Option<f64>,
-    obs_capture_x: Option<f64>,
-    obs_capture_y: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4101,15 +4129,6 @@ fn write_syphon_run_config(root: &Path, release: bool) -> Result<PathBuf> {
         &[
             ("mode", toml_string_literal("syphon")),
             ("syphon_name", toml_string_literal("VTubeStudioRS")),
-        ],
-    );
-    let updated = set_toml_section_values(
-        &updated,
-        "app",
-        &[
-            ("window_mode", toml_string_literal("obs_capture")),
-            ("obs_capture_x", "-10000.0".to_string()),
-            ("obs_capture_y", "-10000.0".to_string()),
         ],
     );
     let output_dir = root.join("target/syphon-output");
@@ -7176,11 +7195,8 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
         let config: DoctorConfig = toml::from_str(
             r#"
 [app]
-window_mode = "obs_capture"
 window_width = 540.0
 window_height = 720.0
-obs_capture_x = -10000.0
-obs_capture_y = -10000.0
 
 [input.mouse]
 enabled = true
@@ -7208,7 +7224,6 @@ path = "public/model/0.model3.json"
         )
         .expect("doctor config should parse");
 
-        assert_eq!(config.app.window_mode.as_deref(), Some("obs_capture"));
         assert_eq!(config.app.window_width, Some(540.0));
         assert_eq!(config.input.mouse.enabled, Some(true));
         assert_eq!(
@@ -7221,15 +7236,6 @@ path = "public/model/0.model3.json"
             config.model.path.as_deref(),
             Some("public/model/0.model3.json")
         );
-    }
-
-    #[test]
-    fn doctor_window_mode_validation_accepts_supported_aliases() {
-        assert_eq!(normalized_window_mode("desktop"), Some("desktop"));
-        assert_eq!(normalized_window_mode("overlay"), Some("desktop"));
-        assert_eq!(normalized_window_mode("obs"), Some("obs_capture"));
-        assert_eq!(normalized_window_mode("obs-capture"), Some("obs_capture"));
-        assert_eq!(normalized_window_mode("recorder_visible"), None);
     }
 
     #[test]

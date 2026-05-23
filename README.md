@@ -188,15 +188,20 @@ cargo xtask build-app
 cargo xtask build-app --release
 ```
 
-This uses the same `metal-renderer camera-tracking` feature set, Cubism Core SDK
-auto-detection, stable `rs.vtube-studio.dev` bundle identity, and local
-codesigning path as `run-metal`.
+This uses Cubism Core SDK auto-detection, the stable `rs.vtube-studio.dev`
+bundle identity, and the same local codesigning path as `run-metal`.
+Development builds use the normal window output. Release builds use
+`metal-renderer camera-tracking syphon-output`, require the local
+`Syphon.framework`, and read `vtube-studio-rs.build.toml`, which defaults to
+`[output].mode = "syphon"`.
 
-`run-metal` always compiles both `metal-renderer` and `camera-tracking`; the
-active TOML decides whether the camera opens through `[input.camera].enabled`.
-The local build config enables camera input by default, so `cargo xtask
-run-metal --release` is the optimized camera-capable run path. App stdout/stderr
-are written under `target/camera-test/run-metal-*.log`.
+`run-metal` always compiles both `metal-renderer` and `camera-tracking`; release
+runs also compile `syphon-output` because the build profile publishes Syphon by
+default. The active TOML decides whether the camera opens through
+`[input.camera].enabled`. The local build config enables camera input by
+default, so `cargo xtask run-metal --release` is the optimized
+camera-capable Syphon run path. App stdout/stderr are written under
+`target/camera-test/run-metal-*.log`.
 
 To publish a standard Syphon Producer instead of relying on screen/window
 capture, install `Syphon.framework` locally and run:
@@ -211,12 +216,12 @@ cargo xtask run-syphon
 `SyphonMetalServer.h`, thins the framework binary to arm64 for Apple Silicon,
 and installs it to `public/Syphon.framework`. `public/` is a local asset
 directory and is not committed to Git. `run-syphon` then generates a temporary
-`target/syphon-output/*.toml` profile with
-`[output].mode = "syphon"`, moves the helper window offscreen, and publishes a
-server named `VTubeStudioRS`.
+`target/syphon-output/*.toml` profile with `[output].mode = "syphon"` and
+publishes a server named `VTubeStudioRS`.
 OBS, TouchDesigner, Resolume, and other Syphon clients should discover that
-server through their Syphon source/client UI. The normal window output remains
-the default when `[output].mode = "window"`.
+server through their Syphon source/client UI. The development profile keeps the
+normal window output when `[output].mode = "window"`; the build profile defaults
+to Syphon.
 
 Pass a different model path as an argument to override local config for that
 run:
@@ -243,9 +248,9 @@ If startup cannot find the selected `.model3.json`, the app prints the active
 profile config path and the matching `list-models` / `select-model` command to
 repair it before opening the avatar window.
 Run `cargo xtask doctor` to check dev/build config files, selected model
-manifests, window mode/size settings, OBS capture coordinates, renderer, motion,
-mouse, microphone, camera input settings, output mode, and local Cubism Core SDK
-paths before launching. When either profile sets `[output].mode = "syphon"`,
+manifests, window size settings, renderer, motion, mouse, microphone, camera
+input settings, output mode, and local Cubism Core SDK paths before launching.
+When either profile sets `[output].mode = "syphon"`,
 doctor also checks `public/Syphon.framework` or `SYPHON_FRAMEWORK_DIR` for the
 Syphon binary, `SyphonMetalServer.h`, `default.metallib`, and an arm64-capable
 framework binary.
@@ -262,13 +267,10 @@ not keep the old avatar loaded. `Reveal Active Model...` selects the loaded
 `.model3.json` in Finder, and `Open Models Folder...` opens the local `public/`
 folder, creating it first if needed. The menu also includes Window Size presets
 that write `[app].window_width` / `[app].window_height` and relaunch with 100%,
-125%, 150%, or 200% sizing. Window Mode presets write `[app].window_mode` and
-relaunch between desktop overlay and OBS capture mode. OBS capture mode keeps
-the avatar window rendered but places it offscreen, switches the app to regular
-macOS application policy, and exposes a stable `vtube-studio-rs OBS Capture`
-window title. The window is explicitly marked shareable/read-only for capture so
-OBS and ScreenCaptureKit-style recorders have a better chance to enumerate it
-for Application/Window Capture without showing the model on the desktop.
+125%, 150%, or 200% sizing. Output Mode presets write `[output].mode` and
+relaunch between `Desktop Window` (`mode = "window"`) and `Syphon Producer`
+(`mode = "syphon"`). This is the replacement for the removed OBS window-capture
+mode; it does not restore the old offscreen capture window path.
 Renderer Quality presets write `[renderer]` quality fields and relaunch with
 Performance, Balanced, or High Quality settings. The menu also includes
 Soft/Normal/Expressive mouse, mouth, and camera calibration presets for quick
@@ -447,11 +449,8 @@ you want to customize a run.
 [app]
 runtime_profile = "development"
 window_level = "screen_saver"
-window_mode = "desktop"
 window_width = 540.0
 window_height = 720.0
-obs_capture_x = -10000.0
-obs_capture_y = -10000.0
 
 [model]
 path = "public/model/0.model3.json"

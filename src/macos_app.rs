@@ -30,7 +30,6 @@ type CGFloat = c_double;
 
 const NIL: Id = ptr::null_mut();
 
-const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: NSInteger = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
@@ -85,7 +84,7 @@ static MENU_COMMANDS: AtomicU32 = AtomicU32::new(0);
 static MENU_SELECTED_EXPRESSION_INDEX: AtomicI32 = AtomicI32::new(EXPRESSION_INDEX_UNCHANGED);
 static MENU_SELECTED_MODEL_INDEX: AtomicI32 = AtomicI32::new(MODEL_INDEX_UNCHANGED);
 static MENU_SELECTED_WINDOW_SIZE_INDEX: AtomicI32 = AtomicI32::new(WINDOW_SIZE_INDEX_UNCHANGED);
-static MENU_SELECTED_WINDOW_MODE_INDEX: AtomicI32 = AtomicI32::new(WINDOW_MODE_INDEX_UNCHANGED);
+static MENU_SELECTED_OUTPUT_MODE_INDEX: AtomicI32 = AtomicI32::new(OUTPUT_MODE_INDEX_UNCHANGED);
 static MENU_SELECTED_RENDERER_QUALITY_INDEX: AtomicI32 =
     AtomicI32::new(RENDERER_QUALITY_INDEX_UNCHANGED);
 
@@ -105,10 +104,10 @@ const MENU_OPEN_CAMERA_PRIVACY: u32 = 1 << 12;
 const MENU_OPEN_MICROPHONE_PRIVACY: u32 = 1 << 13;
 const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
 const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
-const MENU_SELECT_WINDOW_MODE: u32 = 1 << 16;
+const MENU_SELECT_OUTPUT_MODE: u32 = 1 << 16;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
-const WINDOW_MODE_INDEX_UNCHANGED: i32 = -1;
+const OUTPUT_MODE_INDEX_UNCHANGED: i32 = -1;
 const RENDERER_QUALITY_INDEX_UNCHANGED: i32 = -1;
 const EXPRESSION_INDEX_UNCHANGED: i32 = -2;
 const EXPRESSION_INDEX_NONE: i32 = -1;
@@ -150,11 +149,7 @@ unsafe extern "C" {
 pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
     unsafe {
         let app = msg_id(class("NSApplication")?, "sharedApplication");
-        msg_void_id(
-            app,
-            "setActivationPolicy:",
-            app_activation_policy(&config.app),
-        );
+        msg_void_id(app, "setActivationPolicy:", app_activation_policy());
         let _activity_token = prevent_app_nap()?;
         let model = Live2dModel::load(model_path)?;
         println!("Loaded {}", model.summary());
@@ -168,7 +163,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         println!("{cubism_summary}");
         log_offscreen_status(cubism_runtime.info());
         log_cubism_preview(&cubism_runtime);
-        let window = create_avatar_window(&config.app)?;
+        let window = create_avatar_window(&config.app, &config.output)?;
         println!("renderer_event=window_created kind=avatar");
         let root_layer = create_root_layer(window)?;
         #[allow(unused_mut)]
@@ -233,7 +228,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 camera_enabled,
                 selected_expression_index,
                 window_size_preset: WindowSizePreset::from_config(&config.app),
-                window_mode_preset: WindowModePreset::from_config(&config.app),
+                output_mode_preset: OutputModePreset::from_config(&config.output),
                 renderer_quality_preset: RendererQualityPreset::from_config(&config),
                 mouse_preset: InputPreset::Normal,
                 mouth_preset: InputPreset::Normal,
@@ -533,9 +528,12 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
     Ok(token)
 }
 
-unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, String> {
+unsafe fn create_avatar_window(
+    app_config: &AppRuntimeConfig,
+    output_config: &crate::config::OutputConfig,
+) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
-    let window_origin = avatar_window_origin(app_config);
+    let window_origin = avatar_window_origin(output_config);
     let window =
         crate::apple_platform::create_transparent_panel(crate::apple_platform::PanelStyle {
             frame: crate::apple_platform::LayerFrame {
@@ -547,14 +545,14 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
             style_mask: avatar_window_style_mask(),
             level: avatar_window_level(app_config),
             collection_behavior: avatar_window_collection_behavior(),
-            title: avatar_window_title(app_config),
-            excluded_from_windows_menu: avatar_window_excluded_from_windows_menu(app_config),
-            sharing_read_only: avatar_window_sharing_read_only(app_config),
+            title: avatar_window_title(output_config),
+            excluded_from_windows_menu: true,
+            sharing_read_only: false,
         })?;
 
     println!(
-        "renderer_event=window_configured kind=nonactivating_panel mode={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
-        WindowModePreset::from_config(app_config).config_value(),
+        "renderer_event=window_configured kind=nonactivating_panel output={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        output_mode_label(output_config),
         avatar_window_level(app_config),
         avatar_window_level_name(&app_config.window_level),
         avatar_window_level_key(&app_config.window_level),
@@ -573,32 +571,16 @@ fn avatar_window_style_mask() -> NSUInteger {
     NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
 }
 
-fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
-    match WindowModePreset::from_config(app_config) {
-        WindowModePreset::Desktop => NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
-        WindowModePreset::ObsCapture => NS_APPLICATION_ACTIVATION_POLICY_REGULAR,
+fn app_activation_policy() -> NSInteger {
+    NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+}
+
+fn avatar_window_title(output_config: &crate::config::OutputConfig) -> &'static str {
+    if output_config.is_syphon() {
+        "vtube-studio-rs Syphon Output"
+    } else {
+        "vtube-studio-rs"
     }
-}
-
-fn avatar_window_title(app_config: &AppRuntimeConfig) -> &'static str {
-    match WindowModePreset::from_config(app_config) {
-        WindowModePreset::Desktop => "vtube-studio-rs",
-        WindowModePreset::ObsCapture => "vtube-studio-rs OBS Capture",
-    }
-}
-
-fn avatar_window_excluded_from_windows_menu(app_config: &AppRuntimeConfig) -> bool {
-    !matches!(
-        WindowModePreset::from_config(app_config),
-        WindowModePreset::ObsCapture
-    )
-}
-
-fn avatar_window_sharing_read_only(app_config: &AppRuntimeConfig) -> bool {
-    matches!(
-        WindowModePreset::from_config(app_config),
-        WindowModePreset::ObsCapture
-    )
 }
 
 fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
@@ -608,13 +590,14 @@ fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
     }
 }
 
-fn avatar_window_origin(app_config: &AppRuntimeConfig) -> NSPoint {
-    match WindowModePreset::from_config(app_config) {
-        WindowModePreset::Desktop => NSPoint { x: 100.0, y: 140.0 },
-        WindowModePreset::ObsCapture => NSPoint {
-            x: valid_window_coordinate(app_config.obs_capture_x, -10_000.0),
-            y: valid_window_coordinate(app_config.obs_capture_y, -10_000.0),
-        },
+fn avatar_window_origin(output_config: &crate::config::OutputConfig) -> NSPoint {
+    if output_config.is_syphon() {
+        NSPoint {
+            x: -10_000.0,
+            y: -10_000.0,
+        }
+    } else {
+        NSPoint { x: 100.0, y: 140.0 }
     }
 }
 
@@ -626,17 +609,17 @@ fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
     }
 }
 
-fn valid_window_coordinate(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() {
-        value.clamp(-100_000.0, 100_000.0)
-    } else {
-        fallback
-    }
-}
-
 unsafe fn avatar_window_level(app_config: &AppRuntimeConfig) -> NSInteger {
     crate::apple_platform::window_level_for_key(avatar_window_level_key(&app_config.window_level))
         as NSInteger
+}
+
+fn output_mode_label(output_config: &crate::config::OutputConfig) -> &'static str {
+    if output_config.is_syphon() {
+        "syphon"
+    } else {
+        "window"
+    }
 }
 
 fn avatar_window_level_key(configured: &str) -> i32 {
@@ -839,7 +822,7 @@ struct RuntimeControlState {
     camera_enabled: bool,
     selected_expression_index: Option<usize>,
     window_size_preset: WindowSizePreset,
-    window_mode_preset: WindowModePreset,
+    output_mode_preset: OutputModePreset,
     renderer_quality_preset: RendererQualityPreset,
     mouse_preset: InputPreset,
     mouth_preset: InputPreset,
@@ -856,7 +839,7 @@ struct SettingsMenu {
     model_items: Vec<Id>,
     model_entries: Vec<ModelMenuEntry>,
     window_size_items: Vec<Id>,
-    window_mode_items: Vec<Id>,
+    output_mode_items: Vec<Id>,
     renderer_quality_items: Vec<Id>,
     expression_items: Vec<Id>,
     mouse_preset_items: Vec<Id>,
@@ -944,47 +927,48 @@ impl WindowSizePreset {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowModePreset {
-    Desktop,
-    ObsCapture,
+enum OutputModePreset {
+    DesktopWindow,
+    SyphonProducer,
 }
 
-impl WindowModePreset {
-    const ALL: [Self; 2] = [Self::Desktop, Self::ObsCapture];
+impl OutputModePreset {
+    const ALL: [Self; 2] = [Self::DesktopWindow, Self::SyphonProducer];
 
     fn label(self) -> &'static str {
         match self {
-            Self::Desktop => "Desktop Overlay",
-            Self::ObsCapture => "OBS Capture (offscreen)",
+            Self::DesktopWindow => "Desktop Window",
+            Self::SyphonProducer => "Syphon Producer",
         }
     }
 
     fn tag(self) -> NSInteger {
         match self {
-            Self::Desktop => 0,
-            Self::ObsCapture => 1,
+            Self::DesktopWindow => 0,
+            Self::SyphonProducer => 1,
         }
     }
 
     fn from_tag(tag: i32) -> Option<Self> {
         match tag {
-            0 => Some(Self::Desktop),
-            1 => Some(Self::ObsCapture),
+            0 => Some(Self::DesktopWindow),
+            1 => Some(Self::SyphonProducer),
             _ => None,
         }
     }
 
-    fn from_config(config: &AppRuntimeConfig) -> Self {
-        match config.window_mode.trim().to_ascii_lowercase().as_str() {
-            "obs" | "obs_capture" | "obs-capture" | "offscreen" | "capture" => Self::ObsCapture,
-            _ => Self::Desktop,
+    fn from_config(config: &crate::config::OutputConfig) -> Self {
+        if config.is_syphon() {
+            Self::SyphonProducer
+        } else {
+            Self::DesktopWindow
         }
     }
 
     fn config_value(self) -> &'static str {
         match self {
-            Self::Desktop => "desktop",
-            Self::ObsCapture => "obs_capture",
+            Self::DesktopWindow => "window",
+            Self::SyphonProducer => "syphon",
         }
     }
 }
@@ -1191,20 +1175,19 @@ unsafe fn install_settings_menu(
     }
     add_separator_menu_item(app_menu)?;
 
-    add_disabled_menu_item(app_menu, "Window Mode (relaunches app)")?;
-    let mut window_mode_items = Vec::new();
-    for preset in WindowModePreset::ALL {
+    add_disabled_menu_item(app_menu, "Output Mode (relaunches app)")?;
+    let mut output_mode_items = Vec::new();
+    for preset in OutputModePreset::ALL {
         let item = add_tagged_action_menu_item(
             app_menu,
             preset.label(),
-            "selectWindowMode:",
+            "selectOutputMode:",
             "",
             controller,
             preset.tag(),
         )?;
-        window_mode_items.push(item);
+        output_mode_items.push(item);
     }
-    add_disabled_menu_item(app_menu, "OBS mode keeps the window offscreen for capture")?;
     add_separator_menu_item(app_menu)?;
 
     add_disabled_menu_item(app_menu, "Expression")?;
@@ -1422,7 +1405,7 @@ unsafe fn install_settings_menu(
         model_items,
         model_entries,
         window_size_items,
-        window_mode_items,
+        output_mode_items,
         renderer_quality_items,
         expression_items,
         mouse_preset_items,
@@ -1593,14 +1576,14 @@ unsafe fn handle_settings_menu_commands(
         }
     }
 
-    if commands & MENU_SELECT_WINDOW_MODE != 0 {
+    if commands & MENU_SELECT_OUTPUT_MODE != 0 {
         let selected =
-            MENU_SELECTED_WINDOW_MODE_INDEX.swap(WINDOW_MODE_INDEX_UNCHANGED, Ordering::AcqRel);
-        if let Some(preset) = WindowModePreset::from_tag(selected) {
-            write_window_mode_to_active_config(preset)?;
+            MENU_SELECTED_OUTPUT_MODE_INDEX.swap(OUTPUT_MODE_INDEX_UNCHANGED, Ordering::AcqRel);
+        if let Some(preset) = OutputModePreset::from_tag(selected) {
+            write_output_mode_to_active_config(preset)?;
             schedule_model_relaunch(model_path)?;
             println!(
-                "renderer_event=settings_changed window_mode={} apply=relaunch config=\"{}\"",
+                "renderer_event=settings_changed output_mode={} apply=relaunch config=\"{}\"",
                 preset.config_value(),
                 crate::config::active_config_path()
             );
@@ -1685,7 +1668,7 @@ unsafe fn handle_settings_menu_commands(
             camera_enabled: *camera_enabled,
             selected_expression_index: *selected_expression_index,
             window_size_preset: WindowSizePreset::from_config(&config.app),
-            window_mode_preset: WindowModePreset::from_config(&config.app),
+            output_mode_preset: OutputModePreset::from_config(&config.output),
             renderer_quality_preset: RendererQualityPreset::from_config(config),
             mouse_preset: *mouse_preset,
             mouth_preset: *mouth_preset,
@@ -1713,10 +1696,10 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
             WindowSizePreset::ALL[index] == state.window_size_preset,
         );
     }
-    for (index, item) in menu.window_mode_items.iter().enumerate() {
+    for (index, item) in menu.output_mode_items.iter().enumerate() {
         set_menu_item_checked(
             *item,
-            WindowModePreset::ALL[index] == state.window_mode_preset,
+            OutputModePreset::ALL[index] == state.output_mode_preset,
         );
     }
     for (index, item) in menu.renderer_quality_items.iter().enumerate() {
@@ -1967,7 +1950,7 @@ fn write_window_size_to_active_config(preset: WindowSizePreset) -> Result<(), St
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
 }
 
-fn write_window_mode_to_active_config(preset: WindowModePreset) -> Result<(), String> {
+fn write_output_mode_to_active_config(preset: OutputModePreset) -> Result<(), String> {
     let config_path = Path::new(crate::config::active_config_path());
     let content = if config_path.is_file() {
         std::fs::read_to_string(config_path)
@@ -1975,14 +1958,11 @@ fn write_window_mode_to_active_config(preset: WindowModePreset) -> Result<(), St
     } else {
         String::new()
     };
-    let updated = set_toml_section_values(
+    let updated = set_toml_section_value(
         &content,
-        "app",
-        &[
-            ("window_mode", toml_string_literal(preset.config_value())),
-            ("obs_capture_x", "-10000.0".to_string()),
-            ("obs_capture_y", "-10000.0".to_string()),
-        ],
+        "output",
+        "mode",
+        &toml_string_literal(preset.config_value()),
     );
     std::fs::write(config_path, updated)
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
@@ -2361,7 +2341,7 @@ fn settings_menu_controller_class() -> Result<Class, String> {
             ("selectCameraPreset:", settings_select_camera_preset),
             ("selectModel:", settings_select_model),
             ("selectWindowSize:", settings_select_window_size),
-            ("selectWindowMode:", settings_select_window_mode),
+            ("selectOutputMode:", settings_select_output_mode),
             ("selectRendererQuality:", settings_select_renderer_quality),
         ],
     )
@@ -2499,14 +2479,14 @@ extern "C-unwind" fn settings_select_window_size(
     MENU_COMMANDS.fetch_or(MENU_SELECT_WINDOW_SIZE, Ordering::AcqRel);
 }
 
-extern "C-unwind" fn settings_select_window_mode(
+extern "C-unwind" fn settings_select_output_mode(
     _this: *mut objc2::runtime::AnyObject,
     _selector: objc2::runtime::Sel,
     sender: *mut objc2::runtime::AnyObject,
 ) {
     let tag = unsafe { crate::apple_platform::menu_item_tag(sender) } as i32;
-    MENU_SELECTED_WINDOW_MODE_INDEX.store(tag, Ordering::Release);
-    MENU_COMMANDS.fetch_or(MENU_SELECT_WINDOW_MODE, Ordering::AcqRel);
+    MENU_SELECTED_OUTPUT_MODE_INDEX.store(tag, Ordering::Release);
+    MENU_COMMANDS.fetch_or(MENU_SELECT_OUTPUT_MODE, Ordering::AcqRel);
 }
 
 extern "C-unwind" fn settings_select_renderer_quality(
@@ -3066,28 +3046,26 @@ unsafe fn msg_id_double_double_double_double(
 mod tests {
     use super::{
         EventPump, InputPreset, NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
-        NS_APPLICATION_ACTIVATION_POLICY_REGULAR, NS_NONACTIVATING_PANEL_MASK,
-        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
+        NS_NONACTIVATING_PANEL_MASK, NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
-        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, PrivacySettingsPane,
-        RendererQualityPreset, WindowModePreset, WindowSizePreset, app_activation_policy,
-        avatar_frame_for_bounds, avatar_window_collection_behavior,
-        avatar_window_excluded_from_windows_menu, avatar_window_level_key,
-        avatar_window_level_name, avatar_window_origin, avatar_window_sharing_read_only,
-        avatar_window_size, avatar_window_style_mask, avatar_window_title, camera_debug_summary,
-        camera_runtime_active, is_model3_path, model_menu_title, model_paths_match, model_title,
-        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
-        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
-        selected_expression_index, set_toml_section_value, set_toml_section_values,
-        toml_string_literal, valid_window_coordinate, window_occlusion_visible,
+        NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, OutputModePreset,
+        PrivacySettingsPane, RendererQualityPreset, WindowSizePreset, app_activation_policy,
+        avatar_frame_for_bounds, avatar_window_collection_behavior, avatar_window_level_key,
+        avatar_window_level_name, avatar_window_origin, avatar_window_size,
+        avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
+        is_model3_path, model_menu_title, model_paths_match, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, output_mode_label,
+        relaunch_command_args, runtime_camera_config, runtime_microphone_config,
+        runtime_mouse_config, selected_expression_index, set_toml_section_value,
+        set_toml_section_values, toml_string_literal, window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
     use crate::config::{
-        AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, RendererConfig,
-        RuntimeProfile,
+        AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, OutputConfig,
+        RendererConfig, RuntimeProfile,
     };
     use crate::live2d_model::{Live2dModel, ModelExpression};
     use crate::motion::CameraMotionSample;
@@ -3173,56 +3151,48 @@ mod tests {
     }
 
     #[test]
-    fn window_mode_presets_drive_desktop_and_obs_capture_origins() {
+    fn output_mode_drives_desktop_and_syphon_helper_origins() {
+        let window_output = OutputConfig::default();
         assert_eq!(
-            WindowModePreset::from_tag(1),
-            Some(WindowModePreset::ObsCapture)
+            OutputModePreset::from_config(&window_output),
+            OutputModePreset::DesktopWindow
         );
-        assert_eq!(WindowModePreset::ObsCapture.config_value(), "obs_capture");
-        assert_eq!(
-            WindowModePreset::from_config(&AppRuntimeConfig {
-                window_mode: "offscreen".to_string(),
-                ..AppRuntimeConfig::default()
-            }),
-            WindowModePreset::ObsCapture
-        );
-
-        let desktop_origin = avatar_window_origin(&AppRuntimeConfig::default());
+        assert_eq!(OutputModePreset::DesktopWindow.config_value(), "window");
+        let desktop_origin = avatar_window_origin(&window_output);
         assert_eq!(desktop_origin.x, 100.0);
         assert_eq!(desktop_origin.y, 140.0);
+        assert_eq!(avatar_window_title(&window_output), "vtube-studio-rs");
+        assert_eq!(output_mode_label(&window_output), "window");
 
-        let obs_origin = avatar_window_origin(&AppRuntimeConfig {
-            window_mode: "obs_capture".to_string(),
-            obs_capture_x: -12_000.0,
-            obs_capture_y: -9_000.0,
-            ..AppRuntimeConfig::default()
-        });
-        assert_eq!(obs_origin.x, -12_000.0);
-        assert_eq!(obs_origin.y, -9_000.0);
-        assert_eq!(valid_window_coordinate(f64::NAN, -10_000.0), -10_000.0);
+        let syphon_output = OutputConfig {
+            mode: "syphon".to_string(),
+            ..OutputConfig::default()
+        };
+        assert_eq!(
+            OutputModePreset::from_tag(1),
+            Some(OutputModePreset::SyphonProducer)
+        );
+        assert_eq!(
+            OutputModePreset::from_config(&syphon_output),
+            OutputModePreset::SyphonProducer
+        );
+        assert_eq!(OutputModePreset::SyphonProducer.config_value(), "syphon");
+        let syphon_origin = avatar_window_origin(&syphon_output);
+        assert_eq!(syphon_origin.x, -10_000.0);
+        assert_eq!(syphon_origin.y, -10_000.0);
+        assert_eq!(
+            avatar_window_title(&syphon_output),
+            "vtube-studio-rs Syphon Output"
+        );
+        assert_eq!(output_mode_label(&syphon_output), "syphon");
     }
 
     #[test]
-    fn obs_capture_mode_uses_regular_app_policy_and_window_listing() {
-        let desktop = AppRuntimeConfig::default();
-        let obs = AppRuntimeConfig {
-            window_mode: "obs_capture".to_string(),
-            ..AppRuntimeConfig::default()
-        };
-
+    fn app_policy_stays_accessory_for_window_and_syphon_output() {
         assert_eq!(
-            app_activation_policy(&desktop),
+            app_activation_policy(),
             NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
         );
-        assert_eq!(
-            app_activation_policy(&obs),
-            NS_APPLICATION_ACTIVATION_POLICY_REGULAR
-        );
-        assert_eq!(avatar_window_title(&obs), "vtube-studio-rs OBS Capture");
-        assert!(avatar_window_excluded_from_windows_menu(&desktop));
-        assert!(!avatar_window_excluded_from_windows_menu(&obs));
-        assert!(!avatar_window_sharing_read_only(&desktop));
-        assert!(avatar_window_sharing_read_only(&obs));
     }
 
     #[test]
@@ -3349,20 +3319,16 @@ mod tests {
     }
 
     #[test]
-    fn set_toml_section_values_updates_window_mode_fields() {
-        let updated = set_toml_section_values(
-            "[app]\nwindow_mode = \"desktop\"\n",
-            "app",
-            &[
-                ("window_mode", toml_string_literal("obs_capture")),
-                ("obs_capture_x", "-10000.0".to_string()),
-                ("obs_capture_y", "-10000.0".to_string()),
-            ],
+    fn set_toml_section_value_updates_output_mode_without_resetting_name() {
+        let updated = set_toml_section_value(
+            "[output]\nmode = \"window\"\nsyphon_name = \"CustomName\"\n",
+            "output",
+            "mode",
+            &toml_string_literal("syphon"),
         );
 
-        assert!(updated.contains("window_mode = \"obs_capture\"\n"));
-        assert!(updated.contains("obs_capture_x = -10000.0\n"));
-        assert!(updated.contains("obs_capture_y = -10000.0\n"));
+        assert!(updated.contains("mode = \"syphon\"\n"));
+        assert!(updated.contains("syphon_name = \"CustomName\"\n"));
     }
 
     #[test]

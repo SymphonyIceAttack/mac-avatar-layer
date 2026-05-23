@@ -189,9 +189,9 @@ Priority 1: Model And Runtime Usability
 - Keep `cargo xtask select-model [--dev|--build] MODEL_PATH` available as the
   developer-facing model selection path until an in-app picker exists.
 - Keep `cargo xtask doctor` available to check dev/build config files, selected
-  model manifests, window mode/size settings, OBS capture coordinates, renderer,
-  motion, mouse, microphone, and camera input settings, and Cubism Core SDK
-  paths before launching.
+  model manifests, window size settings, output mode, renderer, motion, mouse,
+  microphone, and camera input settings, and Cubism Core SDK paths before
+  launching.
 - Validate the selected `.model3.json` before opening the avatar window and
   print the active config path plus repair commands when it is missing.
 - Continue growing the first-pass status bar settings menu into a small
@@ -786,21 +786,19 @@ Status: next product milestone.
 - Done: expose `VT` menu Window Size presets. Selecting 100%, 125%, 150%, or
   200% writes `[app].window_width` / `[app].window_height` to the active
   dev/build TOML and relaunches the local `.app`.
-- Done: expose `VT` menu Window Mode presets. `Desktop Overlay` preserves the
-  normal transparent avatar window; `OBS Capture (offscreen)` keeps the window
-  alive and rendered, switches the app from accessory to regular activation
-  policy, gives the window a stable `vtube-studio-rs OBS Capture` title, and
-  marks the window as read-only shareable before moving it outside the visible
-  desktop so OBS or ScreenCaptureKit-style Application/Window Capture can target
-  it without showing the avatar on the desktop. This is a first-pass capture
-  workflow, not a hidden/minimized-window guarantee.
+- Done: restore `VT` menu Output Mode presets without restoring OBS capture.
+  `Desktop Window` writes `[output].mode = "window"` and `Syphon Producer`
+  writes `[output].mode = "syphon"`, then relaunches so the renderer initializes
+  the selected output path.
+- Removed: the old OBS/window-capture mode is no longer a product path. Capture
+  output now goes through the standard Syphon Producer instead of app-specific
+  window enumeration tricks.
 - Done: add first-pass standard Syphon Producer plumbing. `syphon-output` is an
   optional feature that links a local `Syphon.framework`, `[output].mode =
-  "syphon"` renders to an offscreen BGRA Metal final texture, and `cargo xtask
-  run-syphon` launches with a generated `target/syphon-output` config that moves
-  the helper window offscreen while publishing the `VTubeStudioRS` server for
-  OBS, TouchDesigner, Resolume, and other Syphon clients. This is the preferred
-  long-term capture route over app-specific OBS adaptation.
+  "syphon"` renders to an offscreen BGRA Metal final texture, and release/build
+  profile configs default to Syphon output. `cargo xtask run-syphon` remains as
+  an explicit development helper that publishes the `VTubeStudioRS` server for
+  OBS, TouchDesigner, Resolume, and other Syphon clients.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -821,9 +819,9 @@ Status: next product milestone.
   entry point. It builds the Metal + camera app wrapper, signs it with the same
   stable local bundle identity as `run-metal`, prints the active profile config,
   and does not launch the app.
-- Done: extend `cargo xtask doctor` to validate `[app].window_mode`,
-  `[app].window_width`, `[app].window_height`, and OBS capture coordinates so
-  profile config mistakes are caught before launching the avatar window.
+- Done: extend `cargo xtask doctor` to validate `[app].window_width` and
+  `[app].window_height` so profile config mistakes are caught before launching
+  the avatar window.
 - Done: extend `cargo xtask doctor` to validate common `[input.mouse]`,
   `[input.microphone]`, and `[input.camera]` mode/range mistakes, including
   `coordinate_space`, `pose_mode`, `mouth_combine`, camera FPS, mouth/blink
@@ -855,11 +853,8 @@ live in `vtube-studio-rs.dev.example.toml` and
 [app]
 runtime_profile = "development"
 window_level = "screen_saver"
-window_mode = "desktop"
 window_width = 540.0
 window_height = 720.0
-obs_capture_x = -10000.0
-obs_capture_y = -10000.0
 
 [model]
 path = "public/model/0.model3.json"

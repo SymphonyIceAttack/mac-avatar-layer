@@ -163,11 +163,8 @@ impl Default for RuntimeProfile {
 pub struct AppRuntimeConfig {
     pub runtime_profile: RuntimeProfile,
     pub window_level: String,
-    pub window_mode: String,
     pub window_width: f64,
     pub window_height: f64,
-    pub obs_capture_x: f64,
-    pub obs_capture_y: f64,
 }
 
 impl Default for AppRuntimeConfig {
@@ -175,11 +172,8 @@ impl Default for AppRuntimeConfig {
         Self {
             runtime_profile: RuntimeProfile::default(),
             window_level: "screen_saver".to_string(),
-            window_mode: "desktop".to_string(),
             window_width: 360.0,
             window_height: 480.0,
-            obs_capture_x: -10_000.0,
-            obs_capture_y: -10_000.0,
         }
     }
 }
@@ -270,7 +264,6 @@ impl Default for OutputConfig {
 }
 
 impl OutputConfig {
-    #[cfg(any(test, feature = "metal-renderer"))]
     pub fn is_syphon(&self) -> bool {
         matches!(
             self.mode.trim().to_ascii_lowercase().as_str(),
@@ -463,11 +456,8 @@ path = "public/model/custom.model3.json"
 [app]
 runtime_profile = "release"
 window_level = "screen_saver"
-window_mode = "obs_capture"
 window_width = 540.0
 window_height = 720.0
-obs_capture_x = -12000.0
-obs_capture_y = -9000.0
 
 [diagnostics]
 show = false
@@ -561,11 +551,8 @@ mouth_open = 0.7
         );
         assert_eq!(config.app.runtime_profile, RuntimeProfile::Release);
         assert_eq!(config.app.window_level, "screen_saver");
-        assert_eq!(config.app.window_mode, "obs_capture");
         assert_eq!(config.app.window_width, 540.0);
         assert_eq!(config.app.window_height, 720.0);
-        assert_eq!(config.app.obs_capture_x, -12000.0);
-        assert_eq!(config.app.obs_capture_y, -9000.0);
         assert!(!config.diagnostics.show);
         assert!(config.renderer.disable_masks);
         assert!(config.renderer.high_precision_masks);
