@@ -152,6 +152,7 @@ cargo xtask run-space-test
 cargo xtask sample-compatibility-sweep
 cargo xtask select-model --dev public/model/0.model3.json
 cargo xtask select-model --build public/model/0.model3.json
+cargo xtask tune-input --build camera expressive
 ```
 
 The recommended local command is:
@@ -241,7 +242,9 @@ for Application/Window Capture without showing the model on the desktop.
 Renderer Quality presets write `[renderer]` quality fields and relaunch with
 Performance, Balanced, or High Quality settings. The menu also includes
 Soft/Normal/Expressive mouse, mouth, and camera calibration presets for quick
-runtime tuning before committing values to TOML.
+runtime tuning before committing values to TOML. Use `cargo xtask tune-input`
+when you want to persist one of those calibration profiles into the dev/build
+TOML before the next launch.
 `Open Camera Privacy...` and `Open Microphone Privacy...` jump to the matching
 macOS privacy panes for permission repair. `Open Active Config...` opens the
 dev/build TOML file that will be used on the next launch. In-process hot model
@@ -522,6 +525,15 @@ volume into
 `gain`, `response_curve`, `min_open`, and `max_open` for calibration. Lower
 `response_curve` values such as `0.45` make quiet speech open the mouth more;
 higher values such as `1.0` behave closer to linear RMS.
+
+Persist a starter tuning profile after trying the session presets in the `VT`
+menu:
+
+```bash
+cargo xtask tune-input camera expressive
+cargo xtask tune-input --build mouth soft
+cargo xtask tune-input --build mouse normal
+```
 
 Mouse tracking and camera tracking both target head angle and eye-ball
 parameters, so `[input.camera].pose_mode` decides which source owns those

@@ -209,7 +209,9 @@ Priority 2: Tracking And Input
   `coordinate_space`/`eye_*_range`/`angle_*_degrees`/dead-zone controls and the
   runtime Soft/Normal/Expressive preset menu. Default mouse tracking is
   screen-relative; `coordinate_space = "window"` remains available when window
-  relative tracking is needed.
+  relative tracking is needed. Keep `cargo xtask tune-input` available to write
+  persistent mouse/mouth/camera starter calibration profiles into the active
+  dev/build TOML after trying runtime presets.
 - Calibrate microphone gain/noise gate/response-curve/attack/release defaults
   on more machines using the runtime mouth preset menu as a first pass.
 - Implement the selected camera-tracking v1 path: built-in/default webcam
@@ -431,6 +433,9 @@ Implementation plan:
   the app is running so real-camera tuning has visible feedback.
 - Done: add `VT` menu Soft/Normal/Expressive camera calibration presets that
   scale camera head/eye ranges and mouth gain for the current session.
+- Done: add `cargo xtask tune-input [--dev|--build] <mouse|mouth|camera>
+  <soft|normal|expressive>` so session calibration choices can be persisted to
+  profile TOML without hand-editing every range/gain field.
 - Done: add a `VT` menu Camera Tracking toggle that can start/stop the native
   camera capture lifecycle during the current session and keeps the motion
   layer's camera driver in sync with the selected camera calibration preset.

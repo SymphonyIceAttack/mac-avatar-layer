@@ -61,6 +61,7 @@ fn run() -> Result<()> {
         Some("run-space-test") => run_space_test(args.collect()),
         Some("sample-compatibility-sweep") => sample_compatibility_sweep(args.collect()),
         Some("select-model") => select_model(args.collect()),
+        Some("tune-input") => tune_input(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -97,6 +98,7 @@ Usage:
   cargo xtask run-space-test [MODEL_PATH]
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
   cargo xtask select-model [--dev|--build] MODEL_PATH
+  cargo xtask tune-input [--dev|--build] <mouse|mouth|camera> <soft|normal|expressive>
 
 Commands:
   build-app          Build and sign the local macOS .app wrapper without launching it.
@@ -131,6 +133,7 @@ Commands:
   sample-compatibility-sweep
                      Generate target/render-regression/compatibility-sweep.md.
   select-model      Write [model].path in the dev/build local config.
+  tune-input        Write persistent mouse, mouth, or camera calibration preset values.
 "
     );
 }
@@ -1470,6 +1473,40 @@ fn select_model(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn tune_input(args: Vec<String>) -> Result<()> {
+    let (target, input, preset) = parse_tune_input_args(args)?;
+
+    let root = project_root()?;
+    let config_path = root.join(target.config_path());
+    let example_config_path = root.join(target.example_config_path());
+    let content = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else if example_config_path.is_file() {
+        fs::read_to_string(&example_config_path)?
+    } else {
+        String::new()
+    };
+
+    let (section, updates) = input.preset_updates(preset);
+    let updated = set_toml_section_values(&content, section, &updates);
+    fs::write(&config_path, updated)?;
+
+    println!("Input tuning updated.");
+    println!("Target: {}", target.label());
+    println!("Config: {}", relative_display(&root, &config_path));
+    println!("Input: {}", input.config_label());
+    println!("Preset: {}", preset.config_label());
+    println!(
+        "Run with: cargo xtask run-metal{}",
+        if matches!(target, SelectModelTarget::Build) {
+            " --release"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum SelectModelTarget {
     Development,
@@ -1504,6 +1541,130 @@ impl SelectModelTarget {
             Self::Build => "build",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TuneInputTarget {
+    Mouse,
+    Mouth,
+    Camera,
+}
+
+impl TuneInputTarget {
+    fn from_arg(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mouse" => Some(Self::Mouse),
+            "mouth" | "microphone" | "mic" => Some(Self::Mouth),
+            "camera" => Some(Self::Camera),
+            _ => None,
+        }
+    }
+
+    fn config_label(self) -> &'static str {
+        match self {
+            Self::Mouse => "mouse",
+            Self::Mouth => "mouth",
+            Self::Camera => "camera",
+        }
+    }
+
+    fn preset_updates(self, preset: TunePreset) -> (&'static str, Vec<(&'static str, String)>) {
+        match self {
+            Self::Mouse => ("input.mouse", mouse_tune_updates(preset)),
+            Self::Mouth => ("input.microphone", mouth_tune_updates(preset)),
+            Self::Camera => ("input.camera", camera_tune_updates(preset)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TunePreset {
+    Soft,
+    Normal,
+    Expressive,
+}
+
+impl TunePreset {
+    fn from_arg(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "soft" => Some(Self::Soft),
+            "normal" => Some(Self::Normal),
+            "expressive" | "strong" => Some(Self::Expressive),
+            _ => None,
+        }
+    }
+
+    fn config_label(self) -> &'static str {
+        match self {
+            Self::Soft => "soft",
+            Self::Normal => "normal",
+            Self::Expressive => "expressive",
+        }
+    }
+}
+
+fn mouse_tune_updates(preset: TunePreset) -> Vec<(&'static str, String)> {
+    let (smoothing, eye, angle_scale) = match preset {
+        TunePreset::Soft => (7.5, 0.65, 0.65),
+        TunePreset::Normal => (10.0, 1.0, 1.0),
+        TunePreset::Expressive => (12.5, 1.35, 1.35),
+    };
+    vec![
+        ("enabled", "true".to_string()),
+        ("smoothing", format_decimal(smoothing)),
+        ("eye_x_range", format_decimal(eye)),
+        ("eye_y_range", format_decimal(eye)),
+        ("angle_x_degrees", format_decimal(30.0 * angle_scale)),
+        ("angle_y_degrees", format_decimal(22.0 * angle_scale)),
+        ("angle_z_degrees", format_decimal(-12.0 * angle_scale)),
+    ]
+}
+
+fn mouth_tune_updates(preset: TunePreset) -> Vec<(&'static str, String)> {
+    let (gain, response_curve, attack, release, max_open) = match preset {
+        TunePreset::Soft => (6.5, 0.75, 25.6, 8.0, 0.75),
+        TunePreset::Normal => (10.0, 0.6, 32.0, 10.0, 1.0),
+        TunePreset::Expressive => (14.5, 0.45, 40.0, 11.5, 1.0),
+    };
+    vec![
+        ("enabled", "true".to_string()),
+        ("parameter", toml_string_literal("ParamMouthOpenY")),
+        ("gain", format_decimal(gain)),
+        ("response_curve", format_decimal(response_curve)),
+        ("attack", format_decimal(attack)),
+        ("release", format_decimal(release)),
+        ("min_open", "0.0".to_string()),
+        ("max_open", format_decimal(max_open)),
+    ]
+}
+
+fn camera_tune_updates(preset: TunePreset) -> Vec<(&'static str, String)> {
+    let (smoothing, eye, angle_scale, mouth_gain, mouth_max_open) = match preset {
+        TunePreset::Soft => (9.6, 0.7, 0.7, 1.05, 0.85),
+        TunePreset::Normal => (12.0, 1.0, 1.0, 1.4, 1.0),
+        TunePreset::Expressive => (14.4, 1.25, 1.25, 1.89, 1.0),
+    };
+    vec![
+        ("enabled", "true".to_string()),
+        ("pose_mode", toml_string_literal("camera_when_available")),
+        ("smoothing", format_decimal(smoothing)),
+        ("eye_x_range", format_decimal(eye)),
+        ("eye_y_range", format_decimal(eye)),
+        ("angle_x_degrees", format_decimal(30.0 * angle_scale)),
+        ("angle_y_degrees", format_decimal(22.0 * angle_scale)),
+        ("angle_z_degrees", format_decimal(12.0 * angle_scale)),
+        ("mouth_gain", format_decimal(mouth_gain)),
+        ("mouth_min_open", "0.0".to_string()),
+        ("mouth_max_open", format_decimal(mouth_max_open)),
+        ("mouth_combine", toml_string_literal("max")),
+    ]
+}
+
+fn format_decimal(value: f64) -> String {
+    format!("{value:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
@@ -2213,6 +2374,32 @@ fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, Stri
         }
         _ => Err("usage: cargo xtask select-model [--dev|--build] MODEL_PATH".into()),
     }
+}
+
+fn parse_tune_input_args(
+    args: Vec<String>,
+) -> Result<(SelectModelTarget, TuneInputTarget, TunePreset)> {
+    let (target, rest) = match args.as_slice() {
+        [flag, rest @ ..] if flag == "--dev" || flag == "--development" => {
+            (SelectModelTarget::Development, rest)
+        }
+        [flag, rest @ ..] if flag == "--build" => (SelectModelTarget::Build, rest),
+        rest => (SelectModelTarget::Development, rest),
+    };
+
+    let [input, preset] = rest else {
+        return Err(
+            "usage: cargo xtask tune-input [--dev|--build] <mouse|mouth|camera> <soft|normal|expressive>"
+                .into(),
+        );
+    };
+    let input = TuneInputTarget::from_arg(input).ok_or_else(|| {
+        format!("unknown tune-input target `{input}`; use mouse, mouth, or camera")
+    })?;
+    let preset = TunePreset::from_arg(preset).ok_or_else(|| {
+        format!("unknown tune-input preset `{preset}`; use soft, normal, or expressive")
+    })?;
+    Ok((target, input, preset))
 }
 
 fn capture_risk_models_to(
@@ -3288,6 +3475,14 @@ fn set_toml_section_value(content: &str, section: &str, key: &str, value: &str) 
         output.push('\n');
     }
 
+    output
+}
+
+fn set_toml_section_values(content: &str, section: &str, updates: &[(&str, String)]) -> String {
+    let mut output = content.to_string();
+    for (key, value) in updates {
+        output = set_toml_section_value(&output, section, key, value);
+    }
     output
 }
 
@@ -6301,6 +6496,23 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     }
 
     #[test]
+    fn set_toml_section_values_updates_multiple_keys_in_target_section() {
+        let updated = set_toml_section_values(
+            "[input.camera]\nenabled = false\npose_mode = \"mouse\"\n",
+            "input.camera",
+            &[
+                ("enabled", "true".to_string()),
+                ("pose_mode", "\"camera_when_available\"".to_string()),
+                ("mouth_gain", "1.4".to_string()),
+            ],
+        );
+
+        assert!(updated.contains("[input.camera]\nenabled = true\n"));
+        assert!(updated.contains("pose_mode = \"camera_when_available\"\n"));
+        assert!(updated.contains("mouth_gain = 1.4\n"));
+    }
+
+    #[test]
     fn select_model_args_choose_dev_or_build_config() {
         let (target, model_path) =
             parse_select_model_args(vec!["public/model/0.model3.json".to_string()])
@@ -6315,6 +6527,47 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
         .expect("build target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
         assert_eq!(model_path, "public/model/0.model3.json");
+    }
+
+    #[test]
+    fn tune_input_args_choose_target_input_and_preset() {
+        let (target, input, preset) =
+            parse_tune_input_args(vec!["camera".to_string(), "expressive".to_string()])
+                .expect("default tune target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+        assert_eq!(input, TuneInputTarget::Camera);
+        assert_eq!(preset, TunePreset::Expressive);
+
+        let (target, input, preset) = parse_tune_input_args(vec![
+            "--build".to_string(),
+            "mouth".to_string(),
+            "soft".to_string(),
+        ])
+        .expect("build tune target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+        assert_eq!(input, TuneInputTarget::Mouth);
+        assert_eq!(preset, TunePreset::Soft);
+
+        assert!(parse_tune_input_args(vec!["camera".to_string()]).is_err());
+        assert!(parse_tune_input_args(vec!["camera".to_string(), "wild".to_string()]).is_err());
+    }
+
+    #[test]
+    fn tune_input_presets_write_expected_config_values() {
+        let (_, mouse) = TuneInputTarget::Mouse.preset_updates(TunePreset::Expressive);
+        assert!(mouse.contains(&("enabled", "true".to_string())));
+        assert!(mouse.contains(&("eye_x_range", "1.35".to_string())));
+        assert!(mouse.contains(&("angle_z_degrees", "-16.2".to_string())));
+
+        let (_, mouth) = TuneInputTarget::Mouth.preset_updates(TunePreset::Soft);
+        assert!(mouth.contains(&("parameter", "\"ParamMouthOpenY\"".to_string())));
+        assert!(mouth.contains(&("gain", "6.5".to_string())));
+        assert!(mouth.contains(&("max_open", "0.75".to_string())));
+
+        let (_, camera) = TuneInputTarget::Camera.preset_updates(TunePreset::Expressive);
+        assert!(camera.contains(&("pose_mode", "\"camera_when_available\"".to_string())));
+        assert!(camera.contains(&("angle_x_degrees", "37.5".to_string())));
+        assert!(camera.contains(&("mouth_gain", "1.89".to_string())));
     }
 
     #[test]
