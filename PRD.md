@@ -189,7 +189,9 @@ Priority 1: Model And Runtime Usability
 - Keep `cargo xtask select-model [--dev|--build] MODEL_PATH` available as the
   developer-facing model selection path until an in-app picker exists.
 - Keep `cargo xtask doctor` available to check dev/build config files, selected
-  model manifests, and Cubism Core SDK paths before launching.
+  model manifests, window mode/size settings, OBS capture coordinates, renderer,
+  motion, mouse, microphone, and camera input settings, and Cubism Core SDK
+  paths before launching.
 - Validate the selected `.model3.json` before opening the avatar window and
   print the active config path plus repair commands when it is missing.
 - Continue growing the first-pass status bar settings menu into a small
@@ -779,9 +781,10 @@ Status: next product milestone.
   normal transparent avatar window; `OBS Capture (offscreen)` keeps the window
   alive and rendered, switches the app from accessory to regular activation
   policy, gives the window a stable `vtube-studio-rs OBS Capture` title, and
-  moves it outside the visible desktop so OBS Application/Window Capture can
-  target it without showing the avatar on the desktop. This is a first-pass
-  capture workflow, not a hidden/minimized-window guarantee.
+  marks the window as read-only shareable before moving it outside the visible
+  desktop so OBS or ScreenCaptureKit-style Application/Window Capture can target
+  it without showing the avatar on the desktop. This is a first-pass capture
+  workflow, not a hidden/minimized-window guarantee.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -802,6 +805,16 @@ Status: next product milestone.
   entry point. It builds the Metal + camera app wrapper, signs it with the same
   stable local bundle identity as `run-metal`, prints the active profile config,
   and does not launch the app.
+- Done: extend `cargo xtask doctor` to validate `[app].window_mode`,
+  `[app].window_width`, `[app].window_height`, and OBS capture coordinates so
+  profile config mistakes are caught before launching the avatar window.
+- Done: extend `cargo xtask doctor` to validate common `[input.mouse]`,
+  `[input.microphone]`, and `[input.camera]` mode/range mistakes, including
+  `coordinate_space`, `pose_mode`, `mouth_combine`, camera FPS, mouth/blink
+  thresholds, smoothing, dead zones, ranges, and angle limits.
+- Done: extend `cargo xtask doctor` to validate common `[renderer]` and
+  `[motion]` mistakes, including `debug_texture_mode`, atlas anisotropy, blink
+  interval/duration, and empty expression overrides.
 - Continue packaging/signing/launch-at-login decisions; launch-at-login remains
   intentionally unimplemented until the app bundle/install location is settled.
 - Start the objc2 AppKit/Foundation migration phase from section 3a before
@@ -821,8 +834,11 @@ live in `vtube-studio-rs.dev.example.toml` and
 [app]
 runtime_profile = "development"
 window_level = "screen_saver"
+window_mode = "desktop"
 window_width = 540.0
 window_height = 720.0
+obs_capture_x = -10000.0
+obs_capture_y = -10000.0
 
 [model]
 path = "public/model/0.model3.json"

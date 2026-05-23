@@ -114,7 +114,7 @@ Commands:
                      Capture baseline screenshots for default, Mao, and Ren.
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
-  doctor            Check local configs, selected models, and Cubism Core SDK paths.
+  doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
@@ -1533,13 +1533,18 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
         }
     };
 
+    let issues = check_doctor_app_config(target, &config.app)
+        + check_doctor_renderer_config(target, &config.renderer)
+        + check_doctor_motion_config(target, &config.motion)
+        + check_doctor_input_config(target, &config.input);
+
     let Some(model_path) = config.model.path.as_deref() else {
         println!("[!] {} config has no [model].path", target.label());
         println!(
             "    Run: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(1);
+        return Ok(issues + 1);
     };
 
     let full_model_path = root.join(model_path);
@@ -1553,7 +1558,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(1);
+        return Ok(issues + 1);
     }
     if !full_model_path.is_file() {
         println!(
@@ -1565,7 +1570,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(1);
+        return Ok(issues + 1);
     }
 
     match ModelManifestSummary::load(&full_model_path) {
@@ -1581,7 +1586,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
                 yes_no(summary.has_physics),
                 yes_no(summary.has_display_info)
             );
-            Ok(0)
+            Ok(issues)
         }
         Err(error) => {
             println!(
@@ -1589,8 +1594,481 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
                 target.label()
             );
             println!("    {error}");
-            Ok(1)
+            Ok(issues + 1)
         }
+    }
+}
+
+fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> usize {
+    let mut issues = 0usize;
+    let mode = app
+        .window_mode
+        .as_deref()
+        .map(normalized_window_mode)
+        .unwrap_or(Some("desktop"));
+    match mode {
+        Some(mode) => {
+            println!("[x] {} window mode: {mode}", target.label());
+            if mode == "obs_capture" {
+                let x_ok = app.obs_capture_x.map(f64::is_finite).unwrap_or(true);
+                let y_ok = app.obs_capture_y.map(f64::is_finite).unwrap_or(true);
+                if !x_ok || !y_ok {
+                    println!(
+                        "[!] {} OBS capture coordinates must be finite numbers",
+                        target.label()
+                    );
+                    issues += 1;
+                }
+            }
+        }
+        None => {
+            let configured = app.window_mode.as_deref().unwrap_or_default();
+            println!(
+                "[!] {} window_mode is invalid: {:?}",
+                target.label(),
+                configured
+            );
+            println!("    Use window_mode = \"desktop\" or window_mode = \"obs_capture\"");
+            issues += 1;
+        }
+    }
+
+    for (field, value) in [
+        ("window_width", app.window_width),
+        ("window_height", app.window_height),
+    ] {
+        if let Some(value) = value {
+            if !valid_doctor_window_dimension(value) {
+                println!(
+                    "[!] {} {field} should be a finite value from 96.0 to 2400.0, got {value}",
+                    target.label()
+                );
+                issues += 1;
+            }
+        }
+    }
+
+    issues
+}
+
+fn normalized_window_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "desktop" | "overlay" => Some("desktop"),
+        "obs" | "obs_capture" | "obs-capture" | "offscreen" | "capture" => Some("obs_capture"),
+        _ => None,
+    }
+}
+
+fn valid_doctor_window_dimension(value: f64) -> bool {
+    value.is_finite() && (96.0..=2400.0).contains(&value)
+}
+
+fn check_doctor_renderer_config(
+    target: SelectModelTarget,
+    renderer: &DoctorRendererConfig,
+) -> usize {
+    let mut issues = 0usize;
+    if let Some(value) = renderer.debug_texture_mode.as_deref() {
+        if normalized_debug_texture_mode(value).is_none() {
+            println!(
+                "[!] {} renderer.debug_texture_mode is invalid: {:?}",
+                target.label(),
+                value
+            );
+            println!("    Use debug_texture_mode = \"none\", \"uv\", \"rgb\", or \"alpha\"");
+            issues += 1;
+        }
+    }
+    if let Some(value) = renderer.atlas_anisotropy {
+        if !(1..=16).contains(&value) {
+            println!(
+                "[!] {} renderer.atlas_anisotropy should be from 1 to 16, got {value}",
+                target.label()
+            );
+            issues += 1;
+        }
+    }
+    println!(
+        "[x] {} renderer config: debug_texture_mode {} | anisotropy {}",
+        target.label(),
+        renderer
+            .debug_texture_mode
+            .as_deref()
+            .and_then(normalized_debug_texture_mode)
+            .unwrap_or("none"),
+        renderer
+            .atlas_anisotropy
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default".to_string())
+    );
+    issues
+}
+
+fn check_doctor_motion_config(target: SelectModelTarget, motion: &DoctorMotionConfig) -> usize {
+    let mut issues = 0usize;
+    issues += check_optional_range(
+        target,
+        "motion.blink_interval",
+        motion.blink_interval,
+        0.5,
+        60.0,
+    );
+    issues += check_optional_range(
+        target,
+        "motion.blink_duration",
+        motion.blink_duration,
+        0.05,
+        5.0,
+    );
+    if motion
+        .expression
+        .as_deref()
+        .is_some_and(|expression| expression.trim().is_empty())
+    {
+        println!(
+            "[!] {} motion.expression is empty; remove it or set a model expression name/index",
+            target.label()
+        );
+        issues += 1;
+    }
+    println!(
+        "[x] {} motion config: blink_interval {} | blink_duration {}",
+        target.label(),
+        motion
+            .blink_interval
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default".to_string()),
+        motion
+            .blink_duration
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default".to_string())
+    );
+    issues
+}
+
+fn check_doctor_input_config(target: SelectModelTarget, input: &DoctorInputConfig) -> usize {
+    let mut issues = 0usize;
+    issues += check_doctor_mouse_config(target, &input.mouse);
+    issues += check_doctor_microphone_config(target, &input.microphone);
+    issues += check_doctor_camera_config(target, &input.camera);
+    println!(
+        "[x] {} input config: mouse {} | microphone {} | camera {}",
+        target.label(),
+        on_off(input.mouse.enabled),
+        on_off(input.microphone.enabled),
+        on_off(input.camera.enabled)
+    );
+    issues
+}
+
+fn check_doctor_mouse_config(target: SelectModelTarget, mouse: &DoctorMouseConfig) -> usize {
+    let mut issues = 0usize;
+    if let Some(value) = mouse.coordinate_space.as_deref() {
+        if normalized_mouse_coordinate_space(value).is_none() {
+            println!(
+                "[!] {} input.mouse.coordinate_space is invalid: {:?}",
+                target.label(),
+                value
+            );
+            println!("    Use coordinate_space = \"screen\" or \"window\"");
+            issues += 1;
+        }
+    }
+    issues += check_optional_range(target, "input.mouse.smoothing", mouse.smoothing, 1.0, 60.0);
+    issues += check_optional_range(target, "input.mouse.dead_zone", mouse.dead_zone, 0.0, 0.95);
+    issues += check_optional_range(
+        target,
+        "input.mouse.eye_x_range",
+        mouse.eye_x_range,
+        0.0,
+        3.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.mouse.eye_y_range",
+        mouse.eye_y_range,
+        0.0,
+        3.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.mouse.angle_x_degrees",
+        mouse.angle_x_degrees,
+        -90.0,
+        90.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.mouse.angle_y_degrees",
+        mouse.angle_y_degrees,
+        -90.0,
+        90.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.mouse.angle_z_degrees",
+        mouse.angle_z_degrees,
+        -90.0,
+        90.0,
+    );
+    issues
+}
+
+fn check_doctor_microphone_config(
+    target: SelectModelTarget,
+    microphone: &DoctorMicrophoneConfig,
+) -> usize {
+    let mut issues = 0usize;
+    if microphone
+        .parameter
+        .as_deref()
+        .is_some_and(|parameter| parameter.trim().is_empty())
+    {
+        println!(
+            "[!] {} input.microphone.parameter is empty; runtime will fall back to ParamMouthOpenY",
+            target.label()
+        );
+        issues += 1;
+    }
+    issues += check_optional_range(target, "input.microphone.gain", microphone.gain, 0.1, 80.0);
+    issues += check_optional_range(
+        target,
+        "input.microphone.noise_gate",
+        microphone.noise_gate,
+        0.0,
+        0.5,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.response_curve",
+        microphone.response_curve,
+        0.2,
+        3.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.smoothing",
+        microphone.smoothing,
+        1.0,
+        120.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.attack",
+        microphone.attack,
+        1.0,
+        120.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.release",
+        microphone.release,
+        1.0,
+        120.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.min_open",
+        microphone.min_open,
+        0.0,
+        1.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.microphone.max_open",
+        microphone.max_open,
+        0.0,
+        1.0,
+    );
+    issues
+}
+
+fn check_doctor_camera_config(target: SelectModelTarget, camera: &DoctorCameraConfig) -> usize {
+    let mut issues = 0usize;
+    if let Some(value) = camera.pose_mode.as_deref() {
+        if normalized_camera_pose_mode(value).is_none() {
+            println!(
+                "[!] {} input.camera.pose_mode is invalid: {:?}",
+                target.label(),
+                value
+            );
+            println!("    Use pose_mode = \"camera_when_available\", \"camera\", or \"mouse\"");
+            issues += 1;
+        }
+    }
+    if let Some(value) = camera.mouth_combine.as_deref() {
+        if normalized_mouth_combine_mode(value).is_none() {
+            println!(
+                "[!] {} input.camera.mouth_combine is invalid: {:?}",
+                target.label(),
+                value
+            );
+            println!("    Use mouth_combine = \"max\", \"camera\", or \"microphone\"");
+            issues += 1;
+        }
+    }
+    if let Some(value) = camera.target_fps {
+        if !(1..=60).contains(&value) {
+            println!(
+                "[!] {} input.camera.target_fps should be from 1 to 60, got {value}",
+                target.label()
+            );
+            issues += 1;
+        }
+    }
+    issues += check_optional_range(
+        target,
+        "input.camera.smoothing",
+        camera.smoothing,
+        1.0,
+        60.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.dead_zone",
+        camera.dead_zone,
+        0.0,
+        0.95,
+    );
+    for (field, value) in [
+        ("input.camera.face_x_offset", camera.face_x_offset),
+        ("input.camera.face_y_offset", camera.face_y_offset),
+        ("input.camera.gaze_x_offset", camera.gaze_x_offset),
+        ("input.camera.gaze_y_offset", camera.gaze_y_offset),
+        ("input.camera.roll_offset", camera.roll_offset),
+    ] {
+        issues += check_optional_range(target, field, value, -1.0, 1.0);
+    }
+    for (field, value) in [
+        ("input.camera.eye_x_range", camera.eye_x_range),
+        ("input.camera.eye_y_range", camera.eye_y_range),
+    ] {
+        issues += check_optional_range(target, field, value, 0.0, 3.0);
+    }
+    for (field, value) in [
+        ("input.camera.angle_x_degrees", camera.angle_x_degrees),
+        ("input.camera.angle_y_degrees", camera.angle_y_degrees),
+        ("input.camera.angle_z_degrees", camera.angle_z_degrees),
+    ] {
+        issues += check_optional_range(target, field, value, -90.0, 90.0);
+    }
+    issues += check_optional_range(
+        target,
+        "input.camera.mouth_gain",
+        camera.mouth_gain,
+        0.1,
+        10.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.mouth_open_offset",
+        camera.mouth_open_offset,
+        -1.0,
+        1.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.mouth_min_open",
+        camera.mouth_min_open,
+        0.0,
+        1.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.mouth_max_open",
+        camera.mouth_max_open,
+        0.0,
+        1.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.blink_close_threshold",
+        camera.blink_close_threshold,
+        0.0,
+        1.0,
+    );
+    issues += check_optional_range(
+        target,
+        "input.camera.blink_open_threshold",
+        camera.blink_open_threshold,
+        0.0,
+        1.0,
+    );
+    if let (Some(close), Some(open)) = (camera.blink_close_threshold, camera.blink_open_threshold) {
+        if close >= open {
+            println!(
+                "[!] {} camera blink thresholds should satisfy blink_close_threshold < blink_open_threshold",
+                target.label()
+            );
+            issues += 1;
+        }
+    }
+    issues
+}
+
+fn check_optional_range(
+    target: SelectModelTarget,
+    field: &str,
+    value: Option<f64>,
+    min: f64,
+    max: f64,
+) -> usize {
+    let Some(value) = value else {
+        return 0;
+    };
+    if value.is_finite() && (min..=max).contains(&value) {
+        return 0;
+    }
+    println!(
+        "[!] {} {field} should be a finite value from {min} to {max}, got {value}",
+        target.label()
+    );
+    1
+}
+
+fn normalized_mouse_coordinate_space(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "screen" => Some("screen"),
+        "window" => Some("window"),
+        _ => None,
+    }
+}
+
+fn normalized_debug_texture_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Some("none"),
+        "uv" => Some("uv"),
+        "rgb" | "texture" | "color" => Some("rgb"),
+        "alpha" => Some("alpha"),
+        _ => None,
+    }
+}
+
+fn normalized_camera_pose_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mouse" => Some("mouse"),
+        "camera" | "face" => Some("camera"),
+        "" | "camera_when_available" | "camera-when-available" | "auto" => {
+            Some("camera_when_available")
+        }
+        _ => None,
+    }
+}
+
+fn normalized_mouth_combine_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "max" => Some("max"),
+        "camera" => Some("camera"),
+        "microphone" | "mic" => Some("microphone"),
+        _ => None,
+    }
+}
+
+fn on_off(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "on",
+        Some(false) => "off",
+        None => "default",
     }
 }
 
@@ -1622,7 +2100,100 @@ fn check_cubism_core_sdk(root: &Path) -> usize {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorConfig {
+    app: DoctorAppConfig,
+    input: DoctorInputConfig,
     model: DoctorModelConfig,
+    motion: DoctorMotionConfig,
+    renderer: DoctorRendererConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorAppConfig {
+    window_mode: Option<String>,
+    window_width: Option<f64>,
+    window_height: Option<f64>,
+    obs_capture_x: Option<f64>,
+    obs_capture_y: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorRendererConfig {
+    atlas_anisotropy: Option<u64>,
+    debug_texture_mode: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorMotionConfig {
+    expression: Option<String>,
+    blink_interval: Option<f64>,
+    blink_duration: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorInputConfig {
+    mouse: DoctorMouseConfig,
+    microphone: DoctorMicrophoneConfig,
+    camera: DoctorCameraConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorMouseConfig {
+    enabled: Option<bool>,
+    coordinate_space: Option<String>,
+    smoothing: Option<f64>,
+    dead_zone: Option<f64>,
+    eye_x_range: Option<f64>,
+    eye_y_range: Option<f64>,
+    angle_x_degrees: Option<f64>,
+    angle_y_degrees: Option<f64>,
+    angle_z_degrees: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorMicrophoneConfig {
+    enabled: Option<bool>,
+    parameter: Option<String>,
+    gain: Option<f64>,
+    noise_gate: Option<f64>,
+    response_curve: Option<f64>,
+    smoothing: Option<f64>,
+    attack: Option<f64>,
+    release: Option<f64>,
+    min_open: Option<f64>,
+    max_open: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorCameraConfig {
+    enabled: Option<bool>,
+    target_fps: Option<u32>,
+    pose_mode: Option<String>,
+    smoothing: Option<f64>,
+    dead_zone: Option<f64>,
+    face_x_offset: Option<f64>,
+    face_y_offset: Option<f64>,
+    gaze_x_offset: Option<f64>,
+    gaze_y_offset: Option<f64>,
+    roll_offset: Option<f64>,
+    eye_x_range: Option<f64>,
+    eye_y_range: Option<f64>,
+    angle_x_degrees: Option<f64>,
+    angle_y_degrees: Option<f64>,
+    angle_z_degrees: Option<f64>,
+    mouth_gain: Option<f64>,
+    mouth_open_offset: Option<f64>,
+    mouth_min_open: Option<f64>,
+    mouth_max_open: Option<f64>,
+    mouth_combine: Option<String>,
+    blink_close_threshold: Option<f64>,
+    blink_open_threshold: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5840,15 +6411,111 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     fn doctor_config_parses_model_path() {
         let config: DoctorConfig = toml::from_str(
             r#"
+[app]
+window_mode = "obs_capture"
+window_width = 540.0
+window_height = 720.0
+obs_capture_x = -10000.0
+obs_capture_y = -10000.0
+
+[input.mouse]
+enabled = true
+coordinate_space = "screen"
+
+[input.microphone]
+enabled = false
+
+[input.camera]
+enabled = true
+pose_mode = "camera_when_available"
+mouth_combine = "max"
+
+[renderer]
+atlas_anisotropy = 8
+debug_texture_mode = "uv"
+
+[motion]
+blink_interval = 3.8
+blink_duration = 0.18
+
 [model]
 path = "public/model/0.model3.json"
 "#,
         )
         .expect("doctor config should parse");
 
+        assert_eq!(config.app.window_mode.as_deref(), Some("obs_capture"));
+        assert_eq!(config.app.window_width, Some(540.0));
+        assert_eq!(config.input.mouse.enabled, Some(true));
+        assert_eq!(
+            config.input.camera.pose_mode.as_deref(),
+            Some("camera_when_available")
+        );
+        assert_eq!(config.renderer.atlas_anisotropy, Some(8));
+        assert_eq!(config.motion.blink_interval, Some(3.8));
         assert_eq!(
             config.model.path.as_deref(),
             Some("public/model/0.model3.json")
+        );
+    }
+
+    #[test]
+    fn doctor_window_mode_validation_accepts_supported_aliases() {
+        assert_eq!(normalized_window_mode("desktop"), Some("desktop"));
+        assert_eq!(normalized_window_mode("overlay"), Some("desktop"));
+        assert_eq!(normalized_window_mode("obs"), Some("obs_capture"));
+        assert_eq!(normalized_window_mode("obs-capture"), Some("obs_capture"));
+        assert_eq!(normalized_window_mode("recorder_visible"), None);
+    }
+
+    #[test]
+    fn doctor_window_dimension_validation_matches_runtime_bounds() {
+        assert!(valid_doctor_window_dimension(96.0));
+        assert!(valid_doctor_window_dimension(2400.0));
+        assert!(!valid_doctor_window_dimension(95.9));
+        assert!(!valid_doctor_window_dimension(2400.1));
+        assert!(!valid_doctor_window_dimension(f64::NAN));
+    }
+
+    #[test]
+    fn doctor_input_mode_validation_accepts_runtime_aliases() {
+        assert_eq!(normalized_debug_texture_mode("none"), Some("none"));
+        assert_eq!(normalized_debug_texture_mode("texture"), Some("rgb"));
+        assert_eq!(normalized_debug_texture_mode("alpha"), Some("alpha"));
+        assert_eq!(normalized_debug_texture_mode("depth"), None);
+
+        assert_eq!(normalized_mouse_coordinate_space("screen"), Some("screen"));
+        assert_eq!(normalized_mouse_coordinate_space("window"), Some("window"));
+        assert_eq!(normalized_mouse_coordinate_space("global"), None);
+
+        assert_eq!(
+            normalized_camera_pose_mode("camera_when_available"),
+            Some("camera_when_available")
+        );
+        assert_eq!(normalized_camera_pose_mode("face"), Some("camera"));
+        assert_eq!(normalized_camera_pose_mode("mouse"), Some("mouse"));
+        assert_eq!(normalized_camera_pose_mode("bad"), None);
+
+        assert_eq!(normalized_mouth_combine_mode("max"), Some("max"));
+        assert_eq!(normalized_mouth_combine_mode("mic"), Some("microphone"));
+        assert_eq!(normalized_mouth_combine_mode("camera"), Some("camera"));
+        assert_eq!(normalized_mouth_combine_mode("average"), None);
+    }
+
+    #[test]
+    fn doctor_input_range_validation_counts_invalid_values() {
+        let target = SelectModelTarget::Development;
+        assert_eq!(
+            check_optional_range(target, "field", Some(0.5), 0.0, 1.0),
+            0
+        );
+        assert_eq!(
+            check_optional_range(target, "field", Some(-0.1), 0.0, 1.0),
+            1
+        );
+        assert_eq!(
+            check_optional_range(target, "field", Some(f64::NAN), 0.0, 1.0),
+            1
         );
     }
 

@@ -545,6 +545,7 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
             collection_behavior: avatar_window_collection_behavior(),
             title: avatar_window_title(app_config),
             excluded_from_windows_menu: avatar_window_excluded_from_windows_menu(app_config),
+            sharing_read_only: avatar_window_sharing_read_only(app_config),
         })?;
 
     println!(
@@ -584,6 +585,13 @@ fn avatar_window_title(app_config: &AppRuntimeConfig) -> &'static str {
 
 fn avatar_window_excluded_from_windows_menu(app_config: &AppRuntimeConfig) -> bool {
     !matches!(
+        WindowModePreset::from_config(app_config),
+        WindowModePreset::ObsCapture
+    )
+}
+
+fn avatar_window_sharing_read_only(app_config: &AppRuntimeConfig) -> bool {
+    matches!(
         WindowModePreset::from_config(app_config),
         WindowModePreset::ObsCapture
     )
@@ -3082,14 +3090,14 @@ mod tests {
         RendererQualityPreset, WindowModePreset, WindowSizePreset, app_activation_policy,
         avatar_frame_for_bounds, avatar_window_collection_behavior,
         avatar_window_excluded_from_windows_menu, avatar_window_level_key,
-        avatar_window_level_name, avatar_window_origin, avatar_window_size,
-        avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
-        finder_open_command_args, finder_reveal_command_args, is_model3_path, model_menu_title,
-        model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
-        relaunch_command_args, runtime_camera_config, runtime_microphone_config,
-        runtime_mouse_config, selected_expression_index, set_toml_section_value,
-        set_toml_section_values, toml_string_literal, valid_window_coordinate,
-        window_occlusion_visible,
+        avatar_window_level_name, avatar_window_origin, avatar_window_sharing_read_only,
+        avatar_window_size, avatar_window_style_mask, avatar_window_title, camera_debug_summary,
+        camera_runtime_active, finder_open_command_args, finder_reveal_command_args,
+        is_model3_path, model_menu_title, model_paths_match, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
+        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
+        selected_expression_index, set_toml_section_value, set_toml_section_values,
+        toml_string_literal, valid_window_coordinate, window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
@@ -3229,6 +3237,8 @@ mod tests {
         assert_eq!(avatar_window_title(&obs), "vtube-studio-rs OBS Capture");
         assert!(avatar_window_excluded_from_windows_menu(&desktop));
         assert!(!avatar_window_excluded_from_windows_menu(&obs));
+        assert!(!avatar_window_sharing_read_only(&desktop));
+        assert!(avatar_window_sharing_read_only(&obs));
     }
 
     #[test]

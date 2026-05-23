@@ -215,7 +215,9 @@ If startup cannot find the selected `.model3.json`, the app prints the active
 profile config path and the matching `list-models` / `select-model` command to
 repair it before opening the avatar window.
 Run `cargo xtask doctor` to check dev/build config files, selected model
-manifests, and local Cubism Core SDK paths before launching.
+manifests, window mode/size settings, OBS capture coordinates, renderer, motion,
+mouse, microphone, camera input settings, and local Cubism Core SDK paths before
+launching.
 
 The running app installs a first-pass macOS status bar item named `VT` near the
 right side of the menu bar. Its menu shows the active model, expression count,
@@ -233,11 +235,13 @@ that write `[app].window_width` / `[app].window_height` and relaunch with 100%,
 relaunch between desktop overlay and OBS capture mode. OBS capture mode keeps
 the avatar window rendered but places it offscreen, switches the app to regular
 macOS application policy, and exposes a stable `vtube-studio-rs OBS Capture`
-window title so OBS can enumerate it for Application/Window Capture without
-showing the model on the desktop. Renderer Quality presets write `[renderer]`
-quality fields and relaunch with Performance, Balanced, or High Quality
-settings. The menu also includes Soft/Normal/Expressive mouse, mouth, and camera
-calibration presets for quick runtime tuning before committing values to TOML.
+window title. The window is explicitly marked shareable/read-only for capture so
+OBS and ScreenCaptureKit-style recorders have a better chance to enumerate it
+for Application/Window Capture without showing the model on the desktop.
+Renderer Quality presets write `[renderer]` quality fields and relaunch with
+Performance, Balanced, or High Quality settings. The menu also includes
+Soft/Normal/Expressive mouse, mouth, and camera calibration presets for quick
+runtime tuning before committing values to TOML.
 `Open Camera Privacy...` and `Open Microphone Privacy...` jump to the matching
 macOS privacy panes for permission repair. `Open Active Config...` opens the
 dev/build TOML file that will be used on the next launch. In-process hot model

@@ -17,7 +17,7 @@ use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
     NSEventMask, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSVariableStatusItemLength, NSView,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
@@ -65,6 +65,7 @@ pub struct PanelStyle {
     pub collection_behavior: u64,
     pub title: &'static str,
     pub excluded_from_windows_menu: bool,
+    pub sharing_read_only: bool,
 }
 
 #[cfg(feature = "camera-tracking")]
@@ -139,6 +140,7 @@ pub unsafe fn create_transparent_panel(style: PanelStyle) -> Result<*mut c_void,
         style.collection_behavior,
         style.title,
         style.excluded_from_windows_menu,
+        style.sharing_read_only,
     );
     Ok(ObjcRetained::into_raw(panel).cast())
 }
@@ -536,9 +538,13 @@ fn configure_transparent_panel(
     collection_behavior: u64,
     title: &str,
     excluded_from_windows_menu: bool,
+    sharing_read_only: bool,
 ) {
     panel.setOpaque(false);
     panel.setTitle(&NSString::from_str(title));
+    if sharing_read_only {
+        panel.setSharingType(NSWindowSharingType::ReadOnly);
+    }
     panel.setMovableByWindowBackground(true);
     unsafe {
         panel.setReleasedWhenClosed(false);
