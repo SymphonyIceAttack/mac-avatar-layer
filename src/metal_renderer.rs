@@ -1,6 +1,6 @@
 #![cfg(feature = "metal-renderer")]
 
-use crate::config::{RendererConfig, RuntimeProfile};
+use crate::config::{OutputConfig, RendererConfig, RuntimeProfile};
 use crate::cubism::{
     CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismModelRuntime,
     CubismOffscreenInfo, CubismPartInfo,
@@ -8,7 +8,7 @@ use crate::cubism::{
 use crate::live2d_model::Live2dModel;
 use core_graphics_types::geometry::CGSize;
 use image::RgbaImage;
-use metal::foreign_types::ForeignType;
+use metal::foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
     Buffer, CommandBufferRef, CommandQueue, CompileOptions, Device, Library, MTLBlendFactor,
     MTLBlendOperation, MTLClearColor, MTLCullMode, MTLIndexType, MTLLoadAction, MTLOrigin,
@@ -19,6 +19,8 @@ use metal::{
     SamplerState, Texture, TextureDescriptor,
 };
 use std::cell::Cell;
+#[cfg(feature = "syphon-output")]
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
@@ -390,6 +392,10 @@ pub struct MetalRenderer {
     offscreen_texture_size: [u64; 2],
     blend_snapshot_texture: Option<Texture>,
     blend_snapshot_texture_size: [u64; 2],
+    final_output_texture: Option<Texture>,
+    final_output_texture_size: [u64; 2],
+    #[cfg(feature = "syphon-output")]
+    syphon_output: RefCell<Option<crate::syphon_output::SyphonOutput>>,
     quad_vertex_buffer: Buffer,
     quad_index_buffer: Buffer,
     drawable_buffers: Vec<DrawableGpuBuffers>,
@@ -418,6 +424,7 @@ impl MetalRenderer {
     pub fn load(
         model: &Live2dModel,
         config: &RendererConfig,
+        output: &OutputConfig,
         runtime_profile: RuntimeProfile,
     ) -> Result<Self, String> {
         let device = Device::system_default()
@@ -476,6 +483,28 @@ impl MetalRenderer {
         layer.set_contents_scale(DEFAULT_CONTENTS_SCALE);
         layer.set_drawable_size(CGSize::new(512.0, 512.0));
 
+        #[cfg(feature = "syphon-output")]
+        let syphon_output = if output.is_syphon() {
+            let name = if output.syphon_name.trim().is_empty() {
+                "VTubeStudioRS"
+            } else {
+                output.syphon_name.trim()
+            };
+            let output =
+                unsafe { crate::syphon_output::SyphonOutput::new(device.as_ptr().cast(), name) }?;
+            println!("renderer_event=syphon_output_started name=\"{name}\"");
+            Some(output)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "syphon-output"))]
+        if output.is_syphon() {
+            return Err(
+                "output.mode = \"syphon\" requires --features syphon-output and Syphon.framework"
+                    .to_string(),
+            );
+        }
+
         let mut renderer = Self {
             device,
             command_queue,
@@ -500,6 +529,10 @@ impl MetalRenderer {
             offscreen_texture_size: [0, 0],
             blend_snapshot_texture: None,
             blend_snapshot_texture_size: [0, 0],
+            final_output_texture: None,
+            final_output_texture_size: [0, 0],
+            #[cfg(feature = "syphon-output")]
+            syphon_output: RefCell::new(syphon_output),
             quad_vertex_buffer,
             quad_index_buffer,
             drawable_buffers: Vec::new(),
@@ -646,6 +679,18 @@ impl MetalRenderer {
             }
             self.ensure_msaa_texture();
             self.log_memory_budget("render_resources");
+            if self.uses_syphon_output() {
+                self.render_syphon_frame(
+                    draw_items,
+                    offscreen_items,
+                    runtime.parts(),
+                    transform,
+                    mask_contexts,
+                    mask_lookup,
+                    use_high_precision_masks,
+                )?;
+                return Ok(());
+            }
             let Some(drawable) = self.layer.next_drawable() else {
                 self.log_next_drawable_unavailable();
                 return Ok(());
@@ -792,6 +837,19 @@ impl MetalRenderer {
             command_buffer.present_drawable(drawable);
             command_buffer.commit();
         } else {
+            if self.uses_syphon_output() {
+                self.ensure_final_output_texture();
+                let command_buffer = self.command_queue.new_command_buffer();
+                let Some(final_texture) = self.final_output_texture.take() else {
+                    return Err("Syphon final output texture was not allocated".to_string());
+                };
+                clear_render_target(command_buffer, &final_texture)?;
+                let texture_ptr = final_texture.as_ptr().cast();
+                self.publish_syphon_frame_raw(command_buffer.as_ptr().cast(), texture_ptr)?;
+                command_buffer.commit();
+                self.final_output_texture = Some(final_texture);
+                return Ok(());
+            }
             let Some(drawable) = self.layer.next_drawable() else {
                 self.log_next_drawable_unavailable();
                 return Ok(());
@@ -812,6 +870,172 @@ impl MetalRenderer {
             command_buffer.present_drawable(drawable);
             command_buffer.commit();
         }
+        Ok(())
+    }
+
+    fn uses_syphon_output(&self) -> bool {
+        #[cfg(feature = "syphon-output")]
+        {
+            self.syphon_output.borrow().is_some()
+        }
+        #[cfg(not(feature = "syphon-output"))]
+        {
+            false
+        }
+    }
+
+    fn render_syphon_frame(
+        &mut self,
+        draw_items: Vec<DrawItem>,
+        offscreen_items: Vec<OffscreenItem>,
+        parts: Vec<CubismPartInfo>,
+        transform: FitTransform,
+        mask_contexts: Vec<MaskContext>,
+        mask_lookup: HashMap<Vec<i32>, usize>,
+        use_high_precision_masks: bool,
+    ) -> Result<(), String> {
+        self.ensure_final_output_texture();
+        let Some(final_texture) = self.final_output_texture.take() else {
+            return Err("Syphon final output texture was not allocated".to_string());
+        };
+        let final_texture_ptr = final_texture.as_ptr().cast();
+        let command_buffer = self.command_queue.new_command_buffer();
+        let vertex_buffer = self
+            .vertex_ring
+            .current_buffer()
+            .ok_or_else(|| "Metal vertex ring did not allocate an active buffer".to_string())?;
+        if !mask_contexts.is_empty() && !use_high_precision_masks {
+            let mask_layout =
+                MaskAtlasLayout::for_mask_count(mask_contexts.len(), self.mask_tile_size);
+            render_mask_atlases(
+                command_buffer,
+                &self.mask_pipeline_state,
+                &self.mask_atlas_textures,
+                &mask_layout,
+                &draw_items,
+                &self.drawable_buffers,
+                &self.textures,
+                &self.atlas_sampler,
+                vertex_buffer,
+                &mask_contexts,
+            )?;
+        }
+        if use_high_precision_masks {
+            self.render_high_precision_drawables(
+                command_buffer,
+                &final_texture,
+                &draw_items,
+                &self.drawable_buffers,
+                vertex_buffer,
+                &mask_contexts,
+                &mask_lookup,
+            )?;
+            self.publish_syphon_frame_raw(command_buffer.as_ptr().cast(), final_texture_ptr)?;
+            command_buffer.commit();
+            self.final_output_texture = Some(final_texture);
+            return Ok(());
+        }
+        if !offscreen_items.is_empty() {
+            self.render_with_offscreens(
+                command_buffer,
+                &final_texture,
+                &draw_items,
+                &offscreen_items,
+                &parts,
+                vertex_buffer,
+                transform,
+                &mask_contexts,
+                &mask_lookup,
+            )?;
+            self.publish_syphon_frame_raw(command_buffer.as_ptr().cast(), final_texture_ptr)?;
+            command_buffer.commit();
+            self.final_output_texture = Some(final_texture);
+            return Ok(());
+        }
+
+        let render_pass_descriptor = RenderPassDescriptor::new();
+        let color_attachment = render_pass_descriptor
+            .color_attachments()
+            .object_at(0)
+            .ok_or_else(|| "Metal render pass has no color attachment".to_string())?;
+        if self.sample_count > 1 {
+            color_attachment
+                .set_texture(self.msaa_color_texture.as_ref().map(|texture| &**texture));
+            color_attachment.set_resolve_texture(Some(&final_texture));
+            color_attachment.set_store_action(MTLStoreAction::MultisampleResolve);
+        } else {
+            color_attachment.set_texture(Some(&final_texture));
+            color_attachment.set_store_action(MTLStoreAction::Store);
+        }
+        color_attachment.set_load_action(MTLLoadAction::Clear);
+        color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 0.0));
+
+        let encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
+        encoder.set_cull_mode(MTLCullMode::None);
+        encoder.set_fragment_sampler_state(0, Some(&self.atlas_sampler));
+        encoder.set_fragment_sampler_state(1, Some(&self.mask_sampler));
+        let mut state_cache = MainPassStateCache::default();
+
+        for item in draw_items {
+            if !item.drawable.flags.visible || item.drawable.opacity <= 0.0 {
+                continue;
+            }
+            let Some(texture) = self
+                .textures
+                .get(item.drawable.texture_index.max(0) as usize)
+            else {
+                continue;
+            };
+            let Some(buffers) = self.drawable_buffers.get(item.drawable.index) else {
+                continue;
+            };
+            if !buffers.is_ready() {
+                continue;
+            }
+            let mask_index = mask_lookup.get(&item.drawable.masks).copied();
+            let mask_texture = mask_index
+                .and_then(|index| {
+                    mask_contexts
+                        .get(index)
+                        .and_then(|context| self.mask_atlas_textures.get(context.buffer_index))
+                })
+                .unwrap_or(&self.white_mask_texture);
+            let mask_context = mask_index.and_then(|index| mask_contexts.get(index));
+            let fragment_params = drawable_fragment_params(
+                &item.drawable,
+                mask_context,
+                self.is_highlighted_drawable(&item.drawable),
+                self.debug_texture_mode,
+            );
+            let cull_mode = drawable_cull_mode(&item.drawable);
+            let front_winding = drawable_front_winding(&item.frame, transform);
+            state_cache.bind_pipeline(
+                encoder,
+                item.drawable.blend_mode,
+                self.pipeline_state(item.drawable.blend_mode),
+            );
+            state_cache.bind_cull_state(encoder, cull_mode, front_winding);
+            encoder.set_vertex_buffer(0, Some(vertex_buffer), buffers.vertex_offset);
+            state_cache.bind_atlas_texture(encoder, texture);
+            state_cache.bind_mask_texture(encoder, mask_texture);
+            encoder.set_fragment_bytes(
+                0,
+                std::mem::size_of::<FragmentParams>() as u64,
+                (&raw const fragment_params).cast(),
+            );
+            encoder.draw_indexed_primitives(
+                MTLPrimitiveType::Triangle,
+                buffers.index_count as u64,
+                MTLIndexType::UInt16,
+                buffers.index_buffer.as_ref().expect("checked by is_ready"),
+                0,
+            );
+        }
+
+        encoder.end_encoding();
+        self.publish_syphon_frame_raw(command_buffer.as_ptr().cast(), final_texture_ptr)?;
+        command_buffer.commit();
+        self.final_output_texture = Some(final_texture);
         Ok(())
     }
 
@@ -1095,6 +1319,56 @@ impl MetalRenderer {
                 );
             }
         }
+    }
+
+    fn ensure_final_output_texture(&mut self) {
+        let [width, height] = self.physical_drawable_size;
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.final_output_texture_size != [width, height] {
+            if self.log_events {
+                println!(
+                    "renderer_event=final_output_texture_size_changed old={}x{} new={}x{}",
+                    self.final_output_texture_size[0],
+                    self.final_output_texture_size[1],
+                    width,
+                    height
+                );
+            }
+            self.final_output_texture = None;
+            self.final_output_texture_size = [width, height];
+        }
+        if self.final_output_texture.is_none() {
+            self.final_output_texture =
+                Some(create_final_output_texture(&self.device, width, height));
+            if self.log_events {
+                println!(
+                    "renderer_event=final_output_texture_created width={} height={}",
+                    width, height
+                );
+            }
+        }
+    }
+
+    fn publish_syphon_frame_raw(
+        &self,
+        command_buffer: *mut c_void,
+        texture: *mut c_void,
+    ) -> Result<(), String> {
+        #[cfg(feature = "syphon-output")]
+        if let Some(output) = &mut *self.syphon_output.borrow_mut() {
+            unsafe {
+                output.publish(
+                    texture,
+                    command_buffer,
+                    self.physical_drawable_size[0],
+                    self.physical_drawable_size[1],
+                )?;
+            }
+        }
+        #[cfg(not(feature = "syphon-output"))]
+        let _ = (command_buffer, texture);
+        Ok(())
     }
 
     fn memory_budget_snapshot(&self) -> MemoryBudgetSnapshot {
@@ -2445,6 +2719,17 @@ fn create_offscreen_texture(device: &Device, width: u64, height: u64) -> Texture
     device.new_texture(&descriptor)
 }
 
+fn create_final_output_texture(device: &Device, width: u64, height: u64) -> Texture {
+    let descriptor = TextureDescriptor::new();
+    descriptor.set_texture_type(MTLTextureType::D2);
+    descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+    descriptor.set_width(width.max(1));
+    descriptor.set_height(height.max(1));
+    descriptor.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+    descriptor.set_resource_options(MTLResourceOptions::StorageModePrivate);
+    device.new_texture(&descriptor)
+}
+
 fn create_blend_snapshot_texture(device: &Device, width: u64, height: u64) -> Texture {
     let descriptor = TextureDescriptor::new();
     descriptor.set_texture_type(MTLTextureType::D2);
@@ -3688,7 +3973,7 @@ mod tests {
     };
     use crate::cubism::CubismPartInfo;
     use crate::{
-        config::{RendererConfig, RuntimeProfile},
+        config::{OutputConfig, RendererConfig, RuntimeProfile},
         cubism,
         live2d_model::Live2dModel,
     };
@@ -3699,7 +3984,8 @@ mod tests {
             Live2dModel::load("public/model/0.model3.json").expect("public model should load");
         let runtime = cubism::load_runtime(&model).expect("Cubism runtime should load");
         let config = RendererConfig::default();
-        let renderer = MetalRenderer::load(&model, &config, RuntimeProfile::Development)
+        let output = OutputConfig::default();
+        let renderer = MetalRenderer::load(&model, &config, &output, RuntimeProfile::Development)
             .expect("Metal renderer should initialize");
         let probe = renderer.render_probe(&runtime);
 
@@ -3718,7 +4004,8 @@ mod tests {
         let model =
             Live2dModel::load("public/model/0.model3.json").expect("public model should load");
         let config = RendererConfig::default();
-        let renderer = MetalRenderer::load(&model, &config, RuntimeProfile::Release)
+        let output = OutputConfig::default();
+        let renderer = MetalRenderer::load(&model, &config, &output, RuntimeProfile::Release)
             .expect("Metal renderer should initialize");
 
         assert_eq!(renderer.sample_count, 1);

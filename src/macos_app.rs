@@ -176,8 +176,12 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             .with_offscreen_count(cubism_runtime.info().offscreen_count);
         #[cfg(feature = "metal-renderer")]
         let mut metal_renderer = {
-            let mut renderer =
-                MetalRenderer::load(&model, &config.renderer, config.app.runtime_profile)?;
+            let mut renderer = MetalRenderer::load(
+                &model,
+                &config.renderer,
+                &config.output,
+                config.app.runtime_profile,
+            )?;
             let probe = renderer.render_probe(&cubism_runtime);
             renderer_diagnostics.apply_metal_probe(&probe);
             println!(

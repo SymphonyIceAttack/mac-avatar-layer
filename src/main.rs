@@ -24,6 +24,8 @@ mod motion;
     not(feature = "metal-renderer")
 ))]
 mod software_renderer;
+#[cfg(all(target_os = "macos", feature = "syphon-output"))]
+mod syphon_output;
 
 #[cfg(target_os = "macos")]
 fn main() {

@@ -32,6 +32,12 @@ only_parts = []
 highlight_drawables = []
 highlight_parts = []
 
+[output]
+# window keeps the normal CAMetalLayer avatar window. syphon publishes a
+# standard Syphon Metal server named below.
+mode = "window"
+syphon_name = "VTubeStudioRS"
+
 [motion]
 # expression = "smile"
 blink_interval = 3.8

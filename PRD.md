@@ -790,6 +790,13 @@ Status: next product milestone.
   desktop so OBS or ScreenCaptureKit-style Application/Window Capture can target
   it without showing the avatar on the desktop. This is a first-pass capture
   workflow, not a hidden/minimized-window guarantee.
+- Done: add first-pass standard Syphon Producer plumbing. `syphon-output` is an
+  optional feature that links a local `Syphon.framework`, `[output].mode =
+  "syphon"` renders to an offscreen BGRA Metal final texture, and `cargo xtask
+  run-syphon` launches with a generated `target/syphon-output` config that moves
+  the helper window offscreen while publishing the `VTubeStudioRS` server for
+  OBS, TouchDesigner, Resolume, and other Syphon clients. This is the preferred
+  long-term capture route over app-specific OBS adaptation.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process

@@ -113,6 +113,9 @@ available:
   `screencapture`.
 - Stale renderer process cleanup is implemented in Rust, so run/capture
   commands no longer require `pkill`.
+- Syphon output is optional. To build or run it, install the local framework
+  with `cargo xtask install-syphon`, or set
+  `SYPHON_FRAMEWORK_DIR=/path/to/Syphon.framework` if you manage it yourself.
 
 Install missing macOS tools with:
 
@@ -139,6 +142,7 @@ cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
 cargo xtask doctor
+cargo xtask install-syphon
 cargo xtask list-models
 cargo xtask mao-mask-audit
 cargo xtask probe-risk-models public/model
@@ -148,6 +152,9 @@ cargo xtask ren-offscreen-audit
 cargo xtask render-regression-report
 cargo xtask rice-stress-audit
 cargo xtask run-metal
+cargo xtask run-metal --release
+cargo xtask run-syphon
+cargo xtask run-syphon --release
 cargo xtask run-space-test
 cargo xtask sample-compatibility-sweep
 cargo xtask select-model --dev public/model/0.model3.json
@@ -190,6 +197,26 @@ active TOML decides whether the camera opens through `[input.camera].enabled`.
 The local build config enables camera input by default, so `cargo xtask
 run-metal --release` is the optimized camera-capable run path. App stdout/stderr
 are written under `target/camera-test/run-metal-*.log`.
+
+To publish a standard Syphon Producer instead of relying on screen/window
+capture, install `Syphon.framework` locally and run:
+
+```bash
+cargo xtask install-syphon
+cargo xtask run-syphon
+```
+
+`install-syphon` downloads the macOS universal2 package used by
+`syphon-python`, extracts its bundled `Syphon.framework`, verifies
+`SyphonMetalServer.h`, thins the framework binary to arm64 for Apple Silicon,
+and installs it to `public/Syphon.framework`. `public/` is a local asset
+directory and is not committed to Git. `run-syphon` then generates a temporary
+`target/syphon-output/*.toml` profile with
+`[output].mode = "syphon"`, moves the helper window offscreen, and publishes a
+server named `VTubeStudioRS`.
+OBS, TouchDesigner, Resolume, and other Syphon clients should discover that
+server through their Syphon source/client UI. The normal window output remains
+the default when `[output].mode = "window"`.
 
 Pass a different model path as an argument to override local config for that
 run:
