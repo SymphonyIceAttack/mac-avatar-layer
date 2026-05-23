@@ -32,4 +32,5 @@ fn main() {
 
     println!("cargo:rustc-link-search=framework={}", parent.display());
     println!("cargo:rustc-link-lib=framework=Syphon");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", parent.display());
 }

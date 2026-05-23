@@ -244,8 +244,11 @@ profile config path and the matching `list-models` / `select-model` command to
 repair it before opening the avatar window.
 Run `cargo xtask doctor` to check dev/build config files, selected model
 manifests, window mode/size settings, OBS capture coordinates, renderer, motion,
-mouse, microphone, camera input settings, and local Cubism Core SDK paths before
-launching.
+mouse, microphone, camera input settings, output mode, and local Cubism Core SDK
+paths before launching. When either profile sets `[output].mode = "syphon"`,
+doctor also checks `public/Syphon.framework` or `SYPHON_FRAMEWORK_DIR` for the
+Syphon binary, `SyphonMetalServer.h`, `default.metallib`, and an arm64-capable
+framework binary.
 
 The running app installs a first-pass macOS status bar item named `VT` near the
 right side of the menu bar. Its menu shows the active model, expression count,

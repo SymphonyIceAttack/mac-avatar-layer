@@ -2,7 +2,6 @@
 
 use core::ffi::c_void;
 use std::ffi::{CStr, CString};
-#[cfg(not(feature = "metal-renderer"))]
 use std::path::Path;
 
 #[cfg(not(feature = "metal-renderer"))]
@@ -17,13 +16,13 @@ use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
     NSEventMask, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSVariableStatusItemLength, NSView,
-    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
+    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
 #[cfg(feature = "camera-tracking")]
 use objc2_foundation::NSError;
-use objc2_foundation::{NSDate, NSRunLoopMode, NSString};
+use objc2_foundation::{NSArray, NSDate, NSRunLoopMode, NSString, NSURL};
 #[cfg(not(feature = "metal-renderer"))]
 use objc2_quartz_core::kCAGravityResizeAspectFill;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
@@ -415,11 +414,43 @@ pub unsafe fn install_status_bar_item(
     Ok(ObjcRetained::into_raw(status_item).cast())
 }
 
+pub fn open_workspace_url(url: &str) -> Result<(), String> {
+    let workspace_url = NSURL::URLWithString(&NSString::from_str(url))
+        .ok_or_else(|| format!("Invalid macOS workspace URL: {url}"))?;
+    open_workspace_url_object(&workspace_url, url)
+}
+
+pub fn reveal_path_in_workspace(path: &Path) -> Result<(), String> {
+    let url = NSURL::from_file_path(path)
+        .ok_or_else(|| format!("Failed to create Finder file URL for {}", path.display()))?;
+    let urls = NSArray::from_slice(&[&*url]);
+    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
+    Ok(())
+}
+
+pub fn open_path_in_workspace(path: &Path, is_directory: bool) -> Result<(), String> {
+    let url = if is_directory {
+        NSURL::from_directory_path(path)
+    } else {
+        NSURL::from_file_path(path)
+    }
+    .ok_or_else(|| format!("Failed to create Finder URL for {}", path.display()))?;
+    open_workspace_url_object(&url, path.display())
+}
+
 #[cfg(feature = "camera-tracking")]
 pub fn local_only_camera_message(detail: &str) -> String {
     format!(
         "{detail}\nCamera tracking is local-only: frames are not stored, written to disk, or logged."
     )
+}
+
+fn open_workspace_url_object(url: &NSURL, label: impl std::fmt::Display) -> Result<(), String> {
+    if NSWorkspace::sharedWorkspace().openURL(url) {
+        Ok(())
+    } else {
+        Err(format!("macOS NSWorkspace refused to open {label}"))
+    }
 }
 
 unsafe fn borrowed_menu_item<'a>(item: *mut c_void) -> &'a NSMenuItem {

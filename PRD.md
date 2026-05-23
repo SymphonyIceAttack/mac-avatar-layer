@@ -571,6 +571,10 @@ Migration order:
    `updateWindows`, `NSApplication::isActive`, `NSWindow::isVisible`,
    `NSWindow::occlusionState`, and `orderFrontRegardless`, preserving the
    existing Space reassertion behavior and reliability diagnostics.
+8. Done: migrate Finder/System Settings launch helpers from `/usr/bin/open`
+   process spawning to typed `NSWorkspace` wrappers. Privacy pane links,
+   active-model reveal, and local models folder opening now live in the
+   platform layer through `objc2-app-kit` plus `objc2-foundation` URL helpers.
 
 Acceptance criteria:
 
@@ -827,6 +831,11 @@ Status: next product milestone.
 - Done: extend `cargo xtask doctor` to validate common `[renderer]` and
   `[motion]` mistakes, including `debug_texture_mode`, atlas anisotropy, blink
   interval/duration, and empty expression overrides.
+- Done: extend `cargo xtask doctor` to validate `[output].mode` and
+  `[output].syphon_name`, and to check the local `Syphon.framework` only when a
+  dev/build profile requests Syphon output. This keeps the default window mode
+  free of Syphon setup requirements while catching missing headers, metallib, or
+  non-arm64 framework binaries before a Syphon run.
 - Continue packaging/signing/launch-at-login decisions; launch-at-login remains
   intentionally unimplemented until the app bundle/install location is settled.
 - Start the objc2 AppKit/Foundation migration phase from section 3a before

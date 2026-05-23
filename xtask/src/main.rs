@@ -388,8 +388,12 @@ fn doctor(args: Vec<String>) -> Result<()> {
     println!();
 
     let mut issues = 0usize;
-    issues += check_local_config(&root, SelectModelTarget::Development)?;
-    issues += check_local_config(&root, SelectModelTarget::Build)?;
+    let development_check = check_local_config(&root, SelectModelTarget::Development)?;
+    let build_check = check_local_config(&root, SelectModelTarget::Build)?;
+    issues += development_check.issues + build_check.issues;
+    if development_check.syphon_requested || build_check.syphon_requested {
+        issues += check_syphon_framework(&root);
+    }
     issues += check_cubism_core_sdk(&root);
 
     println!();
@@ -1835,7 +1839,13 @@ fn format_decimal(value: f64) -> String {
         .to_string()
 }
 
-fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
+#[derive(Debug, Default)]
+struct DoctorLocalCheck {
+    issues: usize,
+    syphon_requested: bool,
+}
+
+fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLocalCheck> {
     let config_path = root.join(target.config_path());
     let display_path = relative_display(root, &config_path);
     if !config_path.is_file() {
@@ -1845,7 +1855,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             target.example_config_path(),
             target.config_path()
         );
-        return Ok(1);
+        return Ok(DoctorLocalCheck {
+            issues: 1,
+            syphon_requested: false,
+        });
     }
 
     let content = fs::read_to_string(&config_path)?;
@@ -1858,14 +1871,19 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
                 display_path
             );
             println!("    {error}");
-            return Ok(1);
+            return Ok(DoctorLocalCheck {
+                issues: 1,
+                syphon_requested: false,
+            });
         }
     };
 
     let issues = check_doctor_app_config(target, &config.app)
+        + check_doctor_output_config(target, &config.output)
         + check_doctor_renderer_config(target, &config.renderer)
         + check_doctor_motion_config(target, &config.motion)
         + check_doctor_input_config(target, &config.input);
+    let syphon_requested = doctor_output_mode(&config.output) == Some("syphon");
 
     let Some(model_path) = config.model.path.as_deref() else {
         println!("[!] {} config has no [model].path", target.label());
@@ -1873,7 +1891,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             "    Run: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(issues + 1);
+        return Ok(DoctorLocalCheck {
+            issues: issues + 1,
+            syphon_requested,
+        });
     };
 
     let full_model_path = root.join(model_path);
@@ -1887,7 +1908,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(issues + 1);
+        return Ok(DoctorLocalCheck {
+            issues: issues + 1,
+            syphon_requested,
+        });
     }
     if !full_model_path.is_file() {
         println!(
@@ -1899,7 +1923,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(issues + 1);
+        return Ok(DoctorLocalCheck {
+            issues: issues + 1,
+            syphon_requested,
+        });
     }
 
     match ModelManifestSummary::load(&full_model_path) {
@@ -1915,7 +1942,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
                 yes_no(summary.has_physics),
                 yes_no(summary.has_display_info)
             );
-            Ok(issues)
+            Ok(DoctorLocalCheck {
+                issues,
+                syphon_requested,
+            })
         }
         Err(error) => {
             println!(
@@ -1923,7 +1953,10 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<usize> {
                 target.label()
             );
             println!("    {error}");
-            Ok(issues + 1)
+            Ok(DoctorLocalCheck {
+                issues: issues + 1,
+                syphon_requested,
+            })
         }
     }
 }
@@ -1990,6 +2023,64 @@ fn normalized_window_mode(value: &str) -> Option<&'static str> {
 
 fn valid_doctor_window_dimension(value: f64) -> bool {
     value.is_finite() && (96.0..=2400.0).contains(&value)
+}
+
+fn check_doctor_output_config(target: SelectModelTarget, output: &DoctorOutputConfig) -> usize {
+    let mut issues = 0usize;
+    let mode = doctor_output_mode(output);
+    match mode {
+        Some(mode) => {
+            println!(
+                "[x] {} output config: mode {mode} | syphon {}",
+                target.label(),
+                output
+                    .syphon_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("VTubeStudioRS")
+            );
+            if mode == "syphon"
+                && output
+                    .syphon_name
+                    .as_deref()
+                    .is_some_and(|name| name.trim().is_empty())
+            {
+                println!(
+                    "[!] {} output.syphon_name is empty; runtime will fall back to VTubeStudioRS",
+                    target.label()
+                );
+                issues += 1;
+            }
+        }
+        None => {
+            let configured = output.mode.as_deref().unwrap_or_default();
+            println!(
+                "[!] {} output.mode is invalid: {:?}",
+                target.label(),
+                configured
+            );
+            println!("    Use output.mode = \"window\" or output.mode = \"syphon\"");
+            issues += 1;
+        }
+    }
+    issues
+}
+
+fn doctor_output_mode(output: &DoctorOutputConfig) -> Option<&'static str> {
+    output
+        .mode
+        .as_deref()
+        .map(normalized_output_mode)
+        .unwrap_or(Some("window"))
+}
+
+fn normalized_output_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "window" | "desktop" => Some("window"),
+        "syphon" | "syphon_output" | "syphon-output" => Some("syphon"),
+        _ => None,
+    }
 }
 
 fn check_doctor_renderer_config(
@@ -2426,6 +2517,84 @@ fn check_cubism_core_sdk(root: &Path) -> usize {
     }
 }
 
+fn check_syphon_framework(root: &Path) -> usize {
+    let framework_dir = env::var_os("SYPHON_FRAMEWORK_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("public/Syphon.framework"));
+    let mut issues = 0usize;
+    let binary = framework_dir.join("Syphon");
+    let header = framework_dir.join("Headers/SyphonMetalServer.h");
+    let metallib = framework_dir.join("Resources/default.metallib");
+
+    if !binary.is_file() || !header.is_file() || !metallib.is_file() {
+        println!("[!] Syphon.framework missing or incomplete");
+        println!(
+            "    Expected: {}, {}, {}",
+            relative_display(root, &binary),
+            relative_display(root, &header),
+            relative_display(root, &metallib)
+        );
+        println!("    Run: cargo xtask install-syphon");
+        issues += 1;
+    } else {
+        let arch = syphon_binary_architecture(&binary);
+        match arch.as_deref() {
+            Some("arm64") => {
+                println!(
+                    "[x] Syphon.framework: {} | architecture arm64",
+                    relative_display(root, &framework_dir)
+                );
+            }
+            Some("universal2") => {
+                println!(
+                    "[x] Syphon.framework: {} | architecture universal2",
+                    relative_display(root, &framework_dir)
+                );
+                println!(
+                    "    Optional: cargo xtask install-syphon --force will reinstall arm64-only."
+                );
+            }
+            Some(other) => {
+                println!(
+                    "[!] Syphon.framework architecture is {other}; Apple Silicon runs require arm64"
+                );
+                println!("    Run: cargo xtask install-syphon --force");
+                issues += 1;
+            }
+            None => {
+                println!("[!] Could not inspect Syphon.framework architecture");
+                println!("    Run: cargo xtask install-syphon --force");
+                issues += 1;
+            }
+        }
+    }
+
+    issues
+}
+
+fn syphon_binary_architecture(binary: &Path) -> Option<String> {
+    let output = Command::new("lipo")
+        .arg("-info")
+        .arg(binary)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(normalized_lipo_architecture(&String::from_utf8_lossy(&output.stdout)).to_string())
+}
+
+fn normalized_lipo_architecture(info: &str) -> &'static str {
+    let has_arm64 = info.contains("arm64");
+    let has_x86_64 = info.contains("x86_64");
+    match (has_arm64, has_x86_64) {
+        (true, true) => "universal2",
+        (true, false) => "arm64",
+        (false, true) => "x86_64",
+        (false, false) => "unknown",
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorConfig {
@@ -2433,6 +2602,7 @@ struct DoctorConfig {
     input: DoctorInputConfig,
     model: DoctorModelConfig,
     motion: DoctorMotionConfig,
+    output: DoctorOutputConfig,
     renderer: DoctorRendererConfig,
 }
 
@@ -2459,6 +2629,13 @@ struct DoctorMotionConfig {
     expression: Option<String>,
     blink_interval: Option<f64>,
     blink_duration: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorOutputConfig {
+    mode: Option<String>,
+    syphon_name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7062,6 +7239,85 @@ path = "public/model/0.model3.json"
         assert!(!valid_doctor_window_dimension(95.9));
         assert!(!valid_doctor_window_dimension(2400.1));
         assert!(!valid_doctor_window_dimension(f64::NAN));
+    }
+
+    #[test]
+    fn doctor_output_mode_validation_accepts_runtime_aliases() {
+        assert_eq!(normalized_output_mode(""), Some("window"));
+        assert_eq!(normalized_output_mode("window"), Some("window"));
+        assert_eq!(normalized_output_mode("desktop"), Some("window"));
+        assert_eq!(normalized_output_mode("syphon"), Some("syphon"));
+        assert_eq!(normalized_output_mode("syphon-output"), Some("syphon"));
+        assert_eq!(normalized_output_mode("syphon_output"), Some("syphon"));
+        assert_eq!(normalized_output_mode("hidden"), None);
+    }
+
+    #[test]
+    fn doctor_output_mode_defaults_to_window() {
+        let output = DoctorOutputConfig::default();
+        assert_eq!(doctor_output_mode(&output), Some("window"));
+    }
+
+    #[test]
+    fn doctor_output_config_counts_invalid_and_empty_syphon_name() {
+        let target = SelectModelTarget::Development;
+        assert_eq!(
+            check_doctor_output_config(
+                target,
+                &DoctorOutputConfig {
+                    mode: Some("window".to_string()),
+                    syphon_name: None,
+                },
+            ),
+            0
+        );
+        assert_eq!(
+            check_doctor_output_config(
+                target,
+                &DoctorOutputConfig {
+                    mode: Some("syphon".to_string()),
+                    syphon_name: Some("VTubeStudioRS".to_string()),
+                },
+            ),
+            0
+        );
+        assert_eq!(
+            check_doctor_output_config(
+                target,
+                &DoctorOutputConfig {
+                    mode: Some("syphon".to_string()),
+                    syphon_name: Some("   ".to_string()),
+                },
+            ),
+            1
+        );
+        assert_eq!(
+            check_doctor_output_config(
+                target,
+                &DoctorOutputConfig {
+                    mode: Some("hidden".to_string()),
+                    syphon_name: None,
+                },
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn lipo_architecture_normalization_detects_supported_shapes() {
+        assert_eq!(
+            normalized_lipo_architecture("Architectures in the fat file: Syphon are: x86_64 arm64"),
+            "universal2"
+        );
+        assert_eq!(
+            normalized_lipo_architecture("Non-fat file: Syphon is architecture: arm64"),
+            "arm64"
+        );
+        assert_eq!(
+            normalized_lipo_architecture("Non-fat file: Syphon is architecture: x86_64"),
+            "x86_64"
+        );
+        assert_eq!(normalized_lipo_architecture("not a lipo output"), "unknown");
     }
 
     #[test]

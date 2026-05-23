@@ -2054,7 +2054,7 @@ impl PrivacySettingsPane {
 }
 
 fn open_privacy_settings(pane: PrivacySettingsPane) {
-    if let Err(error) = Command::new("open").arg(pane.url()).spawn() {
+    if let Err(error) = crate::apple_platform::open_workspace_url(pane.url()) {
         eprintln!(
             "Failed to open macOS {} privacy settings: {error}",
             pane.label()
@@ -2063,8 +2063,8 @@ fn open_privacy_settings(pane: PrivacySettingsPane) {
 }
 
 fn reveal_path_in_finder(path: &Path) {
-    let args = finder_reveal_command_args(path);
-    if let Err(error) = Command::new(&args[0]).args(&args[1..]).spawn() {
+    let path = absolute_path_for_compare(&path.to_string_lossy());
+    if let Err(error) = crate::apple_platform::reveal_path_in_workspace(&path) {
         eprintln!("Failed to reveal {} in Finder: {error}", path.display());
     }
 }
@@ -2079,32 +2079,13 @@ fn open_models_folder() {
         return;
     }
 
-    let args = finder_open_command_args(path);
-    if let Err(error) = Command::new(&args[0]).args(&args[1..]).spawn() {
+    let path = absolute_path_for_compare(&path.to_string_lossy());
+    if let Err(error) = crate::apple_platform::open_path_in_workspace(&path, true) {
         eprintln!(
             "Failed to open local models folder {}: {error}",
             path.display()
         );
     }
-}
-
-fn finder_reveal_command_args(path: &Path) -> Vec<String> {
-    vec![
-        "open".to_string(),
-        "-R".to_string(),
-        absolute_path_for_compare(&path.to_string_lossy())
-            .to_string_lossy()
-            .to_string(),
-    ]
-}
-
-fn finder_open_command_args(path: &Path) -> Vec<String> {
-    vec![
-        "open".to_string(),
-        absolute_path_for_compare(&path.to_string_lossy())
-            .to_string_lossy()
-            .to_string(),
-    ]
 }
 
 fn schedule_model_relaunch(model_path: &str) -> Result<(), String> {
@@ -3096,8 +3077,7 @@ mod tests {
         avatar_window_excluded_from_windows_menu, avatar_window_level_key,
         avatar_window_level_name, avatar_window_origin, avatar_window_sharing_read_only,
         avatar_window_size, avatar_window_style_mask, avatar_window_title, camera_debug_summary,
-        camera_runtime_active, finder_open_command_args, finder_reveal_command_args,
-        is_model3_path, model_menu_title, model_paths_match, model_title,
+        camera_runtime_active, is_model3_path, model_menu_title, model_paths_match, model_title,
         mouse_coordinate_space_label, normalized_point_in_rect, relaunch_command_args,
         runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
         selected_expression_index, set_toml_section_value, set_toml_section_values,
@@ -3415,27 +3395,6 @@ mod tests {
             args.last()
                 .is_some_and(|arg| arg.ends_with("public/model/0.model3.json"))
         );
-    }
-
-    #[test]
-    fn finder_reveal_command_selects_active_model_manifest() {
-        let args = finder_reveal_command_args(std::path::Path::new("public/model/0.model3.json"));
-
-        assert_eq!(args[0], "open");
-        assert_eq!(args[1], "-R");
-        assert!(
-            args.last()
-                .is_some_and(|arg| arg.ends_with("public/model/0.model3.json"))
-        );
-    }
-
-    #[test]
-    fn finder_open_command_opens_local_models_folder() {
-        let args = finder_open_command_args(std::path::Path::new("public"));
-
-        assert_eq!(args[0], "open");
-        assert_eq!(args.len(), 2);
-        assert!(args.last().is_some_and(|arg| arg.ends_with("public")));
     }
 
     #[test]
