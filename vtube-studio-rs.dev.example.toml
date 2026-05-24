@@ -3,6 +3,7 @@ runtime_profile = "development"
 window_level = "screen_saver"
 window_width = 540.0
 window_height = 720.0
+window_capture_friendly = false
 
 [output]
 mode = "window"
@@ -11,6 +12,7 @@ mode = "window"
 width = 1080.0
 height = 1080.0
 producer = "none"
+manifest_path = "target/internal-output/iosurface.json"
 
 [model]
 path = "public/model/0.model3.json"

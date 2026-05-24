@@ -144,6 +144,8 @@ cargo xtask capture-offscreen-matrix
 cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
+cargo xtask configure-obs-recording --build
+cargo xtask configure-internal-output --build
 cargo xtask doctor
 cargo xtask list-models
 cargo xtask mao-mask-audit
@@ -160,6 +162,7 @@ cargo xtask sample-compatibility-sweep
 cargo xtask select-model --dev public/model/0.model3.json
 cargo xtask select-model --build public/model/0.model3.json
 cargo xtask tune-input --build camera expressive
+cargo xtask virtual-camera-readiness --build
 ```
 
 The recommended local command is:
@@ -220,19 +223,30 @@ TOML profile and relaunches the app.
 This is not an internal no-desktop recording mode. It still renders a visible
 transparent avatar window so OBS has a normal macOS window to capture. A true
 OBS internal output, where the avatar is not rendered on the desktop at all,
-requires a separate frame producer path such as an offscreen Metal render target
-plus IOSurface/virtual camera/OBS plugin integration.
+requires a project-owned frame output path such as an offscreen Metal render
+target plus IOSurface and a macOS virtual camera output.
 
 The preset writes the build profile to a transparent `screen_saver` level
-window, hides diagnostics, enables MSAA/mipmaps/8x anisotropy, keeps masks on,
-and disables the ScreenCaptureKit probe because it is diagnostic-only and not an
-OBS output path. Use `--dev` instead of `--build` if you want the same preset in
-the development profile.
+window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
+MSAA/mipmaps/8x anisotropy, keeps masks on, and disables the ScreenCaptureKit
+probe because it is diagnostic-only and not an OBS output path. The
+capture-friendly flag gives the avatar window a stable `vtube-studio-rs OBS
+Source` title, exposes it through normal app/window enumeration, and marks the
+window as read-only shareable for WindowServer capture. Use `--dev` instead of
+`--build` if you want the same preset in the development profile.
 
-### Internal Output Probe
+### IOSurface Producer Probe
 
 The first no-desktop output path is available from the `VT` menu:
-`Apply Internal Output Probe...`. It writes:
+`Apply IOSurface Producer Probe...`. The same preset can be written from the
+terminal:
+
+```bash
+cargo xtask configure-internal-output --build
+cargo xtask run-metal --release
+```
+
+It writes:
 
 ```toml
 [output]
@@ -242,6 +256,7 @@ mode = "internal"
 width = 1080.0
 height = 1080.0
 producer = "iosurface"
+manifest_path = "target/internal-output/iosurface.json"
 ```
 
 After relaunch, the app does not create or show the avatar `NSWindow`; the Metal
@@ -249,9 +264,28 @@ renderer renders every frame into an offscreen texture and logs
 `renderer_event=internal_output_frame_summary`. When built with
 `iosurface-output`, the internal preset creates an IOSurface-backed Metal
 texture and logs `renderer_event=iosurface_output_created` with its IOSurface
-id. This is the GPU sharing foundation for a real internal OBS path; a consumer
-still needs to read that IOSurface through a virtual camera, OBS plugin, or
-another dedicated client.
+id. It also writes a small heartbeat manifest to
+`target/internal-output/iosurface.json` with the current IOSurface id, texture
+size, pixel format, frame count, and update timestamp. This is the GPU sharing
+foundation for a future project-owned virtual camera output. The project does
+not plan to ship an OBS plugin; OBS should consume vtube-studio-rs through
+normal Window Capture today, and through a system camera source once virtual
+camera output exists.
+
+Important: this probe is not OBS-capturable by itself. OBS Window Capture and
+macOS Screen Capture need a visible window, and the IOSurface producer is only
+an internal GPU handoff. Use `cargo xtask configure-obs-recording --build` when
+you need OBS capture today.
+
+Before implementing the Camera Extension itself, check the local prerequisites:
+
+```bash
+cargo xtask virtual-camera-readiness --build
+```
+
+The command writes `target/virtual-camera/readiness.md`, checking the active
+profile, internal IOSurface manifest, app wrapper, and codesigning state for the
+future project-owned macOS virtual camera path.
 
 ### ScreenCaptureKit Probe
 

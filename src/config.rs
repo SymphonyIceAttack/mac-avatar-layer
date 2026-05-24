@@ -167,6 +167,7 @@ pub struct AppRuntimeConfig {
     pub window_level: String,
     pub window_width: f64,
     pub window_height: f64,
+    pub window_capture_friendly: bool,
 }
 
 impl Default for AppRuntimeConfig {
@@ -176,6 +177,7 @@ impl Default for AppRuntimeConfig {
             window_level: "screen_saver".to_string(),
             window_width: 360.0,
             window_height: 480.0,
+            window_capture_friendly: false,
         }
     }
 }
@@ -234,6 +236,7 @@ pub struct InternalOutputConfig {
     pub width: f64,
     pub height: f64,
     pub producer: String,
+    pub manifest_path: String,
 }
 
 impl Default for InternalOutputConfig {
@@ -242,6 +245,7 @@ impl Default for InternalOutputConfig {
             width: 1080.0,
             height: 1080.0,
             producer: "none".to_string(),
+            manifest_path: "target/internal-output/iosurface.json".to_string(),
         }
     }
 }
@@ -250,6 +254,11 @@ impl InternalOutputConfig {
     #[allow(dead_code)]
     pub fn producer(&self) -> InternalOutputProducer {
         InternalOutputProducer::from_config(&self.producer)
+    }
+
+    #[allow(dead_code)]
+    pub fn manifest_path(&self) -> &str {
+        self.manifest_path.trim()
     }
 }
 
@@ -564,6 +573,7 @@ runtime_profile = "release"
 window_level = "screen_saver"
 window_width = 540.0
 window_height = 720.0
+window_capture_friendly = true
 
 [diagnostics]
 show = false
@@ -661,6 +671,7 @@ mouth_open = 0.7
         assert_eq!(config.app.window_level, "screen_saver");
         assert_eq!(config.app.window_width, 540.0);
         assert_eq!(config.app.window_height, 720.0);
+        assert!(config.app.window_capture_friendly);
         assert!(!config.diagnostics.show);
         assert_eq!(config.capture.screen_capture_kit.enabled, Some(true));
         assert_eq!(config.capture.screen_capture_kit.target_fps, 12);
@@ -857,6 +868,11 @@ path = "public/model/from-config.model3.json"
         assert_eq!(
             super::InternalOutputProducer::from_config("io_surface"),
             super::InternalOutputProducer::Iosurface
+        );
+        let config = super::InternalOutputConfig::default();
+        assert_eq!(
+            config.manifest_path(),
+            "target/internal-output/iosurface.json"
         );
     }
 

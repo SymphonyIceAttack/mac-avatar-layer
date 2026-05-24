@@ -48,6 +48,7 @@ fn run() -> Result<()> {
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
+        Some("configure-internal-output") => configure_internal_output(args.collect()),
         Some("configure-obs-recording") => configure_obs_recording(args.collect()),
         Some("doctor") => doctor(args.collect()),
         Some("list-models") => list_models(args.collect()),
@@ -63,6 +64,7 @@ fn run() -> Result<()> {
         Some("sample-compatibility-sweep") => sample_compatibility_sweep(args.collect()),
         Some("select-model") => select_model(args.collect()),
         Some("tune-input") => tune_input(args.collect()),
+        Some("virtual-camera-readiness") => virtual_camera_readiness(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -86,6 +88,7 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
+  cargo xtask configure-internal-output [--dev|--build]
   cargo xtask configure-obs-recording [--dev|--build]
   cargo xtask doctor
   cargo xtask list-models [MODEL_OR_DIR ...]
@@ -101,6 +104,7 @@ Usage:
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
   cargo xtask select-model [--dev|--build] MODEL_PATH
   cargo xtask tune-input [--dev|--build] <mouse|mouth|camera> <soft|normal|expressive>
+  cargo xtask virtual-camera-readiness [--dev|--build]
 
 Commands:
   build-app          Build and sign the local macOS .app wrapper without launching it.
@@ -120,6 +124,8 @@ Commands:
                      Capture shared/high-precision/no-mask screenshots for Rice.
   configure-obs-recording
                      Write a transparent-window OBS Window Capture preset to dev/build config.
+  configure-internal-output
+                     Write the no-desktop IOSurface producer probe preset; this is not OBS-capturable yet.
   doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
@@ -138,6 +144,8 @@ Commands:
                      Generate target/render-regression/compatibility-sweep.md.
   select-model      Write [model].path in the dev/build local config.
   tune-input        Write persistent mouse, mouth, or camera calibration preset values.
+  virtual-camera-readiness
+                     Write target/virtual-camera/readiness.md for the future in-project macOS virtual camera path.
 "
     );
 }
@@ -1522,6 +1530,10 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
             ("internal.width", "1080.0".to_string()),
             ("internal.height", "1080.0".to_string()),
             ("internal.producer", toml_string_literal("none")),
+            (
+                "internal.manifest_path",
+                toml_string_literal("target/internal-output/iosurface.json"),
+            ),
         ],
     );
     content = set_toml_section_values(
@@ -1532,6 +1544,7 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
             ("window_level", toml_string_literal("screen_saver")),
             ("window_width", "540.0".to_string()),
             ("window_height", "720.0".to_string()),
+            ("window_capture_friendly", "true".to_string()),
         ],
     );
     content = set_toml_section_value(&content, "diagnostics", "show", "false");
@@ -1564,7 +1577,9 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
     println!("Config: {}", relative_display(&root, &config_path));
     println!("Output: transparent desktop window for OBS Window Capture or macOS Screen Capture");
     println!("Note: this is not an internal no-desktop OBS output path.");
-    println!("Window: level screen_saver | size 540x720 | diagnostics off");
+    println!(
+        "Window: level screen_saver | size 540x720 | title `vtube-studio-rs OBS Source` | capture-friendly on | diagnostics off"
+    );
     println!("Renderer: MSAA on | mipmaps on | anisotropy 8 | masks enabled");
     println!("ScreenCaptureKit probe: off (not an OBS output path)");
     println!(
@@ -1573,6 +1588,102 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
             " --release"
         } else {
             ""
+        }
+    );
+    Ok(())
+}
+
+fn configure_internal_output(args: Vec<String>) -> Result<()> {
+    let target = parse_internal_output_args(args)?;
+    let root = project_root()?;
+    let config_path = root.join(target.config_path());
+    let example_config_path = root.join(target.example_config_path());
+    let mut content = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else if example_config_path.is_file() {
+        fs::read_to_string(&example_config_path)?
+    } else {
+        String::new()
+    };
+    content = remove_toml_section(&content, "output");
+
+    let runtime_profile = match target {
+        SelectModelTarget::Development => "development",
+        SelectModelTarget::Build => "release",
+    };
+    content = set_toml_section_values(
+        &content,
+        "output",
+        &[
+            ("mode", toml_string_literal("internal")),
+            ("internal.width", "1080.0".to_string()),
+            ("internal.height", "1080.0".to_string()),
+            ("internal.producer", toml_string_literal("iosurface")),
+            (
+                "internal.manifest_path",
+                toml_string_literal("target/internal-output/iosurface.json"),
+            ),
+        ],
+    );
+    content = set_toml_section_value(
+        &content,
+        "app",
+        "runtime_profile",
+        &toml_string_literal(runtime_profile),
+    );
+    content = set_toml_section_value(&content, "diagnostics", "show", "false");
+    content = set_toml_section_values(
+        &content,
+        "capture.screen_capture_kit",
+        &[
+            ("enabled", "false".to_string()),
+            ("target_fps", "10".to_string()),
+            ("log_interval_seconds", "2.0".to_string()),
+            ("stalled_after_seconds", "2.0".to_string()),
+        ],
+    );
+    fs::write(&config_path, content)?;
+
+    println!("Internal output probe preset updated.");
+    println!("Target: {}", target.label());
+    println!("Config: {}", relative_display(&root, &config_path));
+    println!("Output: no desktop avatar window; Metal renders into IOSurface");
+    println!("Manifest: target/internal-output/iosurface.json");
+    println!(
+        "Note: this is a producer probe, not an OBS-capturable source until Virtual Camera output exists."
+    );
+    println!(
+        "Run with: cargo xtask run-metal{}",
+        if matches!(target, SelectModelTarget::Build) {
+            " --release"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+fn virtual_camera_readiness(args: Vec<String>) -> Result<()> {
+    let target = parse_virtual_camera_readiness_args(args)?;
+    let root = project_root()?;
+    let config_path = root.join(target.config_path());
+    let report_dir = root.join("target/virtual-camera");
+    let report_path = report_dir.join("readiness.md");
+    fs::create_dir_all(&report_dir)?;
+
+    let report = build_virtual_camera_readiness_report(&root, target, &config_path)?;
+    fs::write(&report_path, &report.markdown)?;
+
+    println!("Virtual camera readiness report written.");
+    println!("Target: {}", target.label());
+    println!("Report: {}", relative_display(&root, &report_path));
+    println!("Status: {}", report.status_label());
+    println!(
+        "Next: {}",
+        if report.ready_for_extension_prototype {
+            "start the CoreMediaIO Camera Extension prototype."
+        } else {
+            "run cargo xtask configure-internal-output --build, then run the app once to create the IOSurface manifest."
         }
     );
     Ok(())
@@ -1890,14 +2001,15 @@ fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> 
 
     if issues == 0 {
         println!(
-            "[x] {} window size config: width {} | height {}",
+            "[x] {} window size config: width {} | height {} | capture_friendly {}",
             target.label(),
             app.window_width
                 .map(|value| format!("{value:.1}"))
                 .unwrap_or_else(|| "default".to_string()),
             app.window_height
                 .map(|value| format!("{value:.1}"))
-                .unwrap_or_else(|| "default".to_string())
+                .unwrap_or_else(|| "default".to_string()),
+            on_off(app.window_capture_friendly)
         );
     }
 
@@ -2407,6 +2519,7 @@ struct DoctorConfig {
 struct DoctorAppConfig {
     window_width: Option<f64>,
     window_height: Option<f64>,
+    window_capture_friendly: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2422,6 +2535,207 @@ struct DoctorScreenCaptureKitConfig {
     target_fps: Option<u32>,
     log_interval_seconds: Option<f64>,
     stalled_after_seconds: Option<f64>,
+}
+
+struct VirtualCameraReadinessReport {
+    markdown: String,
+    ready_for_extension_prototype: bool,
+}
+
+impl VirtualCameraReadinessReport {
+    fn status_label(&self) -> &'static str {
+        if self.ready_for_extension_prototype {
+            "ready for extension prototype"
+        } else {
+            "setup incomplete"
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct InternalOutputReadiness {
+    mode: String,
+    producer: String,
+    manifest_path: String,
+    manifest_exists: bool,
+    manifest_frames: Option<u64>,
+    manifest_surface_id: Option<u64>,
+    manifest_size: Option<(u64, u64)>,
+}
+
+fn build_virtual_camera_readiness_report(
+    root: &Path,
+    target: SelectModelTarget,
+    config_path: &Path,
+) -> Result<VirtualCameraReadinessReport> {
+    let output = inspect_internal_output_readiness(root, config_path)?;
+    let platform_ok = env::consts::OS == "macos";
+    let app_bundle_path = root.join("target/dev-app/vtube-studio-rs Dev.app");
+    let app_bundle_exists = app_bundle_path.is_dir();
+    let codesign_identity = camera_codesign_identity();
+    let has_real_codesign_identity = codesign_identity != "-";
+    let internal_ready = output.mode == "internal"
+        && output.producer == "iosurface"
+        && output.manifest_exists
+        && output.manifest_frames.unwrap_or(0) > 0;
+    let ready_for_extension_prototype = platform_ok && internal_ready && has_real_codesign_identity;
+    let manifest_size = output
+        .manifest_size
+        .map(|(width, height)| format!("{width}x{height}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let manifest_frames = output
+        .manifest_frames
+        .map(|frames| frames.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let manifest_surface_id = output
+        .manifest_surface_id
+        .map(|surface_id| surface_id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let config_display = relative_display(root, config_path);
+    let app_bundle_display = relative_display(root, &app_bundle_path);
+    let manifest_full_path = absolute_path(root, &output.manifest_path);
+    let manifest_display = relative_display(root, &manifest_full_path);
+    let status = if ready_for_extension_prototype {
+        "ready for extension prototype"
+    } else {
+        "setup incomplete"
+    };
+    let markdown = format!(
+        "# Virtual Camera Readiness\n\n\
+Generated for `{target_label}` profile.\n\n\
+Status: **{status}**\n\n\
+## Product Boundary\n\n\
+- The project will not ship an OBS-specific plugin.\n\
+- The no-desktop path stays inside vtube-studio-rs as a macOS virtual camera output.\n\
+- OBS, QuickRecord, Zoom, Discord, and similar apps should eventually consume the same system camera source.\n\n\
+## Current Checks\n\n\
+| Check | Status | Detail |\n\
+| --- | --- | --- |\n\
+| macOS host | {platform_status} | `{os}` |\n\
+| Camera API direction | ok | CoreMediaIO Camera Extension, not legacy DAL or OBS plugin |\n\
+| Active config | ok | `{config_display}` |\n\
+| Output mode | {mode_status} | `{mode}` |\n\
+| Internal producer | {producer_status} | `{producer}` |\n\
+| IOSurface manifest | {manifest_status} | `{manifest_display}` |\n\
+| IOSurface id | {surface_status} | `{surface_id}` |\n\
+| Internal frame count | {frames_status} | `{frames}` |\n\
+| Texture size | {size_status} | `{size}` |\n\
+| App wrapper | {bundle_status} | `{bundle}` |\n\
+| Codesign identity | {codesign_status} | `{codesign}` |\n\n\
+## Next Implementation Slice\n\n\
+1. Keep the existing internal IOSurface producer as the frame source.\n\
+2. Add a macOS Camera Extension target owned by this project.\n\
+3. Feed the extension from the IOSurface manifest/producer bridge.\n\
+4. Register one camera named `VTube Studio RS Camera`.\n\
+5. Validate it in QuickRecord first, then OBS as a normal camera source.\n\n\
+## Setup Commands\n\n\
+```bash\n\
+cargo xtask configure-internal-output --{target_flag}\n\
+cargo xtask run-metal{run_release_flag}\n\
+cargo xtask virtual-camera-readiness --{target_flag}\n\
+```\n\n\
+If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple Development or Developer ID Application identity before building a real Camera Extension.\n",
+        target_label = target.label(),
+        status = status,
+        platform_status = readiness_status(platform_ok),
+        os = env::consts::OS,
+        config_display = config_display,
+        mode_status = readiness_status(output.mode == "internal"),
+        mode = output.mode,
+        producer_status = readiness_status(output.producer == "iosurface"),
+        producer = output.producer,
+        manifest_status = readiness_status(output.manifest_exists),
+        manifest_display = manifest_display,
+        surface_status = readiness_status(output.manifest_surface_id.is_some()),
+        surface_id = manifest_surface_id,
+        frames_status = readiness_status(output.manifest_frames.unwrap_or(0) > 0),
+        frames = manifest_frames,
+        size_status = readiness_status(output.manifest_size.is_some()),
+        size = manifest_size,
+        bundle_status = readiness_status(app_bundle_exists),
+        bundle = app_bundle_display,
+        codesign_status = if has_real_codesign_identity {
+            "ok"
+        } else {
+            "warn"
+        },
+        codesign = codesign_identity,
+        target_flag = target.flag_name(),
+        run_release_flag = if matches!(target, SelectModelTarget::Build) {
+            " --release"
+        } else {
+            ""
+        },
+    );
+
+    Ok(VirtualCameraReadinessReport {
+        markdown,
+        ready_for_extension_prototype,
+    })
+}
+
+fn inspect_internal_output_readiness(
+    root: &Path,
+    config_path: &Path,
+) -> Result<InternalOutputReadiness> {
+    let content = fs::read_to_string(config_path).unwrap_or_default();
+    let config: toml::Value =
+        toml::from_str(&content).unwrap_or_else(|_| toml::Value::Table(Default::default()));
+    let output = config.get("output");
+    let internal = output.and_then(|value| value.get("internal"));
+    let mode = output
+        .and_then(|value| value.get("mode"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("window")
+        .trim()
+        .to_ascii_lowercase();
+    let producer = internal
+        .and_then(|value| value.get("producer"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("none")
+        .trim()
+        .to_ascii_lowercase();
+    let manifest_path = internal
+        .and_then(|value| value.get("manifest_path"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("target/internal-output/iosurface.json")
+        .trim()
+        .to_string();
+    let manifest_full_path = absolute_path(root, &manifest_path);
+    let manifest = read_iosurface_manifest_summary(&manifest_full_path);
+
+    Ok(InternalOutputReadiness {
+        mode,
+        producer,
+        manifest_path,
+        manifest_exists: manifest_full_path.is_file(),
+        manifest_frames: manifest.as_ref().and_then(|value| value.frames),
+        manifest_surface_id: manifest.as_ref().and_then(|value| value.surface_id),
+        manifest_size: manifest.and_then(|value| value.size),
+    })
+}
+
+#[derive(Debug)]
+struct IosurfaceManifestSummary {
+    frames: Option<u64>,
+    surface_id: Option<u64>,
+    size: Option<(u64, u64)>,
+}
+
+fn read_iosurface_manifest_summary(path: &Path) -> Option<IosurfaceManifestSummary> {
+    let text = fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let width = json.get("width").and_then(serde_json::Value::as_u64);
+    let height = json.get("height").and_then(serde_json::Value::as_u64);
+    Some(IosurfaceManifestSummary {
+        frames: json.get("frames").and_then(serde_json::Value::as_u64),
+        surface_id: json.get("iosurface_id").and_then(serde_json::Value::as_u64),
+        size: width.zip(height),
+    })
+}
+
+fn readiness_status(ok: bool) -> &'static str {
+    if ok { "ok" } else { "warn" }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2528,6 +2842,24 @@ fn parse_obs_recording_args(args: Vec<String>) -> Result<SelectModelTarget> {
         [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
         [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
         _ => Err("usage: cargo xtask configure-obs-recording [--dev|--build]".into()),
+    }
+}
+
+fn parse_internal_output_args(args: Vec<String>) -> Result<SelectModelTarget> {
+    match args.as_slice() {
+        [] => Ok(SelectModelTarget::Build),
+        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
+        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
+        _ => Err("usage: cargo xtask configure-internal-output [--dev|--build]".into()),
+    }
+}
+
+fn parse_virtual_camera_readiness_args(args: Vec<String>) -> Result<SelectModelTarget> {
+    match args.as_slice() {
+        [] => Ok(SelectModelTarget::Build),
+        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
+        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
+        _ => Err("usage: cargo xtask virtual-camera-readiness [--dev|--build]".into()),
     }
 }
 
@@ -6807,6 +7139,86 @@ atlas_anisotropy = 1
         assert!(matches!(target, SelectModelTarget::Build));
 
         assert!(parse_obs_recording_args(vec!["--release".to_string()]).is_err());
+    }
+
+    #[test]
+    fn internal_output_args_default_to_build_config() {
+        let target = parse_internal_output_args(Vec::new())
+            .expect("default internal output target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        let target = parse_internal_output_args(vec!["--dev".to_string()])
+            .expect("dev internal output target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+
+        let target = parse_internal_output_args(vec!["--build".to_string()])
+            .expect("build internal output target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        assert!(parse_internal_output_args(vec!["--release".to_string()]).is_err());
+    }
+
+    #[test]
+    fn virtual_camera_readiness_args_default_to_build_config() {
+        let target = parse_virtual_camera_readiness_args(Vec::new())
+            .expect("default virtual camera target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        let target = parse_virtual_camera_readiness_args(vec!["--dev".to_string()])
+            .expect("dev virtual camera target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+
+        let target = parse_virtual_camera_readiness_args(vec!["--build".to_string()])
+            .expect("build virtual camera target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        assert!(parse_virtual_camera_readiness_args(vec!["--release".to_string()]).is_err());
+    }
+
+    #[test]
+    fn virtual_camera_readiness_report_reads_iosurface_manifest() {
+        let root = env::temp_dir().join(format!(
+            "vtube-studio-rs-virtual-camera-test-{}",
+            timestamp_for_filename()
+        ));
+        let manifest_path = root.join("target/internal-output/iosurface.json");
+        fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+            .expect("manifest dir should be created");
+        fs::write(
+            &manifest_path,
+            r#"{
+  "iosurface_id": 42,
+  "width": 1080,
+  "height": 1080,
+  "frames": 120
+}"#,
+        )
+        .expect("manifest should be written");
+        let config_path = root.join(BUILD_CONFIG_PATH);
+        fs::write(
+            &config_path,
+            r#"
+[output]
+mode = "internal"
+
+[output.internal]
+producer = "iosurface"
+manifest_path = "target/internal-output/iosurface.json"
+"#,
+        )
+        .expect("config should be written");
+
+        let report =
+            build_virtual_camera_readiness_report(&root, SelectModelTarget::Build, &config_path)
+                .expect("readiness report should build");
+
+        assert!(report.markdown.contains("IOSurface id"));
+        assert!(report.markdown.contains("`42`"));
+        assert!(report.markdown.contains("`120`"));
+        assert!(report.markdown.contains("`1080x1080`"));
+        assert!(report.markdown.contains("OBS-specific plugin"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

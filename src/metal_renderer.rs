@@ -1,6 +1,6 @@
 #![cfg(feature = "metal-renderer")]
 
-use crate::config::{InternalOutputProducer, RendererConfig, RuntimeProfile};
+use crate::config::{InternalOutputConfig, InternalOutputProducer, RendererConfig, RuntimeProfile};
 use crate::cubism::{
     CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismModelRuntime,
     CubismOffscreenInfo, CubismPartInfo,
@@ -838,9 +838,10 @@ impl MetalRenderer {
     pub fn render_internal(
         &mut self,
         runtime: &CubismModelRuntime,
-        producer: InternalOutputProducer,
+        config: &InternalOutputConfig,
     ) -> Result<(), String> {
-        let output_texture = self.internal_output_texture(producer)?;
+        let producer = config.producer();
+        let output_texture = self.internal_output_texture(config)?;
         let mut draw_items = collect_draw_items(runtime);
         draw_items.retain(|item| self.should_render_drawable(&item.drawable));
         let transform = bounds_for(&draw_items).and_then(|bounds| {
@@ -1040,8 +1041,9 @@ impl MetalRenderer {
 
     fn internal_output_texture(
         &mut self,
-        producer: InternalOutputProducer,
+        config: &InternalOutputConfig,
     ) -> Result<Texture, String> {
+        let producer = config.producer();
         let [width, height] = self.physical_drawable_size;
         let width = width.max(1);
         let height = height.max(1);
@@ -1057,6 +1059,7 @@ impl MetalRenderer {
                     &self.device,
                     width,
                     height,
+                    config.manifest_path(),
                 )?);
             }
             let output = self

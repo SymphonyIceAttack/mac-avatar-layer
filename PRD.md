@@ -242,9 +242,9 @@ Priority 4: Modern macOS Output And Capture
   capture research task. Validate Screen Recording permission behavior, window
   selection, transparent-background results, and Space-switch/display-sleep
   behavior.
-- Research IOSurface + Metal texture sharing as a long-term process-to-process
-  GPU sharing foundation only after a real downstream consumer is defined.
-  Bare IOSurface is not a user-visible feature.
+- Use IOSurface + Metal texture sharing as the internal handoff foundation for
+  the future in-project macOS virtual camera output. Bare IOSurface remains a
+  diagnostic/developer artifact, not a user-visible feature.
 
 Priority 5: macOS Productization
 
@@ -263,7 +263,11 @@ Priority 5: macOS Productization
 - Do not migrate the renderer to wgpu in this phase; keep the current native
   Metal renderer unless a separate renderer rewrite is planned.
 - Do not restore Syphon output as a product path.
-- Do not add NDI, a virtual camera, or an OBS plugin in this phase.
+- Do not add NDI or an OBS plugin in this phase.
+- Do not split product output into an OBS-specific plugin. Future no-desktop
+  capture should stay inside this project as a macOS virtual camera or another
+  system-level output that OBS, QuickRecord, and video apps can consume
+  normally.
 - Do not expose bare IOSurface sharing as a user-facing feature before a
   concrete downstream consumer exists.
 
@@ -816,24 +820,38 @@ Status: next product milestone.
   ScreenCaptureKit, Metal, or IOSurface instead of restoring Syphon.
 - Done: add `cargo xtask configure-obs-recording [--dev|--build]` as the
   supported OBS Window Capture preset. It keeps the normal transparent window
-  path, disables diagnostics and the ScreenCaptureKit probe, and enables higher
-  renderer quality settings for Window Capture/macOS Screen Capture.
+  path, sets `[app].window_capture_friendly = true`, disables diagnostics and
+  the ScreenCaptureKit probe, and enables higher renderer quality settings for
+  Window Capture/macOS Screen Capture.
+- Done: when `window_capture_friendly` is enabled, the app uses a regular
+  activation policy, a stable `vtube-studio-rs OBS Source` window title,
+  read-only WindowServer sharing, and includes the window in app/window
+  enumeration so OBS has a visible source to select.
 - Done: expose `VT` menu `Apply Window Capture Preset...`; it writes the same
   preset to the active dev/build TOML and relaunches the app, so users do not
   need a terminal-only workflow for OBS window-capture setup.
 - Done: add first-pass `output.mode = "internal"` and `VT` menu
-  `Apply Internal Output Probe...`. Internal mode does not create the avatar
+  `Apply IOSurface Producer Probe...`. Internal mode does not create the avatar
   `NSWindow`; Metal renders the Live2D frame into an offscreen texture and logs
   frame summaries. This validates the no-desktop render path, but it is not yet
-  a consumer-visible OBS source.
+  a consumer-visible OBS source. OBS cannot capture this mode until the
+  project-owned macOS virtual camera output exists.
 - Done: add `iosurface-output` feature and first-pass
   `output.internal.producer = "iosurface"`. The internal renderer creates an
-  IOSurface-backed Metal texture and logs its IOSurface id, giving later
-  consumers a real GPU-shareable frame handle.
-- Planned: add a consumer-visible bridge on top of IOSurface, such as a virtual
-  camera, OBS plugin, or small companion client. Hiding the current window alone
-  would make normal OBS Window Capture/macOS Screen Capture lose the avatar
-  instead of recording it.
+  IOSurface-backed Metal texture, logs its IOSurface id, and writes
+  `target/internal-output/iosurface.json` as a heartbeat manifest containing
+  the surface id, dimensions, pixel format, frame count, and update timestamp.
+  This gives later consumers a real GPU-shareable frame handoff contract.
+- Planned: add a consumer-visible bridge on top of the IOSurface manifest as a
+  project-owned macOS virtual camera output. Do not implement this as an OBS
+  plugin; OBS should see vtube-studio-rs the same way QuickRecord, Zoom,
+  Discord, and other apps would see it: as a normal system camera source.
+  Hiding the current window alone would make normal OBS Window Capture/macOS
+  Screen Capture lose the avatar instead of recording it.
+- Done: add `cargo xtask virtual-camera-readiness [--dev|--build]`. It writes
+  `target/virtual-camera/readiness.md` and checks the selected profile,
+  internal IOSurface producer config, IOSurface heartbeat manifest, app wrapper,
+  and codesigning identity before the Camera Extension prototype begins.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -876,7 +894,7 @@ Status: next product milestone.
 
 ### Milestone H: Capture And Frame Sharing Research
 
-Status: first ScreenCaptureKit runtime probe in progress.
+Status: ScreenCaptureKit probe and IOSurface handoff diagnostics in progress.
 
 - Keep transparent window output as the supported OBS capture path.
 - Add a ScreenCaptureKit runtime sampling probe for the avatar window. It
@@ -885,10 +903,30 @@ Status: first ScreenCaptureKit runtime probe in progress.
 - Document Screen Recording permission behavior, development/build defaults,
   Space-switch behavior, and display sleep/wake observations from generated
   Space reports.
-- Evaluate IOSurface + Metal texture sharing only as a long-term foundation for
-  a future producer/client or plugin path.
+- Evaluate IOSurface + Metal texture sharing as the foundation for a future
+  in-project macOS virtual camera output. The first producer manifest may be
+  used by a prototype consumer, but it is not itself a user-facing recording
+  mode. OBS plugin work is explicitly out of scope.
+- Use `cargo xtask virtual-camera-readiness` as the standard preflight report
+  before starting the Camera Extension target.
 - Keep wgpu migration out of this milestone; the current renderer remains
   native Metal.
+
+### Milestone I: Project-Owned macOS Virtual Camera
+
+Status: planned; preflight report available.
+
+- Use Apple's modern CoreMediaIO Camera Extension route rather than legacy DAL,
+  Syphon, NDI, or an OBS plugin.
+- Keep the frame producer in the main app: Live2D -> Metal -> IOSurface
+  manifest.
+- Add a project-owned Camera Extension that exposes one system camera named
+  `VTube Studio RS Camera`.
+- Feed extension frames from the internal IOSurface handoff.
+- Validate first in QuickRecord or another simple camera consumer, then in OBS
+  as a normal camera source.
+- Treat signing, extension activation, and install location as first-class
+  productization tasks, not optional developer details.
 
 ## Debug Controls
 

@@ -32,6 +32,7 @@ type CGFloat = c_double;
 
 const NIL: Id = ptr::null_mut();
 
+const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: NSInteger = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
@@ -150,7 +151,11 @@ unsafe extern "C" {
 pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
     unsafe {
         let app = msg_id(class("NSApplication")?, "sharedApplication");
-        msg_void_id(app, "setActivationPolicy:", app_activation_policy());
+        msg_void_id(
+            app,
+            "setActivationPolicy:",
+            app_activation_policy(&config.app),
+        );
         let _activity_token = prevent_app_nap()?;
         let model = Live2dModel::load(model_path)?;
         println!("Loaded {}", model.summary());
@@ -175,10 +180,12 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             (window, create_root_layer(window)?)
         } else {
             println!(
-                "renderer_event=internal_output_configured mode={} window=none width={:.1} height={:.1} producer=none",
+                "renderer_event=internal_output_configured mode={} window=none width={:.1} height={:.1} producer={} manifest_path={}",
                 output_mode.label(),
                 config.output.internal.width,
-                config.output.internal.height
+                config.output.internal.height,
+                config.output.internal.producer().label(),
+                config.output.internal.manifest_path()
             );
             (NIL, NIL)
         };
@@ -355,8 +362,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             if output_mode.uses_window() {
                 metal_renderer.render(&cubism_runtime)?;
             } else {
-                metal_renderer
-                    .render_internal(&cubism_runtime, config.output.internal.producer())?;
+                metal_renderer.render_internal(&cubism_runtime, &config.output.internal)?;
             }
             #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
             {
@@ -614,9 +620,9 @@ unsafe fn create_avatar_window(
             style_mask: avatar_window_style_mask(),
             level: avatar_window_level(app_config),
             collection_behavior: avatar_window_collection_behavior(),
-            title: avatar_window_title(),
-            excluded_from_windows_menu: true,
-            sharing_read_only: false,
+            title: avatar_window_title(app_config),
+            excluded_from_windows_menu: !app_config.window_capture_friendly,
+            sharing_read_only: app_config.window_capture_friendly,
         })?;
 
     println!(
@@ -632,6 +638,12 @@ unsafe fn create_avatar_window(
         avatar_window_style_mask(),
         avatar_window_collection_behavior()
     );
+    if app_config.window_capture_friendly {
+        println!(
+            "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false",
+            avatar_window_title(app_config)
+        );
+    }
 
     Ok(window)
 }
@@ -640,12 +652,20 @@ fn avatar_window_style_mask() -> NSUInteger {
     NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
 }
 
-fn app_activation_policy() -> NSInteger {
-    NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
+    if app_config.window_capture_friendly {
+        NS_APPLICATION_ACTIVATION_POLICY_REGULAR
+    } else {
+        NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+    }
 }
 
-fn avatar_window_title() -> &'static str {
-    "vtube-studio-rs"
+fn avatar_window_title(app_config: &AppRuntimeConfig) -> &'static str {
+    if app_config.window_capture_friendly {
+        "vtube-studio-rs OBS Source"
+    } else {
+        "vtube-studio-rs"
+    }
 }
 
 fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
@@ -1378,12 +1398,15 @@ unsafe fn install_settings_menu(
     )?;
     add_action_menu_item(
         app_menu,
-        "Apply Internal Output Probe...",
+        "Apply IOSurface Producer Probe...",
         "applyInternalOutputPreset:",
         "",
         controller,
     )?;
-    add_disabled_menu_item(app_menu, "Internal: no desktop window, producer pending")?;
+    add_disabled_menu_item(
+        app_menu,
+        "Probe only: not visible to OBS until Virtual Camera exists",
+    )?;
     add_separator_menu_item(app_menu)?;
 
     add_action_menu_item(
@@ -2042,6 +2065,7 @@ fn write_obs_window_capture_preset_to_active_config(
             ("window_level", toml_string_literal("screen_saver")),
             ("window_width", "540.0".to_string()),
             ("window_height", "720.0".to_string()),
+            ("window_capture_friendly", "true".to_string()),
         ],
     );
     updated = set_toml_section_value(&updated, "diagnostics", "show", "false");
@@ -2094,6 +2118,10 @@ fn write_internal_output_preset_to_active_config(
             ("internal.width", "1080.0".to_string()),
             ("internal.height", "1080.0".to_string()),
             ("internal.producer", toml_string_literal("iosurface")),
+            (
+                "internal.manifest_path",
+                toml_string_literal("target/internal-output/iosurface.json"),
+            ),
         ],
     );
     updated = set_toml_section_value(
@@ -3276,7 +3304,8 @@ unsafe fn msg_id_double_double_double_double(
 mod tests {
     use super::{
         EventPump, InputPreset, NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
-        NS_NONACTIVATING_PANEL_MASK, NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
+        NS_APPLICATION_ACTIVATION_POLICY_REGULAR, NS_NONACTIVATING_PANEL_MASK,
+        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
@@ -3385,15 +3414,32 @@ mod tests {
         let desktop_origin = avatar_window_origin();
         assert_eq!(desktop_origin.x, 100.0);
         assert_eq!(desktop_origin.y, 140.0);
-        assert_eq!(avatar_window_title(), "vtube-studio-rs");
+        assert_eq!(
+            avatar_window_title(&AppRuntimeConfig::default()),
+            "vtube-studio-rs"
+        );
+        assert_eq!(
+            avatar_window_title(&AppRuntimeConfig {
+                window_capture_friendly: true,
+                ..AppRuntimeConfig::default()
+            }),
+            "vtube-studio-rs OBS Source"
+        );
         assert_eq!(OutputMode::Window.label(), "window");
     }
 
     #[test]
-    fn app_policy_stays_accessory_for_window_output() {
+    fn app_policy_becomes_regular_for_capture_friendly_window_output() {
         assert_eq!(
-            app_activation_policy(),
+            app_activation_policy(&AppRuntimeConfig::default()),
             NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY
+        );
+        assert_eq!(
+            app_activation_policy(&AppRuntimeConfig {
+                window_capture_friendly: true,
+                ..AppRuntimeConfig::default()
+            }),
+            NS_APPLICATION_ACTIVATION_POLICY_REGULAR
         );
     }
 
