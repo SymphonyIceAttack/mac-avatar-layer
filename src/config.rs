@@ -165,6 +165,8 @@ impl Default for RuntimeProfile {
 pub struct AppRuntimeConfig {
     pub runtime_profile: RuntimeProfile,
     pub window_level: String,
+    pub window_x: Option<f64>,
+    pub window_y: Option<f64>,
     pub window_width: f64,
     pub window_height: f64,
     pub window_capture_friendly: bool,
@@ -175,6 +177,8 @@ impl Default for AppRuntimeConfig {
         Self {
             runtime_profile: RuntimeProfile::default(),
             window_level: "screen_saver".to_string(),
+            window_x: None,
+            window_y: None,
             window_width: 360.0,
             window_height: 480.0,
             window_capture_friendly: false,
@@ -575,6 +579,8 @@ path = "public/model/custom.model3.json"
 [app]
 runtime_profile = "release"
 window_level = "screen_saver"
+window_x = -20000.0
+window_y = 140.0
 window_width = 540.0
 window_height = 720.0
 window_capture_friendly = true
@@ -673,6 +679,8 @@ mouth_open = 0.7
         );
         assert_eq!(config.app.runtime_profile, RuntimeProfile::Release);
         assert_eq!(config.app.window_level, "screen_saver");
+        assert_eq!(config.app.window_x, Some(-20000.0));
+        assert_eq!(config.app.window_y, Some(140.0));
         assert_eq!(config.app.window_width, 540.0);
         assert_eq!(config.app.window_height, 720.0);
         assert!(config.app.window_capture_friendly);

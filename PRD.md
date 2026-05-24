@@ -238,6 +238,14 @@ Priority 4: Modern macOS Output And Capture
 - Treat OBS integration as standard window capture for now: users should use
   OBS Window Capture or macOS Screen Capture against the transparent avatar
   window.
+- Support an offscreen-window OBS preset as the current practical
+  "desktop-hidden but OBS-capturable" path. It keeps a real transparent
+  capture-friendly macOS window alive, moves it outside the visible desktop,
+  and avoids System Extension or Apple Developer Program requirements.
+- Keep the System Camera Source path documented as a blocked prototype unless
+  the developer has access to a paid Apple Developer Program team with
+  provisioning profiles for the container app and Camera Extension. Free Apple
+  IDs can still build and run the transparent-window product path.
 - Prototype ScreenCaptureKit capture of the current avatar window as the next
   capture research task. Validate Screen Recording permission behavior, window
   selection, transparent-background results, and Space-switch/display-sleep
@@ -270,6 +278,8 @@ Priority 5: macOS Productization
   normally.
 - Do not expose bare IOSurface sharing as a user-facing feature before a
   concrete downstream consumer exists.
+- Do not treat the System Camera Source preset as a supported user-facing OBS
+  path while Apple Developer Program provisioning profiles are unavailable.
 
 ## Requirements
 
@@ -823,6 +833,10 @@ Status: next product milestone.
   path, sets `[app].window_capture_friendly = true`, disables diagnostics and
   the ScreenCaptureKit probe, and enables higher renderer quality settings for
   Window Capture/macOS Screen Capture.
+- Done: `cargo xtask configure-obs-recording [--dev|--build] --offscreen`
+  writes the same capture-friendly window path but sets `[app].window_x` to a
+  far negative coordinate, so OBS can still select `vtube-studio-rs OBS Source`
+  while the avatar stays outside the visible desktop.
 - Done: when `window_capture_friendly` is enabled, the app uses a regular
   activation policy, a stable `vtube-studio-rs OBS Source` window title,
   a normal transparent `NSWindow` instead of the desktop-overlay `NSPanel`,
@@ -833,6 +847,9 @@ Status: next product milestone.
   and relaunches the app, so users do not need a terminal-only workflow for OBS
   window-capture setup. The menu marks the active mutually exclusive recording
   output preset with the native macOS menu checkmark.
+- Done: expose `Apply Offscreen Window Capture Preset...`; it is mutually
+  exclusive with desktop window capture and System Camera Source, and uses the
+  same OBS-capturable transparent window moved off desktop.
 - Done: add first-pass `output.mode = "internal"` and `VT` menu
   `OBS / Recording Output -> Apply System Camera Source...`. This is one
   relaunching preset, not two separate switches: it enables the IOSurface
@@ -926,6 +943,8 @@ Status: ScreenCaptureKit probe and IOSurface handoff diagnostics in progress.
 Status: scaffold in progress; preflight, prototype packaging, app embedding,
 first-pass activation request, provider/device/stream contracts, provider
 service startup, and IOSurface-to-sample-buffer publishing are available.
+Productization is blocked for free Apple IDs because CoreMediaIO Camera
+Extension activation requires Apple Developer Program provisioning profiles.
 
 - Use Apple's modern CoreMediaIO Camera Extension route rather than legacy DAL,
   Syphon, NDI, or an OBS plugin.
@@ -944,6 +963,39 @@ service startup, and IOSurface-to-sample-buffer publishing are available.
 - Submit a first-pass activation request from the app menu through
   `OSSystemExtensionManager`; real install remains gated by `/Applications`,
   proper signing, entitlement validation, and macOS user approval.
+- Done: `cargo xtask build-app --release` signs the app and extension with
+  their entitlements and copies the app wrapper to `/Applications` when the
+  System Camera Source preset is active. Readiness now checks the
+  `/Applications` copy, the system-extension install entitlement, embedded
+  provisioning profiles, and `systemextensionsctl` active state instead of only
+  checking that the local bundle exists.
+- Done: xtask embeds provisioning profiles before signing when they exist at
+  `public/provisioning/ContainerApp.provisionprofile` and
+  `public/provisioning/CameraExtension.provisionprofile`, or when
+  `VTUBE_RS_CONTAINER_PROVISION_PROFILE` /
+  `VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE` point to profile files.
+- Done: provisioning profiles are decoded and validated before embedding:
+  bundle id must match the container app or Camera Extension, the shared app
+  group must be present, and the container app profile must include
+  `com.apple.developer.system-extension.install`. Readiness reports distinguish
+  missing profiles from present-but-invalid profiles.
+- Done: `cargo xtask provision-camera-profiles` creates
+  `public/provisioning`, scans Xcode's local provisioning profile cache or a
+  user-provided `--from` directory, validates matching profiles, and copies them
+  into the paths consumed by `build-app`. The default scan covers both the old
+  `~/Library/MobileDevice/Provisioning Profiles` cache, the newer
+  `~/Library/Developer/Xcode/UserData/Provisioning Profiles` cache. Download
+  directories can be passed explicitly with `--from DIR`. Profile issuance still
+  requires Apple Developer Program/Xcode; xtask automates local discovery and
+  setup only.
+- Blocker: OBS will not see `VTube Studio RS Camera` until macOS reports
+  `rs.vtube-studio.dev.CameraExtension` as `[activated enabled]`. A local Apple
+  Development certificate alone can sign the prototype, but a real Camera
+  Extension path still needs Apple Developer Program provisioning profiles that
+  authorize the System Extension entitlement. If the Apple Developer portal
+  says the resource is only for enrolled developers or organization team
+  members, the account cannot create the required profiles and this milestone
+  must remain blocked.
 - Define the Camera Extension provider/device/stream contract in Rust:
   provider name/manufacturer, stable device/stream UUIDs, 1080x1080 60fps
   BGRA stream format, IOSurface manifest input, and start/stop lifecycle state.

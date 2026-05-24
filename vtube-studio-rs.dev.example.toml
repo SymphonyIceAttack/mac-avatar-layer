@@ -1,6 +1,8 @@
 [app]
 runtime_profile = "development"
 window_level = "screen_saver"
+window_x = 100.0
+window_y = 140.0
 window_width = 540.0
 window_height = 720.0
 window_capture_friendly = false

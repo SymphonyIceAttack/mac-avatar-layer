@@ -222,8 +222,13 @@ pub unsafe fn panel_window_number(panel: *mut c_void) -> i64 {
 }
 
 pub unsafe fn order_panel_front_regardless(panel: *mut c_void) {
-    let panel = unsafe { borrowed_panel(panel) };
-    panel.orderFrontRegardless();
+    let window = unsafe { borrowed_window(panel) };
+    window.orderFrontRegardless();
+}
+
+pub unsafe fn set_window_origin(window: *mut c_void, x: f64, y: f64) {
+    let window = unsafe { borrowed_window(window) };
+    window.setFrameOrigin(CGPoint { x, y });
 }
 
 pub fn distant_past_date() -> *mut c_void {

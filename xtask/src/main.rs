@@ -33,8 +33,41 @@ const VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExte
 const VIRTUAL_CAMERA_MACH_SERVICE: &str = "rs.vtube-studio.dev.CameraExtension";
 const VIRTUAL_CAMERA_APP_GROUP: &str = "group.rs.vtube-studio.dev";
 const VIRTUAL_CAMERA_BUNDLE_NAME: &str = "VTube Studio RS Camera.systemextension";
+const DEV_APP_BUNDLE_NAME: &str = "vtube-studio-rs Dev.app";
+const CONTAINER_PROVISION_PROFILE_ENV: &str = "VTUBE_RS_CONTAINER_PROVISION_PROFILE";
+const CAMERA_EXTENSION_PROVISION_PROFILE_ENV: &str = "VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE";
+const DEFAULT_CONTAINER_PROVISION_PROFILE: &str =
+    "public/provisioning/ContainerApp.provisionprofile";
+const DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE: &str =
+    "public/provisioning/CameraExtension.provisionprofile";
 const APPLE_WWDR_G3_URL: &str = "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer";
 const APPLE_WWDR_G3_SHA1: &str = "06EC06599F4ED0027CC58956B4D3AC1255114F35";
+
+#[derive(Debug, Clone, Copy)]
+enum ProvisioningProfileKind {
+    ContainerApp,
+    CameraExtension,
+}
+
+impl ProvisioningProfileKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ContainerApp => "container app",
+            Self::CameraExtension => "Camera Extension",
+        }
+    }
+
+    fn expected_bundle_id(self) -> &'static str {
+        match self {
+            Self::ContainerApp => DEV_CAMERA_BUNDLE_ID,
+            Self::CameraExtension => VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
+        }
+    }
+
+    fn requires_system_extension_install(self) -> bool {
+        matches!(self, Self::ContainerApp)
+    }
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -63,6 +96,7 @@ fn run() -> Result<()> {
         Some("fix-wwdr-cert") => fix_wwdr_cert(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
+        Some("provision-camera-profiles") => provision_camera_profiles(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
         Some("quality-visual-diff") => quality_visual_diff(args.collect()),
         Some("ren-visual-diff") => ren_visual_diff(args.collect()),
@@ -101,11 +135,12 @@ Usage:
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
   cargo xtask configure-internal-output [--dev|--build]
-  cargo xtask configure-obs-recording [--dev|--build]
+  cargo xtask configure-obs-recording [--dev|--build] [--desktop|--offscreen]
   cargo xtask doctor
   cargo xtask fix-wwdr-cert
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
+  cargo xtask provision-camera-profiles [--from DIR] [--force]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
   cargo xtask quality-visual-diff
   cargo xtask ren-visual-diff
@@ -147,6 +182,8 @@ Commands:
   fix-wwdr-cert     Install Apple's current WWDR G3 intermediate and re-check codesigning.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
+  provision-camera-profiles
+                     Copy matching Apple provisioning profiles into public/provisioning.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
   quality-visual-diff
                      Generate target/render-regression/quality-visual-diff.md.
@@ -484,6 +521,214 @@ security find-identity:\n{identity_output}\n\
 security find-identity -v -p codesigning:\n{codesign_output}"
     )
     .into())
+}
+
+#[derive(Debug, Clone)]
+struct ProvisionCameraProfilesOptions {
+    source_dirs: Vec<PathBuf>,
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ObsWindowPlacement {
+    Desktop,
+    Offscreen,
+}
+
+impl ObsWindowPlacement {
+    fn origin(self) -> (f64, f64) {
+        match self {
+            Self::Desktop => (100.0, 140.0),
+            Self::Offscreen => (-20000.0, 140.0),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Desktop => "transparent desktop window",
+            Self::Offscreen => "transparent offscreen window",
+        }
+    }
+}
+
+fn provision_camera_profiles(args: Vec<String>) -> Result<()> {
+    if env::consts::OS != "macos" {
+        return Err("cargo xtask provision-camera-profiles is only available on macOS.".into());
+    }
+    let options = parse_provision_camera_profiles_args(args)?;
+    let root = project_root()?;
+    let target_dir = root.join("public/provisioning");
+    fs::create_dir_all(&target_dir)?;
+
+    println!("Scanning provisioning profiles in:");
+    for source_dir in &options.source_dirs {
+        println!("  - {}", source_dir.display());
+    }
+    let container_dest = root.join(DEFAULT_CONTAINER_PROVISION_PROFILE);
+    let extension_dest = root.join(DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE);
+
+    let container = ensure_camera_profile(
+        &root,
+        &options.source_dirs,
+        &container_dest,
+        ProvisioningProfileKind::ContainerApp,
+        options.force,
+    )?;
+    let extension = ensure_camera_profile(
+        &root,
+        &options.source_dirs,
+        &extension_dest,
+        ProvisioningProfileKind::CameraExtension,
+        options.force,
+    )?;
+
+    println!();
+    println!("Provisioning profile setup complete.");
+    println!("Container app: {}", relative_display(&root, &container));
+    println!("Camera Extension: {}", relative_display(&root, &extension));
+    println!("Next: cargo xtask build-app --release");
+    Ok(())
+}
+
+fn parse_provision_camera_profiles_args(
+    args: Vec<String>,
+) -> Result<ProvisionCameraProfilesOptions> {
+    let mut source_dirs = Vec::new();
+    let mut force = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--from" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(
+                        "usage: cargo xtask provision-camera-profiles [--from DIR] [--force]"
+                            .into(),
+                    );
+                };
+                source_dirs.push(PathBuf::from(value));
+            }
+            "--force" => {
+                force = true;
+            }
+            value => {
+                return Err(format!(
+                    "unknown provision-camera-profiles option: {value}\nusage: cargo xtask provision-camera-profiles [--from DIR] [--force]"
+                )
+                .into());
+            }
+        }
+        index += 1;
+    }
+    if source_dirs.is_empty() {
+        source_dirs = default_provisioning_profile_source_dirs();
+    }
+    Ok(ProvisionCameraProfilesOptions { source_dirs, force })
+}
+
+fn default_provisioning_profile_source_dirs() -> Vec<PathBuf> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~"));
+    vec![
+        home.join("Library/MobileDevice/Provisioning Profiles"),
+        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
+    ]
+}
+
+fn ensure_camera_profile(
+    root: &Path,
+    source_dirs: &[PathBuf],
+    destination: &Path,
+    kind: ProvisioningProfileKind,
+    force: bool,
+) -> Result<PathBuf> {
+    if destination.is_file() && !force && validate_provisioning_profile(destination, kind).is_ok() {
+        println!(
+            "{} profile already exists and is valid: {}",
+            kind.label(),
+            relative_display(root, destination)
+        );
+        return Ok(destination.to_path_buf());
+    }
+
+    let candidate = find_matching_provisioning_profile(source_dirs, kind)?.ok_or_else(|| {
+        let sources = source_dirs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "no matching {} provisioning profile found in [{}].\n\
+Create/download profiles for `{}` in Apple Developer/Xcode, or pass the download folder with `--from DIR`.",
+            kind.label(),
+            sources,
+            kind.expected_bundle_id()
+        )
+    })?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&candidate, destination).map_err(|error| {
+        format!(
+            "failed to copy {} profile from {} to {}: {error}",
+            kind.label(),
+            candidate.display(),
+            destination.display()
+        )
+    })?;
+    let summary = validate_provisioning_profile(destination, kind)?;
+    println!(
+        "Copied {} profile: {} -> {}",
+        kind.label(),
+        candidate.display(),
+        relative_display(root, destination)
+    );
+    println!(
+        "Validated {} profile: name={} app_id={} team={}",
+        kind.label(),
+        summary.name.as_deref().unwrap_or("unknown"),
+        summary.application_identifier,
+        summary.team_identifier.as_deref().unwrap_or("unknown")
+    );
+    Ok(destination.to_path_buf())
+}
+
+fn find_matching_provisioning_profile(
+    source_dirs: &[PathBuf],
+    kind: ProvisioningProfileKind,
+) -> Result<Option<PathBuf>> {
+    let mut candidates = Vec::new();
+    for source_dir in source_dirs {
+        if source_dir.is_dir() {
+            collect_provisioning_profile_paths(source_dir, &mut candidates)?;
+        }
+    }
+    candidates.sort();
+    for candidate in candidates {
+        if validate_provisioning_profile(&candidate, kind).is_ok() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn collect_provisioning_profile_paths(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_provisioning_profile_paths(&path, output)?;
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if matches!(extension, "provisionprofile" | "mobileprovision") {
+            output.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn add_certificate_to_login_keychain(cert_path: &Path) -> Result<()> {
@@ -842,10 +1087,27 @@ fn build_app(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
+    let system_camera_source_requested = config_requests_system_camera_source(&config_path);
+    if system_camera_source_requested && !camera_provisioning_profiles_available(&root) {
+        return Err(system_camera_source_unavailable_message().into());
+    }
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable, options.release)?;
+    let bundle_dir = install_camera_app_wrapper(
+        &root,
+        &executable,
+        options.release,
+        system_camera_source_requested,
+    )?;
+    let launch_bundle_dir = if system_camera_source_requested {
+        Some(install_app_bundle_to_applications(&root, &bundle_dir)?)
+    } else {
+        None
+    };
 
     println!("App wrapper: {}", bundle_dir.display());
+    if let Some(launch_bundle_dir) = &launch_bundle_dir {
+        println!("Installed app wrapper: {}", launch_bundle_dir.display());
+    }
     println!(
         "Profile: {}",
         if options.release {
@@ -858,12 +1120,16 @@ fn build_app(args: Vec<String>) -> Result<()> {
     println!("Bundle id: {DEV_CAMERA_BUNDLE_ID}");
     println!(
         "Embedded Camera Extension: {}",
-        relative_display(
-            &root,
-            &bundle_dir
-                .join("Contents/Library/SystemExtensions")
-                .join(VIRTUAL_CAMERA_BUNDLE_NAME)
-        )
+        if system_camera_source_requested {
+            relative_display(
+                &root,
+                &bundle_dir
+                    .join("Contents/Library/SystemExtensions")
+                    .join(VIRTUAL_CAMERA_BUNDLE_NAME),
+            )
+        } else {
+            "disabled for desktop window output".to_string()
+        }
     );
     println!(
         "Run it with: cargo xtask run-metal{}",
@@ -882,6 +1148,10 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
+    let system_camera_source_requested = config_requests_system_camera_source(&config_path);
+    if system_camera_source_requested && !camera_provisioning_profiles_available(&root) {
+        return Err(system_camera_source_unavailable_message().into());
+    }
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
         terminate_app_processes(&root);
@@ -889,8 +1159,20 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable, options.release)?;
+    let bundle_dir = install_camera_app_wrapper(
+        &root,
+        &executable,
+        options.release,
+        system_camera_source_requested,
+    )?;
     println!("App wrapper: {}", bundle_dir.display());
+    let launch_bundle_dir = if system_camera_source_requested {
+        let installed = install_app_bundle_to_applications(&root, &bundle_dir)?;
+        println!("Installed app wrapper: {}", installed.display());
+        installed
+    } else {
+        bundle_dir
+    };
 
     let log_stem = if options.release {
         "run-metal-release"
@@ -899,7 +1181,7 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     };
     launch_camera_app_wrapper(
         &root,
-        &bundle_dir,
+        &launch_bundle_dir,
         &include_dir,
         &lib_dir,
         &config_path,
@@ -1012,6 +1294,13 @@ fn install_camera_extension_bundle(root: &Path, executable: &Path) -> Result<Pat
         resources_dir.join("CameraExtension.entitlements"),
         camera_extension_entitlements(),
     )?;
+    embed_provisioning_profile_if_available(
+        root,
+        &contents_dir,
+        CAMERA_EXTENSION_PROVISION_PROFILE_ENV,
+        DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE,
+        ProvisioningProfileKind::CameraExtension,
+    )?;
     let _ = fs::remove_file(&executable_path);
     fs::copy(executable, &executable_path)?;
     #[cfg(unix)]
@@ -1026,10 +1315,17 @@ fn install_camera_extension_bundle(root: &Path, executable: &Path) -> Result<Pat
 
 fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
     let identity = camera_codesign_identity_choice();
+    let entitlements = bundle_dir
+        .join("Contents/Resources")
+        .join("CameraExtension.entitlements");
     let mut command = Command::new("codesign");
     command
         .arg("--force")
         .arg("--deep")
+        .arg("--options")
+        .arg("runtime")
+        .arg("--entitlements")
+        .arg(&entitlements)
         .arg("--sign")
         .arg(&identity.value)
         .arg("--identifier")
@@ -1058,17 +1354,38 @@ or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
     Ok(())
 }
 
-fn install_camera_app_wrapper(root: &Path, executable: &Path, release: bool) -> Result<PathBuf> {
+fn install_camera_app_wrapper(
+    root: &Path,
+    executable: &Path,
+    release: bool,
+    system_camera_source_enabled: bool,
+) -> Result<PathBuf> {
     let executable_name = "vtube-studio-rs";
-    let bundle_dir = root.join("target/dev-app/vtube-studio-rs Dev.app");
+    let bundle_dir = root.join("target/dev-app").join(DEV_APP_BUNDLE_NAME);
     let contents_dir = bundle_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
+    let resources_dir = contents_dir.join("Resources");
     let app_executable = macos_dir.join(executable_name);
     fs::create_dir_all(&macos_dir)?;
+    fs::create_dir_all(&resources_dir)?;
     fs::write(
         contents_dir.join("Info.plist"),
         dev_camera_info_plist(executable_name),
     )?;
+    let container_entitlements = resources_dir.join("ContainerApp.entitlements");
+    if system_camera_source_enabled {
+        fs::write(&container_entitlements, camera_container_app_entitlements())?;
+        embed_provisioning_profile_if_available(
+            root,
+            &contents_dir,
+            CONTAINER_PROVISION_PROFILE_ENV,
+            DEFAULT_CONTAINER_PROVISION_PROFILE,
+            ProvisioningProfileKind::ContainerApp,
+        )?;
+    } else {
+        let _ = fs::remove_file(&container_entitlements);
+        let _ = fs::remove_file(contents_dir.join("embedded.provisionprofile"));
+    }
     let _ = fs::remove_file(&app_executable);
     fs::copy(executable, &app_executable)?;
     #[cfg(unix)]
@@ -1077,10 +1394,15 @@ fn install_camera_app_wrapper(root: &Path, executable: &Path, release: bool) -> 
         permissions.set_mode(0o755);
         fs::set_permissions(&app_executable, permissions)?;
     }
-    let extension_executable = build_camera_extension_executable(root, release)?;
-    let extension_bundle = install_camera_extension_bundle(root, &extension_executable)?;
-    embed_camera_extension_bundle(&contents_dir, &extension_bundle)?;
-    sign_camera_dev_app(root, &bundle_dir)?;
+    let system_extensions_dir = contents_dir.join("Library/SystemExtensions");
+    if system_camera_source_enabled {
+        let extension_executable = build_camera_extension_executable(root, release)?;
+        let extension_bundle = install_camera_extension_bundle(root, &extension_executable)?;
+        embed_camera_extension_bundle(&contents_dir, &extension_bundle)?;
+    } else {
+        let _ = fs::remove_dir_all(&system_extensions_dir);
+    }
+    sign_camera_dev_app(root, &bundle_dir, system_camera_source_enabled)?;
     Ok(bundle_dir)
 }
 
@@ -1090,6 +1412,321 @@ fn embed_camera_extension_bundle(contents_dir: &Path, extension_bundle: &Path) -
     let embedded_bundle = system_extensions_dir.join(VIRTUAL_CAMERA_BUNDLE_NAME);
     copy_dir_replace(extension_bundle, &embedded_bundle)?;
     Ok(embedded_bundle)
+}
+
+fn install_app_bundle_to_applications(root: &Path, bundle_dir: &Path) -> Result<PathBuf> {
+    let installed_bundle = PathBuf::from("/Applications").join(DEV_APP_BUNDLE_NAME);
+    copy_dir_replace(bundle_dir, &installed_bundle).map_err(|error| {
+        format!(
+            "failed to install app wrapper to {}: {error}. \
+System Extension activation requires the app bundle to live in /Applications.",
+            installed_bundle.display()
+        )
+    })?;
+    println!(
+        "Installed app wrapper for System Extension activation: {}",
+        installed_bundle.display()
+    );
+    println!("Source app wrapper: {}", relative_display(root, bundle_dir));
+    Ok(installed_bundle)
+}
+
+fn embed_provisioning_profile_if_available(
+    root: &Path,
+    contents_dir: &Path,
+    env_name: &str,
+    default_relative_path: &str,
+    kind: ProvisioningProfileKind,
+) -> Result<Option<PathBuf>> {
+    let label = kind.label();
+    let profile_path = match env::var_os(env_name) {
+        Some(value) if !value.is_empty() => {
+            let path = PathBuf::from(value);
+            if !path.is_file() {
+                return Err(format!(
+                    "{env_name} points to {}, but that file does not exist.",
+                    path.display()
+                )
+                .into());
+            }
+            path
+        }
+        _ => {
+            let path = root.join(default_relative_path);
+            if !path.is_file() {
+                println!(
+                    "No {label} provisioning profile embedded. Set {env_name} or place one at {default_relative_path}."
+                );
+                return Ok(None);
+            }
+            path
+        }
+    };
+
+    let summary = validate_provisioning_profile(&profile_path, kind).map_err(|error| {
+        format!(
+            "{label} provisioning profile {} is not usable for `{}`: {error}",
+            profile_path.display(),
+            kind.expected_bundle_id()
+        )
+    })?;
+    let embedded_path = contents_dir.join("embedded.provisionprofile");
+    fs::copy(&profile_path, &embedded_path).map_err(|error| {
+        format!(
+            "failed to embed {label} provisioning profile {} into {}: {error}",
+            profile_path.display(),
+            embedded_path.display()
+        )
+    })?;
+    println!(
+        "Embedded {label} provisioning profile: {} -> {}",
+        relative_display(root, &profile_path),
+        relative_display(root, &embedded_path)
+    );
+    println!(
+        "Provisioning profile validated: name={} app_id={} team={}",
+        summary.name.as_deref().unwrap_or("unknown"),
+        summary.application_identifier,
+        summary.team_identifier.as_deref().unwrap_or("unknown")
+    );
+    Ok(Some(embedded_path))
+}
+
+#[derive(Debug, Clone)]
+struct ProvisioningProfileSummary {
+    name: Option<String>,
+    application_identifier: String,
+    team_identifier: Option<String>,
+    app_groups: Vec<String>,
+    system_extension_install: bool,
+}
+
+fn validate_provisioning_profile(
+    profile_path: &Path,
+    kind: ProvisioningProfileKind,
+) -> Result<ProvisioningProfileSummary> {
+    let value = decode_provisioning_profile_json(profile_path)?;
+    let summary = provisioning_profile_summary_from_json(&value)?;
+    validate_provisioning_profile_summary(&summary, kind)?;
+    Ok(summary)
+}
+
+fn decode_provisioning_profile_json(profile_path: &Path) -> Result<serde_json::Value> {
+    let security_output = Command::new("security")
+        .arg("cms")
+        .arg("-D")
+        .arg("-i")
+        .arg(profile_path)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to run `security cms -D -i {}`: {error}",
+                profile_path.display()
+            )
+        })?;
+    if !security_output.status.success() {
+        return Err(format!(
+            "`security cms -D -i {}` failed with status {}\nstderr:\n{}",
+            profile_path.display(),
+            security_output.status,
+            String::from_utf8_lossy(&security_output.stderr)
+        )
+        .into());
+    }
+
+    let mut plutil = Command::new("plutil")
+        .arg("-convert")
+        .arg("json")
+        .arg("-o")
+        .arg("-")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to start `plutil`: {error}"))?;
+    {
+        let stdin = plutil.stdin.as_mut().ok_or("failed to open plutil stdin")?;
+        stdin.write_all(&security_output.stdout)?;
+    }
+    let plutil_output = plutil.wait_with_output()?;
+    if !plutil_output.status.success() {
+        return Err(format!(
+            "`plutil -convert json` failed with status {}\nstderr:\n{}",
+            plutil_output.status,
+            String::from_utf8_lossy(&plutil_output.stderr)
+        )
+        .into());
+    }
+
+    serde_json::from_slice(&plutil_output.stdout)
+        .map_err(|error| format!("failed to parse provisioning profile JSON: {error}").into())
+}
+
+fn provisioning_profile_summary_from_json(
+    value: &serde_json::Value,
+) -> Result<ProvisioningProfileSummary> {
+    let entitlements = value
+        .get("Entitlements")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("provisioning profile has no Entitlements dictionary")?;
+    let application_identifier = entitlements
+        .get("application-identifier")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("provisioning profile has no Entitlements.application-identifier")?
+        .to_string();
+    let team_identifier = value
+        .get("TeamIdentifier")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.iter().find_map(serde_json::Value::as_str))
+        .or_else(|| {
+            value
+                .get("ApplicationIdentifierPrefix")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|values| values.iter().find_map(serde_json::Value::as_str))
+        })
+        .map(str::to_string);
+    let app_groups = entitlements
+        .get("com.apple.security.application-groups")
+        .and_then(serde_json::Value::as_array)
+        .map(|groups| {
+            groups
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let system_extension_install = entitlements
+        .get("com.apple.developer.system-extension.install")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(ProvisioningProfileSummary {
+        name: value
+            .get("Name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        application_identifier,
+        team_identifier,
+        app_groups,
+        system_extension_install,
+    })
+}
+
+fn validate_provisioning_profile_summary(
+    summary: &ProvisioningProfileSummary,
+    kind: ProvisioningProfileKind,
+) -> Result<()> {
+    if !summary
+        .application_identifier
+        .ends_with(kind.expected_bundle_id())
+    {
+        return Err(format!(
+            "application-identifier `{}` does not match expected bundle id `{}`",
+            summary.application_identifier,
+            kind.expected_bundle_id()
+        )
+        .into());
+    }
+    if !summary
+        .app_groups
+        .iter()
+        .any(|group| group == VIRTUAL_CAMERA_APP_GROUP)
+    {
+        return Err(format!(
+            "profile does not include required app group `{}`",
+            VIRTUAL_CAMERA_APP_GROUP
+        )
+        .into());
+    }
+    if kind.requires_system_extension_install() && !summary.system_extension_install {
+        return Err(
+            "container app profile does not include com.apple.developer.system-extension.install"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn embedded_provisioning_profile_summary(
+    bundle_path: &Path,
+    kind: ProvisioningProfileKind,
+) -> Option<ProvisioningProfileSummary> {
+    let profile_path = bundle_path.join("Contents/embedded.provisionprofile");
+    if !profile_path.is_file() {
+        return None;
+    }
+    validate_provisioning_profile(&profile_path, kind).ok()
+}
+
+fn camera_provisioning_profiles_available(root: &Path) -> bool {
+    configured_provisioning_profile_valid(
+        root,
+        CONTAINER_PROVISION_PROFILE_ENV,
+        DEFAULT_CONTAINER_PROVISION_PROFILE,
+        ProvisioningProfileKind::ContainerApp,
+    ) && configured_provisioning_profile_valid(
+        root,
+        CAMERA_EXTENSION_PROVISION_PROFILE_ENV,
+        DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE,
+        ProvisioningProfileKind::CameraExtension,
+    )
+}
+
+fn configured_provisioning_profile_valid(
+    root: &Path,
+    env_name: &str,
+    default_relative_path: &str,
+    kind: ProvisioningProfileKind,
+) -> bool {
+    let path = env::var_os(env_name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(default_relative_path));
+    path.is_file() && validate_provisioning_profile(&path, kind).is_ok()
+}
+
+fn system_camera_source_unavailable_message() -> String {
+    format!(
+        "System Camera Source is selected, but the required Apple Developer Program provisioning profiles are missing or invalid.\n\
+This Apple ID cannot currently complete the no-desktop virtual camera path.\n\n\
+Use the supported OBS desktop window path instead:\n\
+  cargo xtask configure-obs-recording --build\n\
+  cargo xtask run-metal --release\n\n\
+If you later get Apple Developer Program profiles, place them at `{DEFAULT_CONTAINER_PROVISION_PROFILE}` and `{DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE}`, then run:\n\
+  cargo xtask build-app --release"
+    )
+}
+
+fn config_requests_system_camera_source(config_path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(config_path) else {
+        return false;
+    };
+    let Ok(config) = toml::from_str::<toml::Value>(&content) else {
+        return false;
+    };
+    let Some(output) = config.get("output") else {
+        return false;
+    };
+    let mode = output
+        .get("mode")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("window")
+        .trim()
+        .to_ascii_lowercase();
+    let internal = output.get("internal");
+    let producer = internal
+        .and_then(|value| value.get("producer"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("none")
+        .trim()
+        .to_ascii_lowercase();
+    let activate_virtual_camera = internal
+        .and_then(|value| value.get("activate_virtual_camera"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+    mode == "internal" && producer == "iosurface" && activate_virtual_camera
 }
 
 fn launch_camera_app_wrapper(
@@ -1183,12 +1820,25 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
     )
 }
 
-fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
+fn sign_camera_dev_app(
+    root: &Path,
+    bundle_dir: &Path,
+    system_camera_source_enabled: bool,
+) -> Result<()> {
     let identity = camera_codesign_identity_choice();
+    let entitlements = bundle_dir
+        .join("Contents/Resources")
+        .join("ContainerApp.entitlements");
     let mut command = Command::new("codesign");
     command
         .arg("--force")
         .arg("--deep")
+        .arg("--options")
+        .arg("runtime");
+    if system_camera_source_enabled {
+        command.arg("--entitlements").arg(&entitlements);
+    }
+    command
         .arg("--sign")
         .arg(&identity.value)
         .arg("--identifier")
@@ -1815,7 +2465,7 @@ fn select_model(args: Vec<String>) -> Result<()> {
 }
 
 fn configure_obs_recording(args: Vec<String>) -> Result<()> {
-    let target = parse_obs_recording_args(args)?;
+    let (target, placement) = parse_obs_recording_args(args)?;
     let root = project_root()?;
     let config_path = root.join(target.config_path());
     let example_config_path = root.join(target.example_config_path());
@@ -1832,6 +2482,7 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
         SelectModelTarget::Development => "development",
         SelectModelTarget::Build => "release",
     };
+    let (window_x, window_y) = placement.origin();
     content = set_toml_section_values(
         &content,
         "output",
@@ -1854,6 +2505,8 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
         &[
             ("runtime_profile", toml_string_literal(runtime_profile)),
             ("window_level", toml_string_literal("screen_saver")),
+            ("window_x", format!("{window_x:.1}")),
+            ("window_y", format!("{window_y:.1}")),
             ("window_width", "540.0".to_string()),
             ("window_height", "720.0".to_string()),
             ("window_capture_friendly", "true".to_string()),
@@ -1887,7 +2540,14 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
     println!("OBS Window Capture preset updated.");
     println!("Target: {}", target.label());
     println!("Config: {}", relative_display(&root, &config_path));
-    println!("Output: transparent desktop window for OBS Window Capture or macOS Screen Capture");
+    println!(
+        "Output: {} for OBS Window Capture or macOS Screen Capture",
+        placement.label()
+    );
+    println!(
+        "Placement: {} at x={window_x:.1}, y={window_y:.1}",
+        placement.label()
+    );
     println!("Note: this is not an internal no-desktop OBS output path.");
     println!(
         "Window: level screen_saver | size 540x720 | title `vtube-studio-rs OBS Source` | capture-friendly on | diagnostics off"
@@ -2932,8 +3592,36 @@ fn build_virtual_camera_readiness_report(
         .join("Contents/Library/SystemExtensions")
         .join(VIRTUAL_CAMERA_BUNDLE_NAME);
     let embedded_extension_exists = embedded_extension_path.is_dir();
+    let installed_app_path = PathBuf::from("/Applications").join(DEV_APP_BUNDLE_NAME);
+    let installed_app_exists = installed_app_path.is_dir();
+    let installed_extension_path = installed_app_path
+        .join("Contents/Library/SystemExtensions")
+        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
+    let installed_extension_exists = installed_extension_path.is_dir();
+    let installed_app_display = installed_app_path.display().to_string();
     let codesign_identity = camera_codesign_identity();
     let has_real_codesign_identity = codesign_identity != "-";
+    let installed_app_entitlements = signed_entitlements_text(&installed_app_path);
+    let app_has_system_extension_entitlement = installed_app_entitlements
+        .as_deref()
+        .is_some_and(|text| text.contains("com.apple.developer.system-extension.install"));
+    let installed_app_profile_exists = installed_app_path
+        .join("Contents/embedded.provisionprofile")
+        .is_file();
+    let installed_extension_profile_exists = installed_extension_path
+        .join("Contents/embedded.provisionprofile")
+        .is_file();
+    let installed_app_profile_summary = embedded_provisioning_profile_summary(
+        &installed_app_path,
+        ProvisioningProfileKind::ContainerApp,
+    );
+    let installed_extension_profile_summary = embedded_provisioning_profile_summary(
+        &installed_extension_path,
+        ProvisioningProfileKind::CameraExtension,
+    );
+    let installed_app_profile_valid = installed_app_profile_summary.is_some();
+    let installed_extension_profile_valid = installed_extension_profile_summary.is_some();
+    let system_extension_active = camera_system_extension_active();
     let manifest_contract_ok = output.manifest_size == Some((1080, 1080))
         && output.manifest_pixel_format.as_deref() == Some("BGRA8Unorm")
         && output.manifest_frame_rate == Some(60);
@@ -2943,8 +3631,16 @@ fn build_virtual_camera_readiness_report(
         && output.manifest_exists
         && output.manifest_frames.unwrap_or(0) > 0
         && manifest_contract_ok;
-    let ready_for_extension_prototype =
-        platform_ok && internal_ready && embedded_extension_exists && has_real_codesign_identity;
+    let ready_for_extension_prototype = platform_ok
+        && internal_ready
+        && embedded_extension_exists
+        && installed_app_exists
+        && installed_extension_exists
+        && app_has_system_extension_entitlement
+        && installed_app_profile_valid
+        && installed_extension_profile_valid
+        && has_real_codesign_identity
+        && system_extension_active;
     let manifest_size = output
         .manifest_size
         .map(|(width, height)| format!("{width}x{height}"))
@@ -2985,6 +3681,21 @@ fn build_virtual_camera_readiness_report(
         app_bundle_exists,
         embedded_extension_exists,
         has_real_codesign_identity,
+        installed_app_exists,
+        app_has_system_extension_entitlement,
+        installed_app_profile_exists,
+        installed_extension_profile_exists,
+        installed_app_profile_valid,
+        installed_extension_profile_valid,
+        system_extension_active,
+    );
+    let container_profile_detail = profile_readiness_detail(
+        installed_app_profile_exists,
+        installed_app_profile_summary.as_ref(),
+    );
+    let extension_profile_detail = profile_readiness_detail(
+        installed_extension_profile_exists,
+        installed_extension_profile_summary.as_ref(),
     );
     let markdown = format!(
         "# Virtual Camera Readiness\n\n\
@@ -3013,6 +3724,12 @@ Status: **{status}**\n\n\
 | Manifest updated | {updated_status} | `{updated_unix_ms}` |\n\
 | App wrapper | {bundle_status} | `{bundle}` |\n\
 | Embedded Camera Extension | {embedded_extension_status} | `{embedded_extension}` |\n\
+| Installed app wrapper | {installed_app_status} | `{installed_app}` |\n\
+| Installed Camera Extension | {installed_extension_status} | `{installed_extension}` |\n\
+| System extension install entitlement | {system_extension_entitlement_status} | `{system_extension_entitlement}` |\n\
+| Container provisioning profile | {container_profile_status} | `{container_profile}` |\n\
+| Extension provisioning profile | {extension_profile_status} | `{extension_profile}` |\n\
+| System Extension active | {system_extension_active_status} | `{system_extension_active}` |\n\
 | Codesign identity | {codesign_status} | `{codesign}` |\n\n\
 ## Next Implementation Slice\n\n\
 1. Keep the existing internal IOSurface producer as the frame source.\n\
@@ -3061,6 +3778,19 @@ If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple D
         bundle = app_bundle_display,
         embedded_extension_status = readiness_status(embedded_extension_exists),
         embedded_extension = embedded_extension_display,
+        installed_app_status = readiness_status(installed_app_exists),
+        installed_app = installed_app_display,
+        installed_extension_status = readiness_status(installed_extension_exists),
+        installed_extension = installed_extension_path.display(),
+        system_extension_entitlement_status =
+            readiness_status(app_has_system_extension_entitlement),
+        system_extension_entitlement = app_has_system_extension_entitlement,
+        container_profile_status = readiness_status(installed_app_profile_valid),
+        container_profile = container_profile_detail,
+        extension_profile_status = readiness_status(installed_extension_profile_valid),
+        extension_profile = extension_profile_detail,
+        system_extension_active_status = readiness_status(system_extension_active),
+        system_extension_active = system_extension_active,
         codesign_status = if has_real_codesign_identity {
             "ok"
         } else {
@@ -3089,6 +3819,13 @@ fn virtual_camera_next_action(
     app_bundle_exists: bool,
     embedded_extension_exists: bool,
     has_real_codesign_identity: bool,
+    installed_app_exists: bool,
+    app_has_system_extension_entitlement: bool,
+    installed_app_profile_exists: bool,
+    installed_extension_profile_exists: bool,
+    installed_app_profile_valid: bool,
+    installed_extension_profile_valid: bool,
+    system_extension_active: bool,
 ) -> String {
     if !platform_ok {
         return "run this readiness check on macOS.".to_string();
@@ -3114,7 +3851,69 @@ fn virtual_camera_next_action(
     if !has_real_codesign_identity {
         return "install an Apple Development or Developer ID Application certificate in Xcode/Keychain, then run cargo xtask build-app --release; xtask will auto-detect it.".to_string();
     }
-    "run the app with the system camera source preset enabled, approve the Camera Extension request if macOS prompts, then test VTube Studio RS Camera in QuickRecord or OBS.".to_string()
+    if !installed_app_exists {
+        return "run cargo xtask build-app --release so the signed app wrapper is copied to /Applications for System Extension activation.".to_string();
+    }
+    if !app_has_system_extension_entitlement {
+        return "rebuild the app so the /Applications copy is signed with com.apple.developer.system-extension.install.".to_string();
+    }
+    if !installed_app_profile_exists || !installed_extension_profile_exists {
+        return format!(
+            "the app is signed, but embedded provisioning profiles are missing. Place Apple Developer Program profiles at `{DEFAULT_CONTAINER_PROVISION_PROFILE}` and `{DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE}` or set `{CONTAINER_PROVISION_PROFILE_ENV}` and `{CAMERA_EXTENSION_PROVISION_PROFILE_ENV}`, then run cargo xtask build-app --release."
+        );
+    }
+    if !installed_app_profile_valid || !installed_extension_profile_valid {
+        return "embedded provisioning profiles are present but do not match the required bundle ids, app group, or System Extension entitlement; replace them and run cargo xtask build-app --release.".to_string();
+    }
+    if !system_extension_active {
+        return "launch the /Applications app, approve the Camera Extension in System Settings > General > Login Items & Extensions > Camera Extensions, then re-run this readiness check.".to_string();
+    }
+    "test VTube Studio RS Camera in QuickRecord or OBS.".to_string()
+}
+
+fn profile_readiness_detail(exists: bool, summary: Option<&ProvisioningProfileSummary>) -> String {
+    match (exists, summary) {
+        (false, _) => "missing".to_string(),
+        (true, Some(summary)) => {
+            let name = summary.name.as_deref().unwrap_or("unknown");
+            let team = summary.team_identifier.as_deref().unwrap_or("unknown");
+            format!(
+                "valid name={name} app_id={} team={team}",
+                summary.application_identifier
+            )
+        }
+        (true, None) => "present but invalid".to_string(),
+    }
+}
+
+fn signed_entitlements_text(bundle_path: &Path) -> Option<String> {
+    if !bundle_path.exists() {
+        return None;
+    }
+    let output = Command::new("codesign")
+        .arg("-d")
+        .arg("--entitlements")
+        .arg(":-")
+        .arg(bundle_path)
+        .output()
+        .ok()?;
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some(text)
+}
+
+fn camera_system_extension_active() -> bool {
+    let output = Command::new("systemextensionsctl").arg("list").output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.lines().any(|line| {
+        line.contains(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID) && line.contains("[activated enabled]")
+    })
 }
 
 fn camera_extension_plan_markdown(target: SelectModelTarget, root: &Path) -> String {
@@ -3222,8 +4021,6 @@ fn camera_container_app_entitlements() -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
     <key>com.apple.developer.system-extension.install</key>
     <true/>
     <key>com.apple.security.application-groups</key>
@@ -3439,13 +4236,24 @@ fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, Stri
     }
 }
 
-fn parse_obs_recording_args(args: Vec<String>) -> Result<SelectModelTarget> {
-    match args.as_slice() {
-        [] => Ok(SelectModelTarget::Build),
-        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
-        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
-        _ => Err("usage: cargo xtask configure-obs-recording [--dev|--build]".into()),
+fn parse_obs_recording_args(args: Vec<String>) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
+    let mut target = SelectModelTarget::Build;
+    let mut placement = ObsWindowPlacement::Desktop;
+    for arg in args {
+        match arg.as_str() {
+            "--dev" | "--development" => target = SelectModelTarget::Development,
+            "--build" => target = SelectModelTarget::Build,
+            "--desktop" => placement = ObsWindowPlacement::Desktop,
+            "--offscreen" => placement = ObsWindowPlacement::Offscreen,
+            _ => {
+                return Err(
+                    "usage: cargo xtask configure-obs-recording [--dev|--build] [--desktop|--offscreen]"
+                        .into(),
+                );
+            }
+        }
     }
+    Ok((target, placement))
 }
 
 fn parse_internal_output_args(args: Vec<String>) -> Result<SelectModelTarget> {
@@ -7759,16 +8567,21 @@ atlas_anisotropy = 1
 
     #[test]
     fn obs_recording_args_default_to_build_config() {
-        let target = parse_obs_recording_args(Vec::new()).expect("default obs target should parse");
+        let (target, placement) =
+            parse_obs_recording_args(Vec::new()).expect("default obs target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
+        assert!(matches!(placement, ObsWindowPlacement::Desktop));
 
-        let target = parse_obs_recording_args(vec!["--dev".to_string()])
+        let (target, placement) = parse_obs_recording_args(vec!["--dev".to_string()])
             .expect("dev obs target should parse");
         assert!(matches!(target, SelectModelTarget::Development));
+        assert!(matches!(placement, ObsWindowPlacement::Desktop));
 
-        let target = parse_obs_recording_args(vec!["--build".to_string()])
-            .expect("build obs target should parse");
+        let (target, placement) =
+            parse_obs_recording_args(vec!["--build".to_string(), "--offscreen".to_string()])
+                .expect("build obs target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
+        assert!(matches!(placement, ObsWindowPlacement::Offscreen));
 
         assert!(parse_obs_recording_args(vec!["--release".to_string()]).is_err());
     }
@@ -7825,6 +8638,67 @@ atlas_anisotropy = 1
     }
 
     #[test]
+    fn provision_camera_profiles_args_parse_source_and_force() {
+        let options = parse_provision_camera_profiles_args(vec![
+            "--from".to_string(),
+            "/tmp/profiles".to_string(),
+            "--force".to_string(),
+        ])
+        .expect("provision args should parse");
+        assert_eq!(options.source_dirs, vec![PathBuf::from("/tmp/profiles")]);
+        assert!(options.force);
+
+        let options = parse_provision_camera_profiles_args(vec![
+            "--from".to_string(),
+            "/tmp/one".to_string(),
+            "--from".to_string(),
+            "/tmp/two".to_string(),
+        ])
+        .expect("multiple source dirs should parse");
+        assert_eq!(
+            options.source_dirs,
+            vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]
+        );
+
+        let options =
+            parse_provision_camera_profiles_args(Vec::new()).expect("default args should parse");
+        assert!(options.source_dirs.len() >= 2);
+        assert!(parse_provision_camera_profiles_args(vec!["--from".to_string()]).is_err());
+        assert!(parse_provision_camera_profiles_args(vec!["--bad".to_string()]).is_err());
+    }
+
+    #[test]
+    fn collect_provisioning_profile_paths_accepts_expected_extensions() {
+        let root = env::temp_dir().join(format!(
+            "vtube-studio-rs-profile-scan-test-{}",
+            timestamp_for_filename()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("test directories should be created");
+        fs::write(root.join("one.provisionprofile"), "").expect("profile should be written");
+        fs::write(nested.join("two.mobileprovision"), "").expect("profile should be written");
+        fs::write(root.join("ignore.txt"), "").expect("ignored file should be written");
+
+        let mut paths = Vec::new();
+        collect_provisioning_profile_paths(&root, &mut paths)
+            .expect("profile paths should collect");
+        paths.sort();
+        assert_eq!(paths.len(), 2);
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("one.provisionprofile"))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("two.mobileprovision"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn camera_extension_templates_include_coremediaio_identifiers() {
         let root = env::temp_dir().join(format!(
             "vtube-studio-rs-camera-extension-plan-test-{}",
@@ -7842,6 +8716,80 @@ atlas_anisotropy = 1
         let entitlements = camera_container_app_entitlements();
         assert!(entitlements.contains("com.apple.developer.system-extension.install"));
         assert!(entitlements.contains(VIRTUAL_CAMERA_APP_GROUP));
+    }
+
+    #[test]
+    fn validates_container_provisioning_profile_contract() {
+        let value = serde_json::json!({
+            "Name": "VTube Studio RS Container",
+            "TeamIdentifier": ["TEAM123456"],
+            "Entitlements": {
+                "application-identifier": "TEAM123456.rs.vtube-studio.dev",
+                "com.apple.developer.system-extension.install": true,
+                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+            }
+        });
+        let summary =
+            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
+        validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
+            .expect("container profile should validate");
+    }
+
+    #[test]
+    fn rejects_container_profile_without_system_extension_entitlement() {
+        let value = serde_json::json!({
+            "Name": "VTube Studio RS Container",
+            "TeamIdentifier": ["TEAM123456"],
+            "Entitlements": {
+                "application-identifier": "TEAM123456.rs.vtube-studio.dev",
+                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+            }
+        });
+        let summary =
+            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
+        let error =
+            validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
+                .expect_err("missing system extension entitlement should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("com.apple.developer.system-extension.install")
+        );
+    }
+
+    #[test]
+    fn validates_camera_extension_provisioning_profile_contract() {
+        let value = serde_json::json!({
+            "Name": "VTube Studio RS Camera Extension",
+            "TeamIdentifier": ["TEAM123456"],
+            "Entitlements": {
+                "application-identifier": "TEAM123456.rs.vtube-studio.dev.CameraExtension",
+                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+            }
+        });
+        let summary =
+            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
+        validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::CameraExtension)
+            .expect("extension profile should validate");
+    }
+
+    #[test]
+    fn rejects_provisioning_profile_for_wrong_bundle_id() {
+        let value = serde_json::json!({
+            "Name": "Wrong Profile",
+            "TeamIdentifier": ["TEAM123456"],
+            "Entitlements": {
+                "application-identifier": "TEAM123456.com.example.other",
+                "com.apple.developer.system-extension.install": true,
+                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+            }
+        });
+        let summary =
+            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
+        let error =
+            validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
+                .expect_err("wrong bundle id should be rejected");
+        assert!(error.to_string().contains("application-identifier"));
     }
 
     #[test]

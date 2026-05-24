@@ -145,11 +145,13 @@ cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
 cargo xtask configure-obs-recording --build
+cargo xtask configure-obs-recording --build --offscreen
 cargo xtask configure-internal-output --build
 cargo xtask doctor
 cargo xtask fix-wwdr-cert
 cargo xtask list-models
 cargo xtask mao-mask-audit
+cargo xtask provision-camera-profiles
 cargo xtask probe-risk-models public/model
 cargo xtask quality-visual-diff
 cargo xtask ren-visual-diff
@@ -254,18 +256,34 @@ cargo xtask configure-obs-recording --build
 cargo xtask run-metal --release
 ```
 
-The same preset is available in the running app from the `VT` menu under
-`OBS / Recording Output` as `Apply Desktop Window Capture Preset...`. The menu
-action writes the active dev/build TOML profile and relaunches the app. The
-active recording output preset uses the same native macOS menu checkmark as the
-other selectable menu options; desktop window capture and system camera source
-are mutually exclusive.
+To keep the avatar off the visible desktop while still exposing a normal OBS
+Window Capture source, use the offscreen variant:
 
-This is not an internal no-desktop recording mode. It still renders a visible
-transparent avatar window so OBS has a normal macOS window to capture. A true
-OBS internal output, where the avatar is not rendered on the desktop at all,
-requires a project-owned frame output path such as an offscreen Metal render
-target plus IOSurface and a macOS virtual camera output.
+```bash
+cargo xtask configure-obs-recording --build --offscreen
+cargo xtask run-metal --release
+```
+
+This still creates a real transparent macOS window named
+`vtube-studio-rs OBS Source`, but places it at a far negative screen
+coordinate. OBS can select the window; the user should not see it on the
+desktop. Use `--desktop` to move the same capture-friendly window back to the
+visible desktop.
+
+The same preset is available in the running app from the `VT` menu under
+`OBS / Recording Output` as `Apply Desktop Window Capture Preset...` and
+`Apply Offscreen Window Capture Preset...`. The menu action writes the active
+dev/build TOML profile and relaunches the app. The active recording output
+preset uses the same native macOS menu checkmark as the other selectable menu
+options; desktop window capture, offscreen window capture, and system camera
+source are mutually exclusive.
+
+The offscreen preset is a pragmatic OBS internal-recording path, not a real
+system camera source. It still renders a normal WindowServer window for OBS to
+capture, but moves that window outside the visible desktop instead of hiding or
+destroying it. A true no-window output still requires a project-owned frame
+output path such as an offscreen Metal render target plus IOSurface and a macOS
+virtual camera output.
 
 The preset writes the build profile to a transparent `screen_saver` level
 window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
@@ -280,6 +298,12 @@ desktop avatar window while still being easier for OBS to list. Use `--dev`
 instead of `--build` if you want the same preset in the development profile.
 
 ### System Camera Source Preset
+
+Status: this path is blocked unless the Apple ID belongs to a paid Apple
+Developer Program team. Free Apple IDs can create local development
+certificates, but they cannot create/download the provisioning profiles needed
+for the System Extension entitlement. Until those profiles exist, the supported
+OBS path is the Desktop Window Capture preset above.
 
 The first no-desktop output path is available from the `VT` menu under
 `OBS / Recording Output` as `Apply System Camera Source...`. This single option
@@ -368,9 +392,10 @@ consumer apps.
 `cargo xtask build-app --release` now embeds that prototype bundle under the
 local app wrapper at
 `target/dev-app/vtube-studio-rs Dev.app/Contents/Library/SystemExtensions/`.
-That makes the bundle layout match Apple's System Extension activation model,
-but it still does not by itself install or enable the camera in System
-Settings.
+When the build profile is configured for `Apply System Camera Source...`, the
+command also copies the signed app wrapper to
+`/Applications/vtube-studio-rs Dev.app`, because macOS System Extension
+activation is only accepted from an app bundle in `/Applications`.
 
 The generated files are not a finished installed camera yet. A real macOS
 virtual camera still needs a real signing identity and validation from
@@ -380,6 +405,68 @@ extension at launch when built with the default xtask feature set. On a local
 ad-hoc signed developer bundle this is expected to fail or require system
 approval; the menu preset is the activation prototype, not a finished
 distributable camera. The planned frame path remains:
+
+Important: a visible OBS camera source requires the Camera Extension to be
+listed by `systemextensionsctl list` as `rs.vtube-studio.dev.CameraExtension`
+with `[activated enabled]`. The app and extension must be signed with the
+required System Extension entitlement and valid embedded provisioning profiles
+from an Apple Developer Program team. A local Apple Development certificate can
+sign the bundles, but without matching provisioning profiles macOS may reject or
+kill the app before it can register the camera, and OBS will not show
+`VTube Studio RS Camera`. If Apple Developer shows `This resource is only for
+developers enrolled in a developer program or members of an organization’s team
+in a developer program`, this feature cannot be completed with the current
+Apple ID. Check the current state with:
+
+```bash
+cargo xtask virtual-camera-readiness --build
+systemextensionsctl list
+```
+
+Put local provisioning profiles in `public/provisioning/` so they stay out of
+Git:
+
+```text
+public/provisioning/
+  ContainerApp.provisionprofile
+  CameraExtension.provisionprofile
+```
+
+This directory can be created automatically, but the profiles themselves must
+be issued by Apple Developer Program/Xcode. To avoid hand-copying files, run:
+
+```bash
+cargo xtask provision-camera-profiles
+```
+
+The command scans Xcode's normal profile cache at
+`~/Library/MobileDevice/Provisioning Profiles` and Xcode's newer
+`~/Library/Developer/Xcode/UserData/Provisioning Profiles` cache. It validates
+the bundle id, app group, and System Extension entitlement, then copies the
+matching profiles into `public/provisioning/`. If you downloaded the profiles
+into another folder:
+
+```bash
+cargo xtask provision-camera-profiles --from ~/Downloads
+```
+
+Use `--force` to replace already-copied valid profiles.
+
+Or point xtask at profiles stored elsewhere:
+
+```bash
+VTUBE_RS_CONTAINER_PROVISION_PROFILE=/path/to/ContainerApp.provisionprofile \
+VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE=/path/to/CameraExtension.provisionprofile \
+  cargo xtask build-app --release
+```
+
+`cargo xtask build-app --release` embeds those files as
+`Contents/embedded.provisionprofile` before signing the app and the
+`.systemextension`, validates their bundle id/app group/System Extension
+entitlement contract, then copies the app to `/Applications` when the System
+Camera Source preset is active. If a profile is for the wrong bundle id or does
+not include the required entitlement, xtask stops before signing so the failure
+is visible at build time.
 
 ```text
 Live2D -> Metal -> IOSurface -> CVPixelBuffer/CMSampleBuffer -> CoreMediaIO Camera Extension

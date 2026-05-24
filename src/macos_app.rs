@@ -112,6 +112,7 @@ const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
 const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
 const MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET: u32 = 1 << 16;
 const MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET: u32 = 1 << 17;
+const MENU_APPLY_OBS_OFFSCREEN_CAPTURE_PRESET: u32 = 1 << 18;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
 const RENDERER_QUALITY_INDEX_UNCHANGED: i32 = -1;
@@ -318,6 +319,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
         let mut lifecycle_monitor = AppLifecycleMonitor::new();
+        let mut window_present_suspended = false;
         if has_avatar_window {
             lifecycle_monitor.poll(app, window, &config.app, started_at);
         }
@@ -369,7 +371,23 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             }
             #[cfg(feature = "metal-renderer")]
             if has_avatar_window {
-                metal_renderer.render(&cubism_runtime)?;
+                let window_can_present = window_can_present_frame(window, &config.app);
+                if window_can_present {
+                    if window_present_suspended {
+                        println!(
+                            "renderer_event=window_present_resumed uptime_s={:.1}",
+                            started_at.elapsed().as_secs_f64()
+                        );
+                        window_present_suspended = false;
+                    }
+                    metal_renderer.render(&cubism_runtime)?;
+                } else if !window_present_suspended {
+                    println!(
+                        "renderer_event=window_present_suspended reason=space_transition_or_occlusion uptime_s={:.1}",
+                        started_at.elapsed().as_secs_f64()
+                    );
+                    window_present_suspended = true;
+                }
             }
             #[cfg(feature = "metal-renderer")]
             if !output_mode.uses_window() {
@@ -619,7 +637,8 @@ unsafe fn create_avatar_window(
     output_mode: OutputMode,
 ) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
-    let window_origin = avatar_window_origin();
+    let screen_union = screen_union_frame();
+    let window_origin = avatar_window_origin(app_config, window_size, screen_union);
     let style = crate::apple_platform::PanelStyle {
         frame: crate::apple_platform::LayerFrame {
             x: window_origin.x,
@@ -654,14 +673,47 @@ unsafe fn create_avatar_window(
         avatar_window_style_mask(app_config),
         avatar_window_collection_behavior()
     );
+    if let Some(screen_union) = screen_union {
+        println!(
+            "renderer_event=screen_union min_x={:.1} min_y={:.1} max_x={:.1} max_y={:.1}",
+            screen_union.min_x, screen_union.min_y, screen_union.max_x, screen_union.max_y
+        );
+    }
     if app_config.window_capture_friendly {
         println!(
             "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false chrome=hidden",
             avatar_window_title(app_config)
         );
     }
+    maybe_move_capture_window_offscreen(window, app_config, window_size, screen_union);
+    let actual_frame = msg_rect(window, "frame");
+    println!(
+        "renderer_event=window_actual_frame x={:.1} y={:.1} width={:.1} height={:.1}",
+        actual_frame.origin.x,
+        actual_frame.origin.y,
+        actual_frame.size.width,
+        actual_frame.size.height
+    );
 
     Ok(window)
+}
+
+unsafe fn maybe_move_capture_window_offscreen(
+    window: Id,
+    app_config: &AppRuntimeConfig,
+    window_size: NSSize,
+    screen_union: Option<ScreenUnionFrame>,
+) {
+    let configured_x = valid_window_position(app_config.window_x, 100.0);
+    if !app_config.window_capture_friendly || configured_x > -1000.0 {
+        return;
+    }
+    let target = avatar_window_origin(app_config, window_size, screen_union);
+    crate::apple_platform::set_window_origin(window, target.x, target.y);
+    println!(
+        "renderer_event=offscreen_window_repositioned requested_x={:.1} requested_y={:.1}",
+        target.x, target.y
+    );
 }
 
 fn avatar_window_kind(app_config: &AppRuntimeConfig) -> &'static str {
@@ -706,8 +758,67 @@ fn avatar_window_size(app_config: &AppRuntimeConfig) -> NSSize {
     }
 }
 
-fn avatar_window_origin() -> NSPoint {
-    NSPoint { x: 100.0, y: 140.0 }
+#[derive(Clone, Copy, Debug)]
+struct ScreenUnionFrame {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+fn avatar_window_origin(
+    app_config: &AppRuntimeConfig,
+    window_size: NSSize,
+    screen_union: Option<ScreenUnionFrame>,
+) -> NSPoint {
+    let configured_x = valid_window_position(app_config.window_x, 100.0);
+    if app_config.window_capture_friendly && configured_x <= -1000.0 {
+        if let Some(screen_union) = screen_union {
+            return NSPoint {
+                x: screen_union.max_x + window_size.width + 10000.0,
+                y: screen_union.min_y - window_size.height - 10000.0,
+            };
+        }
+    }
+    NSPoint {
+        x: configured_x,
+        y: valid_window_position(app_config.window_y, 140.0),
+    }
+}
+
+unsafe fn screen_union_frame() -> Option<ScreenUnionFrame> {
+    let screens = msg_id(class("NSScreen").ok()?, "screens");
+    if screens.is_null() {
+        return None;
+    }
+    let count = msg_usize(screens, "count");
+    if count == 0 {
+        return None;
+    }
+    let mut union: Option<ScreenUnionFrame> = None;
+    for index in 0..count {
+        let screen = msg_id_usize(screens, "objectAtIndex:", index);
+        if screen.is_null() {
+            continue;
+        }
+        let frame = msg_rect(screen, "frame");
+        let current = ScreenUnionFrame {
+            min_x: frame.origin.x,
+            min_y: frame.origin.y,
+            max_x: frame.origin.x + frame.size.width,
+            max_y: frame.origin.y + frame.size.height,
+        };
+        union = Some(match union {
+            Some(previous) => ScreenUnionFrame {
+                min_x: previous.min_x.min(current.min_x),
+                min_y: previous.min_y.min(current.min_y),
+                max_x: previous.max_x.max(current.max_x),
+                max_y: previous.max_y.max(current.max_y),
+            },
+            None => current,
+        });
+    }
+    union
 }
 
 fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
@@ -715,6 +826,13 @@ fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
         value.min(2400.0)
     } else {
         fallback
+    }
+}
+
+fn valid_window_position(value: Option<f64>, fallback: f64) -> f64 {
+    match value {
+        Some(value) if value.is_finite() => value.clamp(-100000.0, 100000.0),
+        _ => fallback,
     }
 }
 
@@ -1031,11 +1149,16 @@ impl WindowSizePreset {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecordingOutputPreset {
     DesktopWindow,
+    OffscreenWindow,
     SystemCamera,
 }
 
 impl RecordingOutputPreset {
-    const ALL: [Self; 2] = [Self::DesktopWindow, Self::SystemCamera];
+    const ALL: [Self; 3] = [
+        Self::DesktopWindow,
+        Self::OffscreenWindow,
+        Self::SystemCamera,
+    ];
 
     fn from_config(config: &AppConfig) -> Self {
         if config.output.mode() == crate::config::OutputMode::Internal
@@ -1046,6 +1169,10 @@ impl RecordingOutputPreset {
             && config.output.internal.activate_virtual_camera
         {
             Self::SystemCamera
+        } else if config.app.window_capture_friendly
+            && config.app.window_x.unwrap_or(100.0) < -1000.0
+        {
+            Self::OffscreenWindow
         } else {
             Self::DesktopWindow
         }
@@ -1054,6 +1181,7 @@ impl RecordingOutputPreset {
     fn label(self) -> &'static str {
         match self {
             Self::DesktopWindow => "Apply Desktop Window Capture Preset...",
+            Self::OffscreenWindow => "Apply Offscreen Window Capture Preset...",
             Self::SystemCamera => "Apply System Camera Source...",
         }
     }
@@ -1462,6 +1590,14 @@ unsafe fn install_settings_menu(
         controller,
     )?;
     recording_output_items.push(desktop_window_item);
+    let offscreen_window_item = add_action_menu_item(
+        app_menu,
+        RecordingOutputPreset::OffscreenWindow.label(),
+        "applyObsOffscreenCapturePreset:",
+        "",
+        controller,
+    )?;
+    recording_output_items.push(offscreen_window_item);
     let system_camera_item = add_action_menu_item(
         app_menu,
         RecordingOutputPreset::SystemCamera.label(),
@@ -1472,7 +1608,11 @@ unsafe fn install_settings_menu(
     recording_output_items.push(system_camera_item);
     add_disabled_menu_item(
         app_menu,
-        "System camera enables IOSurface producer and extension activation together",
+        "Offscreen uses a normal OBS-capturable window moved outside the visible desktop",
+    )?;
+    add_disabled_menu_item(
+        app_menu,
+        "System camera requires Apple Developer Program profiles",
     )?;
     add_separator_menu_item(app_menu)?;
 
@@ -1692,10 +1832,26 @@ unsafe fn handle_settings_menu_commands(
     }
 
     if commands & MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET != 0 {
-        write_obs_window_capture_preset_to_active_config(config.app.runtime_profile)?;
+        write_obs_window_capture_preset_to_active_config(
+            config.app.runtime_profile,
+            WindowCapturePlacement::Desktop,
+        )?;
         schedule_model_relaunch(model_path)?;
         println!(
             "renderer_event=settings_changed obs_window_capture_preset=applied apply=relaunch config=\"{}\"",
+            crate::config::active_config_path()
+        );
+        terminate_current_app()?;
+    }
+
+    if commands & MENU_APPLY_OBS_OFFSCREEN_CAPTURE_PRESET != 0 {
+        write_obs_window_capture_preset_to_active_config(
+            config.app.runtime_profile,
+            WindowCapturePlacement::Offscreen,
+        )?;
+        schedule_model_relaunch(model_path)?;
+        println!(
+            "renderer_event=settings_changed obs_offscreen_capture_preset=applied apply=relaunch config=\"{}\"",
             crate::config::active_config_path()
         );
         terminate_current_app()?;
@@ -2108,8 +2264,24 @@ fn write_renderer_quality_to_active_config(
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowCapturePlacement {
+    Desktop,
+    Offscreen,
+}
+
+impl WindowCapturePlacement {
+    fn origin(self) -> (f64, f64) {
+        match self {
+            Self::Desktop => (100.0, 140.0),
+            Self::Offscreen => (-20000.0, 140.0),
+        }
+    }
+}
+
 fn write_obs_window_capture_preset_to_active_config(
     runtime_profile: crate::config::RuntimeProfile,
+    placement: WindowCapturePlacement,
 ) -> Result<(), String> {
     let config_path = Path::new(crate::config::active_config_path());
     let content = if config_path.is_file() {
@@ -2122,6 +2294,7 @@ fn write_obs_window_capture_preset_to_active_config(
         crate::config::RuntimeProfile::Development => "development",
         crate::config::RuntimeProfile::Release => "release",
     };
+    let (window_x, window_y) = placement.origin();
     let mut updated = remove_toml_section(&content, "output");
     updated = set_toml_section_values(
         &updated,
@@ -2145,6 +2318,8 @@ fn write_obs_window_capture_preset_to_active_config(
         &[
             ("runtime_profile", toml_string_literal(runtime_profile)),
             ("window_level", toml_string_literal("screen_saver")),
+            ("window_x", format!("{window_x:.1}")),
+            ("window_y", format!("{window_y:.1}")),
             ("window_width", "540.0".to_string()),
             ("window_height", "720.0".to_string()),
             ("window_capture_friendly", "true".to_string()),
@@ -2209,6 +2384,8 @@ fn write_internal_output_preset_to_active_config(
         ],
     );
     updated = set_toml_section_value(&updated, "app", "window_capture_friendly", "false");
+    updated = set_toml_section_value(&updated, "app", "window_x", "100.0");
+    updated = set_toml_section_value(&updated, "app", "window_y", "140.0");
     updated = set_toml_section_value(
         &updated,
         "app",
@@ -2650,6 +2827,10 @@ fn settings_menu_controller_class() -> Result<Class, String> {
                 settings_apply_obs_window_capture_preset,
             ),
             (
+                "applyObsOffscreenCapturePreset:",
+                settings_apply_obs_offscreen_capture_preset,
+            ),
+            (
                 "applySystemCameraOutputPreset:",
                 settings_apply_system_camera_output_preset,
             ),
@@ -2805,6 +2986,14 @@ extern "C-unwind" fn settings_apply_obs_window_capture_preset(
     _sender: *mut objc2::runtime::AnyObject,
 ) {
     MENU_COMMANDS.fetch_or(MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_apply_obs_offscreen_capture_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_APPLY_OBS_OFFSCREEN_CAPTURE_PRESET, Ordering::AcqRel);
 }
 
 extern "C-unwind" fn settings_apply_system_camera_output_preset(
@@ -3064,6 +3253,17 @@ impl AppLifecycleMonitor {
         if !window_visible || !window_occlusion_visible(occlusion_state) {
             apply_avatar_window_space_policy(window, app_config);
             crate::apple_platform::order_panel_front_regardless(window);
+            if app_config.window_capture_friendly
+                && valid_window_position(app_config.window_x, 100.0) <= -1000.0
+            {
+                let window_size = avatar_window_size(app_config);
+                maybe_move_capture_window_offscreen(
+                    window,
+                    app_config,
+                    window_size,
+                    screen_union_frame(),
+                );
+            }
             println!(
                 "renderer_event=window_reasserted visible={} occlusion_state={} uptime_s={uptime:.1}",
                 window_visible, occlusion_state
@@ -3074,6 +3274,18 @@ impl AppLifecycleMonitor {
 
 fn window_occlusion_visible(occlusion_state: NSUInteger) -> bool {
     occlusion_state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0
+}
+
+unsafe fn window_can_present_frame(window: Id, app_config: &AppRuntimeConfig) -> bool {
+    if capture_friendly_window_bypasses_present_suspension(app_config) {
+        return true;
+    }
+    crate::apple_platform::panel_is_visible(window)
+        && window_occlusion_visible(crate::apple_platform::panel_occlusion_state(window))
+}
+
+fn capture_friendly_window_bypasses_present_suspension(app_config: &AppRuntimeConfig) -> bool {
+    app_config.window_capture_friendly
 }
 
 #[derive(Debug, Clone)]
@@ -3374,9 +3586,20 @@ unsafe fn msg_id(receiver: Id, selector_name: &str) -> Id {
     function(receiver, selector(selector_name))
 }
 
+unsafe fn msg_id_usize(receiver: Id, selector_name: &str, value: usize) -> Id {
+    let function: extern "C" fn(Id, Sel, usize) -> Id =
+        std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name), value)
+}
+
 unsafe fn msg_void_id<T>(receiver: Id, selector_name: &str, value: T) {
     let function: extern "C" fn(Id, Sel, T) = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value);
+}
+
+unsafe fn msg_usize(receiver: Id, selector_name: &str) -> usize {
+    let function: extern "C" fn(Id, Sel) -> usize = std::mem::transmute(objc_msgSend as *const ());
+    function(receiver, selector(selector_name))
 }
 
 unsafe fn msg_point(receiver: Id, selector_name: &str) -> NSPoint {
@@ -3437,10 +3660,11 @@ mod tests {
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
         NS_WINDOW_OCCLUSION_STATE_VISIBLE, NSPoint, NSRect, NSSize, PrivacySettingsPane,
-        RendererQualityPreset, WindowSizePreset, app_activation_policy, avatar_frame_for_bounds,
-        avatar_window_collection_behavior, avatar_window_level_key, avatar_window_level_name,
-        avatar_window_origin, avatar_window_size, avatar_window_style_mask, avatar_window_title,
-        camera_debug_summary, camera_runtime_active, is_model3_path, model_menu_title,
+        RendererQualityPreset, ScreenUnionFrame, WindowSizePreset, app_activation_policy,
+        avatar_frame_for_bounds, avatar_window_collection_behavior, avatar_window_level_key,
+        avatar_window_level_name, avatar_window_origin, avatar_window_size,
+        avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
+        capture_friendly_window_bypasses_present_suspension, is_model3_path, model_menu_title,
         model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
         relaunch_command_args, remove_toml_section, runtime_camera_config,
         runtime_microphone_config, runtime_mouse_config, selected_expression_index,
@@ -3548,9 +3772,31 @@ mod tests {
 
     #[test]
     fn window_output_uses_visible_desktop_origin() {
-        let desktop_origin = avatar_window_origin();
+        let desktop_size = avatar_window_size(&AppRuntimeConfig::default());
+        let desktop_origin = avatar_window_origin(&AppRuntimeConfig::default(), desktop_size, None);
         assert_eq!(desktop_origin.x, 100.0);
         assert_eq!(desktop_origin.y, 140.0);
+        let window_size = NSSize {
+            width: 540.0,
+            height: 720.0,
+        };
+        let offscreen_origin = avatar_window_origin(
+            &AppRuntimeConfig {
+                window_x: Some(-20000.0),
+                window_y: Some(140.0),
+                window_capture_friendly: true,
+                ..AppRuntimeConfig::default()
+            },
+            window_size,
+            Some(ScreenUnionFrame {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 1728.0,
+                max_y: 1117.0,
+            }),
+        );
+        assert_eq!(offscreen_origin.x, 12268.0);
+        assert_eq!(offscreen_origin.y, -10720.0);
         assert_eq!(
             avatar_window_title(&AppRuntimeConfig::default()),
             "vtube-studio-rs"
@@ -3633,6 +3879,19 @@ mod tests {
         ));
         assert!(!window_occlusion_visible(0));
         assert!(!window_occlusion_visible(8192));
+    }
+
+    #[test]
+    fn capture_friendly_windows_skip_occlusion_based_present_suspension() {
+        assert!(capture_friendly_window_bypasses_present_suspension(
+            &AppRuntimeConfig {
+                window_capture_friendly: true,
+                ..AppRuntimeConfig::default()
+            }
+        ));
+        assert!(!capture_friendly_window_bypasses_present_suspension(
+            &AppRuntimeConfig::default()
+        ));
     }
 
     #[test]
