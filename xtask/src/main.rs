@@ -1935,7 +1935,7 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
                 "internal.manifest_path",
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
-            ("internal.obs_preview_window", "true".to_string()),
+            ("internal.obs_preview_window", "false".to_string()),
             ("internal.activate_virtual_camera", "true".to_string()),
         ],
     );
@@ -1944,7 +1944,7 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
         "app",
         &[
             ("runtime_profile", toml_string_literal(runtime_profile)),
-            ("window_capture_friendly", "true".to_string()),
+            ("window_capture_friendly", "false".to_string()),
         ],
     );
     content = set_toml_section_value(&content, "diagnostics", "show", "false");
@@ -1964,12 +1964,10 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
     println!("Target: {}", target.label());
     println!("Config: {}", relative_display(&root, &config_path));
     println!(
-        "Output: Metal renders into IOSurface, opens an OBS preview window, and auto-requests Camera Extension activation"
+        "Output: Metal renders into IOSurface without a desktop avatar window and auto-requests Camera Extension activation"
     );
     println!("Manifest: target/internal-output/iosurface.json");
-    println!(
-        "OBS: capture `vtube-studio-rs OBS Source` until `VTube Studio RS Camera` is approved by macOS."
-    );
+    println!("OBS: use `VTube Studio RS Camera` after macOS approves the Camera Extension.");
     println!(
         "Run with: cargo xtask run-metal{}",
         if matches!(target, SelectModelTarget::Build) {

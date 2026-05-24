@@ -283,8 +283,8 @@ instead of `--build` if you want the same preset in the development profile.
 
 The first no-desktop output path is available from the `VT` menu under
 `OBS / Recording Output` as `Apply System Camera Source...`. This single option
-enables the IOSurface producer, keeps the temporary OBS preview window, and
-submits the Camera Extension activation request on the next launch. The same
+enables the IOSurface producer and submits the Camera Extension activation
+request on the next launch. It does not create a desktop avatar window. The same
 preset can be written from the terminal:
 
 ```bash
@@ -303,14 +303,12 @@ width = 1080.0
 height = 1080.0
 producer = "iosurface"
 manifest_path = "target/internal-output/iosurface.json"
-obs_preview_window = true
+obs_preview_window = false
 activate_virtual_camera = true
 ```
 
 After relaunch, the Metal renderer writes every frame into an offscreen
-IOSurface texture and also opens a capture-friendly transparent preview window
-named `vtube-studio-rs OBS Source`. OBS can capture that preview window today
-while the future system Virtual Camera is still being built. The renderer logs
+IOSurface texture without displaying Live2D on the desktop. The renderer logs
 `renderer_event=internal_output_frame_summary`. When built with
 `iosurface-output`, the internal preset creates an IOSurface-backed Metal
 texture and logs `renderer_event=iosurface_output_created` with its IOSurface
@@ -319,14 +317,9 @@ id. It also writes a small heartbeat manifest to
 size, pixel format, frame count, update timestamp, and the camera handoff
 contract: `1080x1080`, `BGRA8Unorm`, `60fps`. This is the GPU sharing
 foundation for the project-owned virtual camera output. The project does not
-plan to ship an OBS plugin; OBS should consume vtube-studio-rs through normal
-Window Capture today, and through a system camera source once virtual camera
-output is fully installed.
-
-Important: the OBS-capturable part is the preview window, not the raw
-IOSurface. OBS Window Capture and macOS Screen Capture still need a visible
-window until the project-owned Virtual Camera output is approved by macOS and
-visible as `VTube Studio RS Camera`.
+plan to ship an OBS plugin. In this preset OBS should consume vtube-studio-rs
+through the system camera source once macOS approves `VTube Studio RS Camera`;
+there is intentionally no desktop window fallback.
 
 Before implementing the Camera Extension itself, check the local prerequisites:
 

@@ -836,13 +836,13 @@ Status: next product milestone.
 - Done: add first-pass `output.mode = "internal"` and `VT` menu
   `OBS / Recording Output -> Apply System Camera Source...`. This is one
   relaunching preset, not two separate switches: it enables the IOSurface
-  producer, sets `output.internal.obs_preview_window = true`, and sets
+  producer, sets `output.internal.obs_preview_window = false`, and sets
   `output.internal.activate_virtual_camera = true` so the app submits the
   embedded CoreMediaIO System Extension activation request after relaunch.
   Internal mode renders the Live2D frame into an offscreen texture and logs
-  frame summaries. The preview window is still named `vtube-studio-rs OBS
-  Source` so OBS can use Window Capture while the system Virtual Camera output
-  is being approved by macOS. The raw IOSurface itself is still not directly
+  frame summaries. It intentionally does not create a desktop avatar or OBS
+  preview window; OBS should use `VTube Studio RS Camera` once the system Camera
+  Extension is approved by macOS. The raw IOSurface itself is still not directly
   capturable by OBS.
 - Done: add `iosurface-output` feature and first-pass
   `output.internal.producer = "iosurface"`. The internal renderer creates an

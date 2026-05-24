@@ -2204,11 +2204,11 @@ fn write_internal_output_preset_to_active_config(
                 "internal.manifest_path",
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
-            ("internal.obs_preview_window", "true".to_string()),
+            ("internal.obs_preview_window", "false".to_string()),
             ("internal.activate_virtual_camera", "true".to_string()),
         ],
     );
-    updated = set_toml_section_value(&updated, "app", "window_capture_friendly", "true");
+    updated = set_toml_section_value(&updated, "app", "window_capture_friendly", "false");
     updated = set_toml_section_value(
         &updated,
         "app",
