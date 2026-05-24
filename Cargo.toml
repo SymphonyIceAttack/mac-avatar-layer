@@ -17,6 +17,19 @@ camera-tracking = [
 ]
 cubism-core = ["dep:live2d-cubism-core-sys"]
 metal-renderer = ["cubism-core", "dep:core-graphics-types", "dep:metal"]
+iosurface-output = [
+    "metal-renderer",
+    "dep:objc2-io-surface",
+    "objc2-core-foundation/CFDictionary",
+    "objc2-core-foundation/CFNumber",
+    "objc2-core-foundation/CFString",
+]
+screen-capture-kit = [
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2-core-media",
+    "dep:objc2-screen-capture-kit",
+]
 
 [dependencies]
 block2 = { version = "0.6.2", optional = true }
@@ -32,8 +45,10 @@ objc2-av-foundation = { version = "0.3.2", optional = true, default-features = f
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColor", "CGWindowLevel"] }
 objc2-core-media = { version = "0.3.2", optional = true, default-features = false, features = ["CMSampleBuffer", "objc2"] }
+objc2-io-surface = { version = "0.3.2", optional = true, default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "objc2-core-foundation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDate", "NSError", "NSObjCRuntime", "NSString", "NSValue"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CATextLayer", "CATransaction", "CAMediaTiming", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-screen-capture-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media", "SCShareableContent", "SCStream"] }
 objc2-vision = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-media", "VNDetectFaceLandmarksRequest", "VNDetectFaceRectanglesRequest", "VNFaceLandmarks", "VNObservation", "VNRequest", "VNRequestHandler"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

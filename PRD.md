@@ -104,11 +104,12 @@ files:
 
 - `cargo xtask run-metal` provides a one-command local Metal run path with SDK
   auto-detection for `public/CubismSdkForNative`; it compiles
-  `metal-renderer camera-tracking` by default, launches through the local
-  signed `.app` wrapper for stable camera permissions, and the active TOML
-  controls whether camera capture starts. `cargo xtask run-metal --release`
-  runs the optimized build profile against `vtube-studio-rs.build.toml`, where
-  local camera input is enabled by default.
+  `metal-renderer camera-tracking screen-capture-kit` by default, launches
+  through the local signed `.app` wrapper for stable camera permissions, and
+  the active TOML controls whether camera capture and the ScreenCaptureKit
+  probe start. `cargo xtask run-metal --release` runs the optimized build
+  profile against `vtube-studio-rs.build.toml`, where local camera input is
+  enabled by default and the ScreenCaptureKit probe is disabled by default.
 - `cargo xtask capture-full-matrix` runs the standard visual regression matrix
   and writes one final Markdown report.
 - `cargo xtask run-space-test` writes Space/display reliability logs and a
@@ -189,7 +190,7 @@ Priority 1: Model And Runtime Usability
 - Keep `cargo xtask select-model [--dev|--build] MODEL_PATH` available as the
   developer-facing model selection path until an in-app picker exists.
 - Keep `cargo xtask doctor` available to check dev/build config files, selected
-  model manifests, window size settings, output mode, renderer, motion, mouse,
+  model manifests, window size settings, renderer, motion, mouse,
   microphone, and camera input settings, and Cubism Core SDK paths before
   launching.
 - Validate the selected `.model3.json` before opening the avatar window and
@@ -228,7 +229,24 @@ Priority 3: Rendering Parity And Quality
 - Refine nested offscreen, offscreen mask, and extended blend parity where
   official sample comparison reveals differences.
 
-Priority 4: macOS Productization
+Priority 4: Modern macOS Output And Capture
+
+- Keep the current `metal` crate renderer and transparent `CAMetalLayer`
+  window as the product output path. Do not start a wgpu renderer migration
+  until cross-platform rendering or a full renderer rewrite becomes a concrete
+  goal.
+- Treat OBS integration as standard window capture for now: users should use
+  OBS Window Capture or macOS Screen Capture against the transparent avatar
+  window.
+- Prototype ScreenCaptureKit capture of the current avatar window as the next
+  capture research task. Validate Screen Recording permission behavior, window
+  selection, transparent-background results, and Space-switch/display-sleep
+  behavior.
+- Research IOSurface + Metal texture sharing as a long-term process-to-process
+  GPU sharing foundation only after a real downstream consumer is defined.
+  Bare IOSurface is not a user-visible feature.
+
+Priority 5: macOS Productization
 
 - Continue Space/display sleep-wake reliability runs on real desktops.
 - Add packaging, signing, menu bar controls, and optional launch-at-login.
@@ -242,6 +260,12 @@ Priority 4: macOS Productization
 - Do not build a plugin marketplace or scene editor before rendering and motion
   are stable.
 - Do not replace Cubism Core with a pure Rust `.moc3` runtime in this phase.
+- Do not migrate the renderer to wgpu in this phase; keep the current native
+  Metal renderer unless a separate renderer rewrite is planned.
+- Do not restore Syphon output as a product path.
+- Do not add NDI, a virtual camera, or an OBS plugin in this phase.
+- Do not expose bare IOSurface sharing as a user-facing feature before a
+  concrete downstream consumer exists.
 
 ## Requirements
 
@@ -790,6 +814,26 @@ Status: next product milestone.
   transparent macOS window output for OBS Window Capture and macOS Screen
   Capture. Future high-performance frame sharing should evaluate
   ScreenCaptureKit, Metal, or IOSurface instead of restoring Syphon.
+- Done: add `cargo xtask configure-obs-recording [--dev|--build]` as the
+  supported OBS Window Capture preset. It keeps the normal transparent window
+  path, disables diagnostics and the ScreenCaptureKit probe, and enables higher
+  renderer quality settings for Window Capture/macOS Screen Capture.
+- Done: expose `VT` menu `Apply Window Capture Preset...`; it writes the same
+  preset to the active dev/build TOML and relaunches the app, so users do not
+  need a terminal-only workflow for OBS window-capture setup.
+- Done: add first-pass `output.mode = "internal"` and `VT` menu
+  `Apply Internal Output Probe...`. Internal mode does not create the avatar
+  `NSWindow`; Metal renders the Live2D frame into an offscreen texture and logs
+  frame summaries. This validates the no-desktop render path, but it is not yet
+  a consumer-visible OBS source.
+- Done: add `iosurface-output` feature and first-pass
+  `output.internal.producer = "iosurface"`. The internal renderer creates an
+  IOSurface-backed Metal texture and logs its IOSurface id, giving later
+  consumers a real GPU-shareable frame handle.
+- Planned: add a consumer-visible bridge on top of IOSurface, such as a virtual
+  camera, OBS plugin, or small companion client. Hiding the current window alone
+  would make normal OBS Window Capture/macOS Screen Capture lose the avatar
+  instead of recording it.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -829,6 +873,22 @@ Status: next product milestone.
   adding more large macOS UI features, so future menu/settings/window work is
   built on typed framework bindings instead of expanding hand-written
   `objc_msgSend` wrappers.
+
+### Milestone H: Capture And Frame Sharing Research
+
+Status: first ScreenCaptureKit runtime probe in progress.
+
+- Keep transparent window output as the supported OBS capture path.
+- Add a ScreenCaptureKit runtime sampling probe for the avatar window. It
+  counts frame metadata, logs stall/recovery events, and surfaces status in the
+  diagnostics overlay and `VT` menu without reading or storing frame pixels.
+- Document Screen Recording permission behavior, development/build defaults,
+  Space-switch behavior, and display sleep/wake observations from generated
+  Space reports.
+- Evaluate IOSurface + Metal texture sharing only as a long-term foundation for
+  a future producer/client or plugin path.
+- Keep wgpu migration out of this milestone; the current renderer remains
+  native Metal.
 
 ## Debug Controls
 

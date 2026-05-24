@@ -12,6 +12,8 @@ const DEFAULT_MODEL_PATH: &str = "public/model/0.model3.json";
 #[serde(default)]
 pub struct AppConfig {
     pub app: AppRuntimeConfig,
+    pub output: OutputConfig,
+    pub capture: CaptureConfig,
     pub model: ModelConfig,
     pub diagnostics: DiagnosticsConfig,
     pub renderer: RendererConfig,
@@ -122,6 +124,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             app: AppRuntimeConfig::default(),
+            output: OutputConfig::default(),
+            capture: CaptureConfig::default(),
             model: ModelConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             renderer: RendererConfig::default(),
@@ -173,6 +177,135 @@ impl Default for AppRuntimeConfig {
             window_width: 360.0,
             window_height: 480.0,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    pub mode: String,
+    pub internal: InternalOutputConfig,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            mode: "window".to_string(),
+            internal: InternalOutputConfig::default(),
+        }
+    }
+}
+
+impl OutputConfig {
+    pub fn mode(&self) -> OutputMode {
+        OutputMode::from_config(&self.mode)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum OutputMode {
+    Window,
+    Internal,
+}
+
+impl OutputMode {
+    pub fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "internal" | "obs_internal" | "offscreen" | "offscreen_internal" => Self::Internal,
+            _ => Self::Window,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Window => "window",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn uses_window(self) -> bool {
+        matches!(self, Self::Window)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct InternalOutputConfig {
+    pub width: f64,
+    pub height: f64,
+    pub producer: String,
+}
+
+impl Default for InternalOutputConfig {
+    fn default() -> Self {
+        Self {
+            width: 1080.0,
+            height: 1080.0,
+            producer: "none".to_string(),
+        }
+    }
+}
+
+impl InternalOutputConfig {
+    #[allow(dead_code)]
+    pub fn producer(&self) -> InternalOutputProducer {
+        InternalOutputProducer::from_config(&self.producer)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InternalOutputProducer {
+    None,
+    Iosurface,
+}
+
+impl InternalOutputProducer {
+    pub fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "iosurface" | "io_surface" => Self::Iosurface,
+            _ => Self::None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Iosurface => "iosurface",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct CaptureConfig {
+    pub screen_capture_kit: ScreenCaptureKitConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ScreenCaptureKitConfig {
+    pub enabled: Option<bool>,
+    pub target_fps: u32,
+    pub log_interval_seconds: f32,
+    pub stalled_after_seconds: f32,
+}
+
+impl Default for ScreenCaptureKitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            target_fps: 10,
+            log_interval_seconds: 2.0,
+            stalled_after_seconds: 2.0,
+        }
+    }
+}
+
+impl ScreenCaptureKitConfig {
+    pub fn enabled(&self, runtime_profile: RuntimeProfile) -> bool {
+        self.enabled
+            .unwrap_or_else(|| matches!(runtime_profile, RuntimeProfile::Development))
     }
 }
 
@@ -435,6 +568,12 @@ window_height = 720.0
 [diagnostics]
 show = false
 
+[capture.screen_capture_kit]
+enabled = true
+target_fps = 12
+log_interval_seconds = 1.5
+stalled_after_seconds = 3.0
+
 [renderer]
 disable_masks = true
 high_precision_masks = true
@@ -523,6 +662,10 @@ mouth_open = 0.7
         assert_eq!(config.app.window_width, 540.0);
         assert_eq!(config.app.window_height, 720.0);
         assert!(!config.diagnostics.show);
+        assert_eq!(config.capture.screen_capture_kit.enabled, Some(true));
+        assert_eq!(config.capture.screen_capture_kit.target_fps, 12);
+        assert_eq!(config.capture.screen_capture_kit.log_interval_seconds, 1.5);
+        assert_eq!(config.capture.screen_capture_kit.stalled_after_seconds, 3.0);
         assert!(config.renderer.disable_masks);
         assert!(config.renderer.high_precision_masks);
         assert_eq!(config.renderer.enable_msaa, Some(false));
@@ -677,6 +820,44 @@ path = "public/model/from-config.model3.json"
 
         assert!(config.invert_x);
         assert!(!config.invert_y);
+    }
+
+    #[test]
+    fn screen_capture_kit_enabled_defaults_follow_runtime_profile() {
+        let config = super::ScreenCaptureKitConfig::default();
+
+        assert!(config.enabled(RuntimeProfile::Development));
+        assert!(!config.enabled(RuntimeProfile::Release));
+    }
+
+    #[test]
+    fn output_mode_accepts_window_and_internal_aliases() {
+        assert_eq!(
+            super::OutputMode::from_config("window"),
+            super::OutputMode::Window
+        );
+        assert_eq!(
+            super::OutputMode::from_config("syphon"),
+            super::OutputMode::Window
+        );
+        assert_eq!(
+            super::OutputMode::from_config("internal"),
+            super::OutputMode::Internal
+        );
+        assert_eq!(
+            super::OutputMode::from_config("obs_internal"),
+            super::OutputMode::Internal
+        );
+        assert!(super::OutputMode::Window.uses_window());
+        assert!(!super::OutputMode::Internal.uses_window());
+        assert_eq!(
+            super::InternalOutputProducer::from_config("none"),
+            super::InternalOutputProducer::None
+        );
+        assert_eq!(
+            super::InternalOutputProducer::from_config("io_surface"),
+            super::InternalOutputProducer::Iosurface
+        );
     }
 
     #[test]

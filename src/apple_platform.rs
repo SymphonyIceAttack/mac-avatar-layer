@@ -6,7 +6,7 @@ use std::path::Path;
 
 #[cfg(not(feature = "metal-renderer"))]
 use objc2::AnyThread;
-#[cfg(feature = "camera-tracking")]
+#[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
 use objc2::rc::Retained;
 use objc2::rc::Retained as ObjcRetained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
@@ -20,7 +20,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
-#[cfg(feature = "camera-tracking")]
+#[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
 use objc2_foundation::NSError;
 use objc2_foundation::{NSArray, NSDate, NSRunLoopMode, NSString, NSURL};
 #[cfg(not(feature = "metal-renderer"))]
@@ -67,12 +67,12 @@ pub struct PanelStyle {
     pub sharing_read_only: bool,
 }
 
-#[cfg(feature = "camera-tracking")]
+#[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
 pub fn foundation_string(value: &Retained<NSString>) -> String {
     value.to_string()
 }
 
-#[cfg(feature = "camera-tracking")]
+#[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
 pub fn ns_error_description(error: Retained<NSError>) -> String {
     foundation_string(&error.localizedDescription())
 }
@@ -177,6 +177,11 @@ pub unsafe fn panel_is_visible(panel: *mut c_void) -> bool {
 pub unsafe fn panel_occlusion_state(panel: *mut c_void) -> u64 {
     let panel = unsafe { borrowed_panel(panel) };
     panel.occlusionState().0 as u64
+}
+
+pub unsafe fn panel_window_number(panel: *mut c_void) -> i64 {
+    let panel = unsafe { borrowed_panel(panel) };
+    panel.windowNumber() as i64
 }
 
 pub unsafe fn order_panel_front_regardless(panel: *mut c_void) {
@@ -442,6 +447,13 @@ pub fn open_path_in_workspace(path: &Path, is_directory: bool) -> Result<(), Str
 pub fn local_only_camera_message(detail: &str) -> String {
     format!(
         "{detail}\nCamera tracking is local-only: frames are not stored, written to disk, or logged."
+    )
+}
+
+#[cfg(feature = "screen-capture-kit")]
+pub fn local_only_screen_capture_message(detail: &str) -> String {
+    format!(
+        "{detail}\nScreenCaptureKit probe is diagnostic-only: frames are counted, but image data is not stored, written to disk, or logged."
     )
 }
 

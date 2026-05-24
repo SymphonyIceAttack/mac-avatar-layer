@@ -104,6 +104,10 @@ available:
 - Xcode Command Line Tools for standard macOS developer utilities.
 - Screen Recording permission for the terminal/Codex app may be required on
   the first capture run.
+- Development runs enable the ScreenCaptureKit runtime probe by default through
+  `[capture.screen_capture_kit].enabled = true`; macOS may ask for Screen
+  Recording permission for the local `.app` wrapper before probe frames appear.
+  Release/build configs disable this probe by default.
 - Microphone permission is required only when `[input.microphone].enabled =
   true`; if startup reports a microphone failure, allow the terminal/Codex app
   under macOS System Settings > Privacy & Security > Microphone, or disable the
@@ -190,19 +194,94 @@ Development and release builds both use the normal transparent window output.
 Release builds use the optimized profile in `vtube-studio-rs.build.toml` without
 requiring `Syphon.framework`.
 
-`run-metal` always compiles both `metal-renderer` and `camera-tracking`. The
-active TOML decides whether the camera opens through `[input.camera].enabled`.
+`run-metal` always compiles `metal-renderer`, `camera-tracking`, and
+`screen-capture-kit`. The active TOML decides whether the camera opens through
+`[input.camera].enabled` and whether the ScreenCaptureKit diagnostic probe
+starts through `[capture.screen_capture_kit].enabled`.
 The local build config enables camera input by default, so
 `cargo xtask run-metal --release` is the optimized camera-capable transparent
 window run path. App stdout/stderr are written under
 `target/camera-test/run-metal-*.log`.
+
+### OBS Window Capture Preset
+
+The current OBS path is the normal transparent macOS window. To configure a
+local profile for OBS Window Capture or macOS Screen Capture:
+
+```bash
+cargo xtask configure-obs-recording --build
+cargo xtask run-metal --release
+```
+
+The same preset is available in the running app from the `VT` menu:
+`Apply Window Capture Preset...`. The menu action writes the active dev/build
+TOML profile and relaunches the app.
+
+This is not an internal no-desktop recording mode. It still renders a visible
+transparent avatar window so OBS has a normal macOS window to capture. A true
+OBS internal output, where the avatar is not rendered on the desktop at all,
+requires a separate frame producer path such as an offscreen Metal render target
+plus IOSurface/virtual camera/OBS plugin integration.
+
+The preset writes the build profile to a transparent `screen_saver` level
+window, hides diagnostics, enables MSAA/mipmaps/8x anisotropy, keeps masks on,
+and disables the ScreenCaptureKit probe because it is diagnostic-only and not an
+OBS output path. Use `--dev` instead of `--build` if you want the same preset in
+the development profile.
+
+### Internal Output Probe
+
+The first no-desktop output path is available from the `VT` menu:
+`Apply Internal Output Probe...`. It writes:
+
+```toml
+[output]
+mode = "internal"
+
+[output.internal]
+width = 1080.0
+height = 1080.0
+producer = "iosurface"
+```
+
+After relaunch, the app does not create or show the avatar `NSWindow`; the Metal
+renderer renders every frame into an offscreen texture and logs
+`renderer_event=internal_output_frame_summary`. When built with
+`iosurface-output`, the internal preset creates an IOSurface-backed Metal
+texture and logs `renderer_event=iosurface_output_created` with its IOSurface
+id. This is the GPU sharing foundation for a real internal OBS path; a consumer
+still needs to read that IOSurface through a virtual camera, OBS plugin, or
+another dedicated client.
+
+### ScreenCaptureKit Probe
+
+The first ScreenCaptureKit integration is a runtime sampling probe, not an
+output mode. It captures the current avatar window through macOS
+ScreenCaptureKit and logs only frame metadata such as frame count, stall, and
+recovery events. It does not read pixels, store frames, write images to disk, or
+replace the normal transparent window output.
+
+Use it to diagnose whether macOS can keep capturing the avatar window across
+Space switches and display sleep/wake:
+
+```toml
+[capture.screen_capture_kit]
+enabled = true
+target_fps = 10
+log_interval_seconds = 2.0
+stalled_after_seconds = 2.0
+```
+
+If the probe reports `permission denied` or `waiting permission`, enable Screen
+Recording for `vtube-studio-rs Dev` in macOS System Settings > Privacy &
+Security > Screen Recording, then restart the app.
 
 ### Why Syphon Was Removed
 
 Syphon support has been removed from this project. Although Syphon is still
 useful in some VJ and creative-coding workflows, it is not a good long-term
 dependency for this app. The project is focused on a modern macOS rendering
-pipeline based on wgpu/Metal and standard window capture workflows.
+pipeline based on native Metal and standard window capture workflows.
 
 For OBS integration, capture the app window directly with OBS Window Capture or
 macOS Screen Capture. Future high-performance capture or frame-sharing work will

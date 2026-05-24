@@ -48,6 +48,7 @@ fn run() -> Result<()> {
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
+        Some("configure-obs-recording") => configure_obs_recording(args.collect()),
         Some("doctor") => doctor(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
@@ -85,6 +86,7 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
+  cargo xtask configure-obs-recording [--dev|--build]
   cargo xtask doctor
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
@@ -116,6 +118,8 @@ Commands:
                      Capture baseline screenshots for default, Mao, and Ren.
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
+  configure-obs-recording
+                     Write a transparent-window OBS Window Capture preset to dev/build config.
   doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
@@ -765,7 +769,7 @@ fn build_metal_executable(
         release,
         include_dir,
         lib_dir,
-        "metal-renderer camera-tracking",
+        "metal-renderer camera-tracking screen-capture-kit iosurface-output",
     )
 }
 
@@ -1105,6 +1109,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     println!("  [ ] Wait for the avatar window and confirm Frames keep increasing.");
     println!("  [ ] Switch between macOS Spaces several times.");
     println!("  [ ] Place the avatar beside a full-screen app and confirm it remains visible.");
+    println!("  [ ] Check ScreenCaptureKit probe summaries for frame/stall/recovery events.");
     println!("  [ ] Optionally test display sleep/wake and confirm the avatar recovers.");
     println!("  [ ] Confirm reruns do not leave duplicate avatar windows.");
     println!("  [ ] Press Ctrl-C here to stop, print the summary, and write the report.");
@@ -1116,7 +1121,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     command
         .arg("run")
         .arg("--features")
-        .arg("metal-renderer")
+        .arg("metal-renderer screen-capture-kit")
         .arg("--");
     if let Some(model_path) = args.first() {
         command.arg(model_path);
@@ -1491,6 +1496,88 @@ fn select_model(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn configure_obs_recording(args: Vec<String>) -> Result<()> {
+    let target = parse_obs_recording_args(args)?;
+    let root = project_root()?;
+    let config_path = root.join(target.config_path());
+    let example_config_path = root.join(target.example_config_path());
+    let mut content = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else if example_config_path.is_file() {
+        fs::read_to_string(&example_config_path)?
+    } else {
+        String::new()
+    };
+    content = remove_toml_section(&content, "output");
+
+    let runtime_profile = match target {
+        SelectModelTarget::Development => "development",
+        SelectModelTarget::Build => "release",
+    };
+    content = set_toml_section_values(
+        &content,
+        "output",
+        &[
+            ("mode", toml_string_literal("window")),
+            ("internal.width", "1080.0".to_string()),
+            ("internal.height", "1080.0".to_string()),
+            ("internal.producer", toml_string_literal("none")),
+        ],
+    );
+    content = set_toml_section_values(
+        &content,
+        "app",
+        &[
+            ("runtime_profile", toml_string_literal(runtime_profile)),
+            ("window_level", toml_string_literal("screen_saver")),
+            ("window_width", "540.0".to_string()),
+            ("window_height", "720.0".to_string()),
+        ],
+    );
+    content = set_toml_section_value(&content, "diagnostics", "show", "false");
+    content = set_toml_section_values(
+        &content,
+        "capture.screen_capture_kit",
+        &[
+            ("enabled", "false".to_string()),
+            ("target_fps", "10".to_string()),
+            ("log_interval_seconds", "2.0".to_string()),
+            ("stalled_after_seconds", "2.0".to_string()),
+        ],
+    );
+    content = set_toml_section_values(
+        &content,
+        "renderer",
+        &[
+            ("disable_masks", "false".to_string()),
+            ("high_precision_masks", "false".to_string()),
+            ("enable_msaa", "true".to_string()),
+            ("atlas_mipmaps", "true".to_string()),
+            ("atlas_anisotropy", "8".to_string()),
+            ("debug_texture_mode", toml_string_literal("none")),
+        ],
+    );
+    fs::write(&config_path, content)?;
+
+    println!("OBS Window Capture preset updated.");
+    println!("Target: {}", target.label());
+    println!("Config: {}", relative_display(&root, &config_path));
+    println!("Output: transparent desktop window for OBS Window Capture or macOS Screen Capture");
+    println!("Note: this is not an internal no-desktop OBS output path.");
+    println!("Window: level screen_saver | size 540x720 | diagnostics off");
+    println!("Renderer: MSAA on | mipmaps on | anisotropy 8 | masks enabled");
+    println!("ScreenCaptureKit probe: off (not an OBS output path)");
+    println!(
+        "Run with: cargo xtask run-metal{}",
+        if matches!(target, SelectModelTarget::Build) {
+            " --release"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 fn tune_input(args: Vec<String>) -> Result<()> {
     let (target, input, preset) = parse_tune_input_args(args)?;
 
@@ -1718,6 +1805,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
     };
 
     let issues = check_doctor_app_config(target, &config.app)
+        + check_doctor_capture_config(target, &config.capture)
         + check_doctor_renderer_config(target, &config.renderer)
         + check_doctor_motion_config(target, &config.motion)
         + check_doctor_input_config(target, &config.input);
@@ -1818,6 +1906,55 @@ fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> 
 
 fn valid_doctor_window_dimension(value: f64) -> bool {
     value.is_finite() && (96.0..=2400.0).contains(&value)
+}
+
+fn check_doctor_capture_config(target: SelectModelTarget, capture: &DoctorCaptureConfig) -> usize {
+    let mut issues = 0usize;
+    let sckit = &capture.screen_capture_kit;
+    if let Some(value) = sckit.target_fps {
+        if !(1..=60).contains(&value) {
+            println!(
+                "[!] {} capture.screen_capture_kit.target_fps should be from 1 to 60, got {value}",
+                target.label()
+            );
+            issues += 1;
+        }
+    }
+    issues += check_optional_range(
+        target,
+        "capture.screen_capture_kit.log_interval_seconds",
+        sckit.log_interval_seconds,
+        0.25,
+        60.0,
+    );
+    issues += check_optional_range(
+        target,
+        "capture.screen_capture_kit.stalled_after_seconds",
+        sckit.stalled_after_seconds,
+        0.25,
+        60.0,
+    );
+    println!(
+        "[x] {} ScreenCaptureKit probe config: enabled {} | fps {} | log {} | stall {}",
+        target.label(),
+        sckit
+            .enabled
+            .map(|value| if value { "on" } else { "off" })
+            .unwrap_or("profile-default"),
+        sckit
+            .target_fps
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default".to_string()),
+        optional_seconds_label(sckit.log_interval_seconds),
+        optional_seconds_label(sckit.stalled_after_seconds)
+    );
+    issues
+}
+
+fn optional_seconds_label(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.1}s"))
+        .unwrap_or_else(|| "default".to_string())
 }
 
 fn check_doctor_renderer_config(
@@ -2258,6 +2395,7 @@ fn check_cubism_core_sdk(root: &Path) -> usize {
 #[serde(default)]
 struct DoctorConfig {
     app: DoctorAppConfig,
+    capture: DoctorCaptureConfig,
     input: DoctorInputConfig,
     model: DoctorModelConfig,
     motion: DoctorMotionConfig,
@@ -2269,6 +2407,21 @@ struct DoctorConfig {
 struct DoctorAppConfig {
     window_width: Option<f64>,
     window_height: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorCaptureConfig {
+    screen_capture_kit: DoctorScreenCaptureKitConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DoctorScreenCaptureKitConfig {
+    enabled: Option<bool>,
+    target_fps: Option<u32>,
+    log_interval_seconds: Option<f64>,
+    stalled_after_seconds: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2366,6 +2519,15 @@ fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, Stri
             Ok((SelectModelTarget::Build, model_path.clone()))
         }
         _ => Err("usage: cargo xtask select-model [--dev|--build] MODEL_PATH".into()),
+    }
+}
+
+fn parse_obs_recording_args(args: Vec<String>) -> Result<SelectModelTarget> {
+    match args.as_slice() {
+        [] => Ok(SelectModelTarget::Build),
+        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
+        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
+        _ => Err("usage: cargo xtask configure-obs-recording [--dev|--build]".into()),
     }
 }
 
@@ -3087,6 +3249,11 @@ struct SpaceTestReport {
     next_drawable_unavailable: usize,
     next_drawable_recovered: usize,
     drawable_size_changed: usize,
+    sckit_probe_started: usize,
+    sckit_frame_summary: usize,
+    sckit_stalled: usize,
+    sckit_recovered: usize,
+    sckit_probe_failed: usize,
     recent_events: String,
 }
 
@@ -3108,6 +3275,11 @@ fn write_space_test_report(
         next_drawable_unavailable: renderer_event_count(&log, "next_drawable_unavailable"),
         next_drawable_recovered: renderer_event_count(&log, "next_drawable_recovered"),
         drawable_size_changed: renderer_event_count(&log, "drawable_size_changed"),
+        sckit_probe_started: renderer_event_count(&log, "sckit_probe_started"),
+        sckit_frame_summary: renderer_event_count(&log, "sckit_frame_summary"),
+        sckit_stalled: renderer_event_count(&log, "sckit_stalled"),
+        sckit_recovered: renderer_event_count(&log, "sckit_recovered"),
+        sckit_probe_failed: renderer_event_count(&log, "sckit_probe_failed"),
         recent_events: recent_renderer_events(&log, 20),
     };
 
@@ -3153,6 +3325,27 @@ fn write_space_test_report(
     } else {
         ("PASS", "no long frame gaps were logged")
     };
+    let (sckit_status, sckit_detail) = if report.sckit_probe_failed > 0 {
+        (
+            "CHECK",
+            "ScreenCaptureKit probe failed; check Screen Recording permission and logs",
+        )
+    } else if report.sckit_probe_started > 0 && report.sckit_frame_summary > 0 {
+        (
+            "PASS",
+            "ScreenCaptureKit probe started and reported frame summaries",
+        )
+    } else if report.sckit_probe_started > 0 {
+        (
+            "CHECK",
+            "ScreenCaptureKit probe started but no frame summary was captured before shutdown",
+        )
+    } else {
+        (
+            "INFO",
+            "ScreenCaptureKit probe did not start; it may be disabled in the active profile",
+        )
+    };
 
     let markdown = format!(
         "\
@@ -3168,6 +3361,7 @@ fn write_space_test_report(
 - [ ] FPS recovered to roughly 60 after transitions.
 - [ ] Avatar window remained visible after Space switches.
 - [ ] Avatar remained visible beside a full-screen app.
+- [ ] ScreenCaptureKit probe kept reporting frames or recovered after stalls.
 - [ ] Avatar recovered after display sleep/wake.
 - [ ] No duplicate avatar windows appeared after reruns.
 - [ ] Notes:
@@ -3187,6 +3381,11 @@ fn write_space_test_report(
 | next_drawable_unavailable | {} |
 | next_drawable_recovered | {} |
 | drawable_size_changed | {} |
+| sckit_probe_started | {} |
+| sckit_frame_summary | {} |
+| sckit_stalled | {} |
+| sckit_recovered | {} |
+| sckit_probe_failed | {} |
 
 ## Automatic Assessment
 
@@ -3196,6 +3395,7 @@ fn write_space_test_report(
 | Drawable recovery | {} | {} |
 | Display wake | {} | {} |
 | Long frame gaps | {} | {} |
+| ScreenCaptureKit probe | {} | {} |
 
 ## Recent Renderer Events
 
@@ -3217,6 +3417,11 @@ fn write_space_test_report(
         report.next_drawable_unavailable,
         report.next_drawable_recovered,
         report.drawable_size_changed,
+        report.sckit_probe_started,
+        report.sckit_frame_summary,
+        report.sckit_stalled,
+        report.sckit_recovered,
+        report.sckit_probe_failed,
         startup_status,
         startup_detail,
         drawable_status,
@@ -3225,6 +3430,8 @@ fn write_space_test_report(
         wake_detail,
         gap_status,
         gap_detail,
+        sckit_status,
+        sckit_detail,
         report.recent_events
     );
     fs::write(report_path, markdown)?;
@@ -3300,6 +3507,20 @@ fn print_space_test_summary(report: &SpaceTestReport, log_path: &Path, report_pa
         "  {:<34} {}",
         "drawable_size_changed", report.drawable_size_changed
     );
+    println!(
+        "  {:<34} {}",
+        "sckit_probe_started", report.sckit_probe_started
+    );
+    println!(
+        "  {:<34} {}",
+        "sckit_frame_summary", report.sckit_frame_summary
+    );
+    println!("  {:<34} {}", "sckit_stalled", report.sckit_stalled);
+    println!("  {:<34} {}", "sckit_recovered", report.sckit_recovered);
+    println!(
+        "  {:<34} {}",
+        "sckit_probe_failed", report.sckit_probe_failed
+    );
     println!();
     println!("Recent renderer events:");
     println!("{}", report.recent_events);
@@ -3373,6 +3594,30 @@ fn set_toml_values(path: &Path, updates: &[(&str, String)]) -> Result<()> {
     }
     fs::write(path, content)?;
     Ok(())
+}
+
+fn remove_toml_section(content: &str, section: &str) -> String {
+    let section_header = format!("[{section}]");
+    let subsection_prefix = format!("[{section}.");
+    let mut output = String::new();
+    let mut removing = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == section_header || trimmed.starts_with(&subsection_prefix) {
+            removing = true;
+            continue;
+        }
+        if removing && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            removing = false;
+        }
+        if !removing {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
 }
 
 fn set_toml_value(content: &str, key: &str, value: &str) -> String {
@@ -6506,6 +6751,32 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     }
 
     #[test]
+    fn remove_toml_section_removes_legacy_output_block() {
+        let updated = remove_toml_section(
+            r#"[app]
+window_level = "screen_saver"
+
+[output]
+mode = "syphon"
+syphon_name = "VTubeStudioRS"
+
+[output.internal]
+width = 1080.0
+
+[renderer]
+atlas_anisotropy = 1
+"#,
+            "output",
+        );
+
+        assert!(updated.contains("[app]\n"));
+        assert!(updated.contains("[renderer]\n"));
+        assert!(!updated.contains("[output]"));
+        assert!(!updated.contains("[output.internal]"));
+        assert!(!updated.contains("syphon_name"));
+    }
+
+    #[test]
     fn select_model_args_choose_dev_or_build_config() {
         let (target, model_path) =
             parse_select_model_args(vec!["public/model/0.model3.json".to_string()])
@@ -6520,6 +6791,22 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
         .expect("build target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
         assert_eq!(model_path, "public/model/0.model3.json");
+    }
+
+    #[test]
+    fn obs_recording_args_default_to_build_config() {
+        let target = parse_obs_recording_args(Vec::new()).expect("default obs target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        let target = parse_obs_recording_args(vec!["--dev".to_string()])
+            .expect("dev obs target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+
+        let target = parse_obs_recording_args(vec!["--build".to_string()])
+            .expect("build obs target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        assert!(parse_obs_recording_args(vec!["--release".to_string()]).is_err());
     }
 
     #[test]

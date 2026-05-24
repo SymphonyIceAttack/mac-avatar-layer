@@ -3,7 +3,9 @@
 
 use crate::audio_input::MicrophoneInput;
 use crate::camera_input::{CameraInput, CameraStatus};
-use crate::config::{AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig};
+use crate::config::{
+    AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, OutputMode,
+};
 use crate::cubism;
 use crate::live2d_model::Live2dModel;
 #[cfg(feature = "metal-renderer")]
@@ -103,6 +105,8 @@ const MENU_OPEN_CAMERA_PRIVACY: u32 = 1 << 12;
 const MENU_OPEN_MICROPHONE_PRIVACY: u32 = 1 << 13;
 const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
 const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
+const MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET: u32 = 1 << 16;
+const MENU_APPLY_INTERNAL_OUTPUT_PRESET: u32 = 1 << 17;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
 const RENDERER_QUALITY_INDEX_UNCHANGED: i32 = -1;
@@ -160,9 +164,24 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         println!("{cubism_summary}");
         log_offscreen_status(cubism_runtime.info());
         log_cubism_preview(&cubism_runtime);
-        let window = create_avatar_window(&config.app)?;
-        println!("renderer_event=window_created kind=avatar");
-        let root_layer = create_root_layer(window)?;
+        let output_mode = config.output.mode();
+        #[cfg(not(feature = "metal-renderer"))]
+        if !output_mode.uses_window() {
+            return Err("internal output mode requires the metal-renderer feature".to_string());
+        }
+        let (window, root_layer) = if output_mode.uses_window() {
+            let window = create_avatar_window(&config.app, output_mode)?;
+            println!("renderer_event=window_created kind=avatar");
+            (window, create_root_layer(window)?)
+        } else {
+            println!(
+                "renderer_event=internal_output_configured mode={} window=none width={:.1} height={:.1} producer=none",
+                output_mode.label(),
+                config.output.internal.width,
+                config.output.internal.height
+            );
+            (NIL, NIL)
+        };
         #[allow(unused_mut)]
         let mut renderer_diagnostics = RendererDiagnostics::from_config(&config.renderer)
             .with_offscreen_count(cubism_runtime.info().offscreen_count);
@@ -190,29 +209,58 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                     count = probe.extended_blend_count
                 );
             }
-            install_metal_layer(root_layer, &mut renderer)?;
+            if output_mode.uses_window() {
+                install_metal_layer(root_layer, &mut renderer)?;
+            } else {
+                renderer
+                    .set_drawable_size(config.output.internal.width, config.output.internal.height);
+            }
             renderer
         };
         #[cfg(not(feature = "metal-renderer"))]
         let avatar_layer = create_avatar_layer(&model)?;
-        let diagnostics_layer = create_diagnostics_layer()?;
-        #[cfg(not(feature = "metal-renderer"))]
-        crate::apple_platform::add_sublayer(root_layer, avatar_layer);
-        crate::apple_platform::add_sublayer(root_layer, diagnostics_layer);
+        let diagnostics_layer = if output_mode.uses_window() {
+            let diagnostics_layer = create_diagnostics_layer()?;
+            #[cfg(not(feature = "metal-renderer"))]
+            crate::apple_platform::add_sublayer(root_layer, avatar_layer);
+            crate::apple_platform::add_sublayer(root_layer, diagnostics_layer);
+            crate::apple_platform::order_panel_front_regardless(window);
+            diagnostics_layer
+        } else {
+            NIL
+        };
         let mut diagnostics_visible = config.diagnostics.show;
-        crate::apple_platform::set_layer_hidden(diagnostics_layer, !diagnostics_visible);
+        if !diagnostics_layer.is_null() {
+            crate::apple_platform::set_layer_hidden(diagnostics_layer, !diagnostics_visible);
+        }
         let mut selected_expression_index =
             selected_expression_index(&model, config.motion.expression.as_deref());
         let mut camera_input = CameraInput::from_config(&config.input.camera);
         let mut camera_enabled = camera_runtime_active(camera_input.status());
         let mut mouse_enabled = config.input.mouse.enabled;
         let mut microphone_enabled = config.input.microphone.enabled;
+        let mut screen_capture_probe = if output_mode.uses_window() {
+            crate::screen_capture_probe::ScreenCaptureProbe::start(
+                window,
+                &config.capture.screen_capture_kit,
+                config.app.runtime_profile,
+            )
+        } else {
+            crate::screen_capture_probe::ScreenCaptureProbe::disabled_with_reason(
+                &config.capture.screen_capture_kit,
+                "Internal output has no avatar NSWindow for ScreenCaptureKit to sample.",
+            )
+        };
+        let screen_capture_snapshot = screen_capture_probe.poll();
+        let mut last_screen_capture_menu_text =
+            crate::screen_capture_probe::menu_text(&screen_capture_snapshot);
         let settings_menu = install_settings_menu(
             app,
             &model,
             model_path,
             &config,
             camera_input.status_label(),
+            &last_screen_capture_menu_text,
             &renderer_diagnostics,
             RuntimeControlState {
                 diagnostics_visible,
@@ -228,8 +276,6 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             },
         )?;
 
-        crate::apple_platform::order_panel_front_regardless(window);
-
         let event_pump = EventPump::new()?;
         let mut frame_clock = FrameClock::new(TARGET_FPS);
         let mut diagnostics = Diagnostics::new(
@@ -243,6 +289,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 camera_input.diagnostic(),
             )
             .overlay_text,
+            crate::screen_capture_probe::overlay_text(&screen_capture_snapshot),
         );
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
@@ -255,7 +302,9 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
         let mut lifecycle_monitor = AppLifecycleMonitor::new();
-        lifecycle_monitor.poll(app, window, &config.app, started_at);
+        if output_mode.uses_window() {
+            lifecycle_monitor.poll(app, window, &config.app, started_at);
+        }
 
         loop {
             event_pump.drain_pending_events(app);
@@ -277,7 +326,9 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut camera_input,
                 model_path,
             )?;
-            lifecycle_monitor.poll(app, window, &config.app, started_at);
+            if output_mode.uses_window() {
+                lifecycle_monitor.poll(app, window, &config.app, started_at);
+            }
             begin_immediate_layer_update();
             let now = Instant::now();
             let camera_sample = camera_input.latest_sample();
@@ -286,16 +337,27 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut cubism_runtime,
                 now.saturating_duration_since(last_frame_at),
                 &MotionInput {
-                    pointer: normalized_mouse_position(window, &config.input.mouse),
+                    pointer: if output_mode.uses_window() {
+                        normalized_mouse_position(window, &config.input.mouse)
+                    } else {
+                        None
+                    },
                     mouth_level: microphone.as_ref().map(MicrophoneInput::level),
                     camera: camera_sample,
                 },
             );
             last_frame_at = now;
             #[cfg(feature = "metal-renderer")]
-            sync_metal_layer_geometry(window, root_layer, &mut metal_renderer)?;
+            if output_mode.uses_window() {
+                sync_metal_layer_geometry(window, root_layer, &mut metal_renderer)?;
+            }
             #[cfg(feature = "metal-renderer")]
-            metal_renderer.render(&cubism_runtime)?;
+            if output_mode.uses_window() {
+                metal_renderer.render(&cubism_runtime)?;
+            } else {
+                metal_renderer
+                    .render_internal(&cubism_runtime, config.output.internal.producer())?;
+            }
             #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
             {
                 let rgba = software_renderer.render(&cubism_runtime);
@@ -311,7 +373,22 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &camera_summary.menu_text,
                 &mut last_camera_menu_text,
             )?;
-            diagnostics.record_frame(diagnostics_layer, started_at)?;
+            let screen_capture_snapshot = screen_capture_probe.poll();
+            let screen_capture_menu_text =
+                crate::screen_capture_probe::menu_text(&screen_capture_snapshot);
+            diagnostics.set_screen_capture_summary(crate::screen_capture_probe::overlay_text(
+                &screen_capture_snapshot,
+            ));
+            update_screen_capture_menu_status(
+                &settings_menu,
+                &screen_capture_menu_text,
+                &mut last_screen_capture_menu_text,
+            )?;
+            if diagnostics_layer.is_null() {
+                diagnostics.record_frame_without_layer(started_at);
+            } else {
+                diagnostics.record_frame(diagnostics_layer, started_at)?;
+            }
             commit_layer_update();
             frame_clock.sleep_until_next_frame();
         }
@@ -520,7 +597,10 @@ unsafe fn prevent_app_nap() -> Result<Id, String> {
     Ok(token)
 }
 
-unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, String> {
+unsafe fn create_avatar_window(
+    app_config: &AppRuntimeConfig,
+    output_mode: OutputMode,
+) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
     let window_origin = avatar_window_origin();
     let window =
@@ -541,7 +621,7 @@ unsafe fn create_avatar_window(app_config: &AppRuntimeConfig) -> Result<Id, Stri
 
     println!(
         "renderer_event=window_configured kind=nonactivating_panel output={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
-        output_mode_label(),
+        output_mode.label(),
         avatar_window_level(app_config),
         avatar_window_level_name(&app_config.window_level),
         avatar_window_level_key(&app_config.window_level),
@@ -590,10 +670,6 @@ fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
 unsafe fn avatar_window_level(app_config: &AppRuntimeConfig) -> NSInteger {
     crate::apple_platform::window_level_for_key(avatar_window_level_key(&app_config.window_level))
         as NSInteger
-}
-
-fn output_mode_label() -> &'static str {
-    "window"
 }
 
 fn avatar_window_level_key(configured: &str) -> i32 {
@@ -809,6 +885,7 @@ struct SettingsMenu {
     mouse_item: Id,
     microphone_item: Id,
     camera_item: Id,
+    screen_capture_item: Id,
     model_items: Vec<Id>,
     model_entries: Vec<ModelMenuEntry>,
     window_size_items: Vec<Id>,
@@ -1029,6 +1106,7 @@ unsafe fn install_settings_menu(
     model_path: &str,
     config: &AppConfig,
     camera_status: &str,
+    screen_capture_status: &str,
     renderer_diagnostics: &RendererDiagnostics,
     state: RuntimeControlState,
 ) -> Result<SettingsMenu, String> {
@@ -1171,6 +1249,7 @@ unsafe fn install_settings_menu(
         "",
         controller,
     )?;
+    let screen_capture_item = add_disabled_menu_item(app_menu, screen_capture_status)?;
     add_separator_menu_item(app_menu)?;
 
     add_disabled_menu_item(app_menu, "Mouse Calibration")?;
@@ -1289,6 +1368,24 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, &texture_title)?;
     add_separator_menu_item(app_menu)?;
 
+    add_disabled_menu_item(app_menu, "Output Presets (relaunches app)")?;
+    add_action_menu_item(
+        app_menu,
+        "Apply Window Capture Preset...",
+        "applyObsWindowCapturePreset:",
+        "",
+        controller,
+    )?;
+    add_action_menu_item(
+        app_menu,
+        "Apply Internal Output Probe...",
+        "applyInternalOutputPreset:",
+        "",
+        controller,
+    )?;
+    add_disabled_menu_item(app_menu, "Internal: no desktop window, producer pending")?;
+    add_separator_menu_item(app_menu)?;
+
     add_action_menu_item(
         app_menu,
         "Open Active Config...",
@@ -1312,6 +1409,7 @@ unsafe fn install_settings_menu(
         mouse_item,
         microphone_item,
         camera_item,
+        screen_capture_item,
         model_items,
         model_entries,
         window_size_items,
@@ -1351,7 +1449,9 @@ unsafe fn handle_settings_menu_commands(
 
     if commands & MENU_TOGGLE_DIAGNOSTICS != 0 {
         *diagnostics_visible = !*diagnostics_visible;
-        crate::apple_platform::set_layer_hidden(diagnostics_layer, !*diagnostics_visible);
+        if !diagnostics_layer.is_null() {
+            crate::apple_platform::set_layer_hidden(diagnostics_layer, !*diagnostics_visible);
+        }
         println!(
             "renderer_event=settings_changed diagnostics_visible={}",
             *diagnostics_visible
@@ -1500,6 +1600,26 @@ unsafe fn handle_settings_menu_commands(
         }
     }
 
+    if commands & MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET != 0 {
+        write_obs_window_capture_preset_to_active_config(config.app.runtime_profile)?;
+        schedule_model_relaunch(model_path)?;
+        println!(
+            "renderer_event=settings_changed obs_window_capture_preset=applied apply=relaunch config=\"{}\"",
+            crate::config::active_config_path()
+        );
+        terminate_current_app()?;
+    }
+
+    if commands & MENU_APPLY_INTERNAL_OUTPUT_PRESET != 0 {
+        write_internal_output_preset_to_active_config(config.app.runtime_profile)?;
+        schedule_model_relaunch(model_path)?;
+        println!(
+            "renderer_event=settings_changed internal_output_preset=applied apply=relaunch config=\"{}\"",
+            crate::config::active_config_path()
+        );
+        terminate_current_app()?;
+    }
+
     if commands & MENU_OPEN_CAMERA_PRIVACY != 0 {
         open_privacy_settings(PrivacySettingsPane::Camera);
     }
@@ -1622,6 +1742,20 @@ unsafe fn update_camera_menu_status(
     }
 
     crate::apple_platform::set_menu_item_title(menu.camera_item, title);
+    *last_title = title.to_string();
+    Ok(())
+}
+
+unsafe fn update_screen_capture_menu_status(
+    menu: &SettingsMenu,
+    title: &str,
+    last_title: &mut String,
+) -> Result<(), String> {
+    if last_title == title {
+        return Ok(());
+    }
+
+    crate::apple_platform::set_menu_item_title(menu.screen_capture_item, title);
     *last_title = title.to_string();
     Ok(())
 }
@@ -1876,6 +2010,125 @@ fn write_renderer_quality_to_active_config(
         .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
 }
 
+fn write_obs_window_capture_preset_to_active_config(
+    runtime_profile: crate::config::RuntimeProfile,
+) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let runtime_profile = match runtime_profile {
+        crate::config::RuntimeProfile::Development => "development",
+        crate::config::RuntimeProfile::Release => "release",
+    };
+    let mut updated = remove_toml_section(&content, "output");
+    updated = set_toml_section_values(
+        &updated,
+        "output",
+        &[
+            ("mode", toml_string_literal("window")),
+            ("internal.width", "1080.0".to_string()),
+            ("internal.height", "1080.0".to_string()),
+        ],
+    );
+    updated = set_toml_section_values(
+        &updated,
+        "app",
+        &[
+            ("runtime_profile", toml_string_literal(runtime_profile)),
+            ("window_level", toml_string_literal("screen_saver")),
+            ("window_width", "540.0".to_string()),
+            ("window_height", "720.0".to_string()),
+        ],
+    );
+    updated = set_toml_section_value(&updated, "diagnostics", "show", "false");
+    updated = set_toml_section_values(
+        &updated,
+        "capture.screen_capture_kit",
+        &[
+            ("enabled", "false".to_string()),
+            ("target_fps", "10".to_string()),
+            ("log_interval_seconds", "2.0".to_string()),
+            ("stalled_after_seconds", "2.0".to_string()),
+        ],
+    );
+    updated = set_toml_section_values(
+        &updated,
+        "renderer",
+        &[
+            ("disable_masks", "false".to_string()),
+            ("high_precision_masks", "false".to_string()),
+            ("enable_msaa", "true".to_string()),
+            ("atlas_mipmaps", "true".to_string()),
+            ("atlas_anisotropy", "8".to_string()),
+            ("debug_texture_mode", toml_string_literal("none")),
+        ],
+    );
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
+fn write_internal_output_preset_to_active_config(
+    runtime_profile: crate::config::RuntimeProfile,
+) -> Result<(), String> {
+    let config_path = Path::new(crate::config::active_config_path());
+    let content = if config_path.is_file() {
+        std::fs::read_to_string(config_path)
+            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let runtime_profile = match runtime_profile {
+        crate::config::RuntimeProfile::Development => "development",
+        crate::config::RuntimeProfile::Release => "release",
+    };
+    let mut updated = remove_toml_section(&content, "output");
+    updated = set_toml_section_values(
+        &updated,
+        "output",
+        &[
+            ("mode", toml_string_literal("internal")),
+            ("internal.width", "1080.0".to_string()),
+            ("internal.height", "1080.0".to_string()),
+            ("internal.producer", toml_string_literal("iosurface")),
+        ],
+    );
+    updated = set_toml_section_value(
+        &updated,
+        "app",
+        "runtime_profile",
+        &toml_string_literal(runtime_profile),
+    );
+    updated = set_toml_section_value(&updated, "diagnostics", "show", "false");
+    updated = set_toml_section_values(
+        &updated,
+        "capture.screen_capture_kit",
+        &[
+            ("enabled", "false".to_string()),
+            ("target_fps", "10".to_string()),
+            ("log_interval_seconds", "2.0".to_string()),
+            ("stalled_after_seconds", "2.0".to_string()),
+        ],
+    );
+    updated = set_toml_section_values(
+        &updated,
+        "renderer",
+        &[
+            ("disable_masks", "false".to_string()),
+            ("high_precision_masks", "false".to_string()),
+            ("enable_msaa", "true".to_string()),
+            ("atlas_mipmaps", "true".to_string()),
+            ("atlas_anisotropy", "8".to_string()),
+            ("debug_texture_mode", toml_string_literal("none")),
+        ],
+    );
+    std::fs::write(config_path, updated)
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PrivacySettingsPane {
     Camera,
@@ -2078,6 +2331,32 @@ fn set_toml_section_values(content: &str, section: &str, values: &[(&str, String
         })
 }
 
+fn remove_toml_section(content: &str, section: &str) -> String {
+    let section_header = format!("[{section}]");
+    let subsection_prefix = format!("[{section}.");
+    let mut output = String::new();
+    let mut removing = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == section_header || trimmed.starts_with(&subsection_prefix) {
+            removing = true;
+            continue;
+        }
+
+        if removing && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            removing = false;
+        }
+
+        if !removing {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
 fn toml_bool_literal(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
@@ -2211,6 +2490,14 @@ fn settings_menu_controller_class() -> Result<Class, String> {
             ("selectModel:", settings_select_model),
             ("selectWindowSize:", settings_select_window_size),
             ("selectRendererQuality:", settings_select_renderer_quality),
+            (
+                "applyObsWindowCapturePreset:",
+                settings_apply_obs_window_capture_preset,
+            ),
+            (
+                "applyInternalOutputPreset:",
+                settings_apply_internal_output_preset,
+            ),
         ],
     )
 }
@@ -2357,6 +2644,22 @@ extern "C-unwind" fn settings_select_renderer_quality(
     MENU_COMMANDS.fetch_or(MENU_SELECT_RENDERER_QUALITY, Ordering::AcqRel);
 }
 
+extern "C-unwind" fn settings_apply_obs_window_capture_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET, Ordering::AcqRel);
+}
+
+extern "C-unwind" fn settings_apply_internal_output_preset(
+    _this: *mut objc2::runtime::AnyObject,
+    _selector: objc2::runtime::Sel,
+    _sender: *mut objc2::runtime::AnyObject,
+) {
+    MENU_COMMANDS.fetch_or(MENU_APPLY_INTERNAL_OUTPUT_PRESET, Ordering::AcqRel);
+}
+
 struct EventPump {
     modes: [Id; 3],
     nonblocking_date: Id,
@@ -2426,6 +2729,7 @@ struct Diagnostics {
     cubism_summary: String,
     renderer_summary: String,
     camera_summary: String,
+    screen_capture_summary: String,
     total_frames: u64,
     slow_frames: u64,
     frames_since_report: u64,
@@ -2694,6 +2998,7 @@ impl Diagnostics {
         cubism_summary: String,
         renderer_diagnostics: RendererDiagnostics,
         camera_summary: String,
+        screen_capture_summary: String,
     ) -> Self {
         let now = Instant::now();
         Self {
@@ -2702,6 +3007,7 @@ impl Diagnostics {
             cubism_summary: diagnostics_cubism_summary(&cubism_summary),
             renderer_summary: diagnostics_renderer_summary(&renderer_diagnostics.summary()),
             camera_summary,
+            screen_capture_summary,
             total_frames: 0,
             slow_frames: 0,
             frames_since_report: 0,
@@ -2715,6 +3021,10 @@ impl Diagnostics {
 
     fn set_camera_summary(&mut self, camera_summary: String) {
         self.camera_summary = camera_summary;
+    }
+
+    fn set_screen_capture_summary(&mut self, screen_capture_summary: String) {
+        self.screen_capture_summary = screen_capture_summary;
     }
 
     unsafe fn record_frame(&mut self, layer: Id, started_at: Instant) -> Result<(), String> {
@@ -2762,11 +3072,12 @@ impl Diagnostics {
             self.interval_sum_since_report / self.intervals_since_report as u32
         };
         let text = format!(
-            "Model: {}\n{}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
+            "Model: {}\n{}\n{}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
             self.model_summary,
             self.cubism_summary,
             self.renderer_summary,
             self.camera_summary,
+            self.screen_capture_summary,
             fps,
             TARGET_FPS,
             duration_ms(avg_interval),
@@ -2784,6 +3095,67 @@ impl Diagnostics {
         self.worst_interval_since_report = Duration::ZERO;
         self.last_report = now;
         Ok(())
+    }
+
+    fn record_frame_without_layer(&mut self, started_at: Instant) {
+        self.total_frames += 1;
+        self.frames_since_report += 1;
+
+        let now = Instant::now();
+        if let Some(last_frame_at) = self.last_frame_at {
+            let interval = now.duration_since(last_frame_at);
+            self.intervals_since_report += 1;
+            self.interval_sum_since_report += interval;
+            self.worst_interval_since_report = self.worst_interval_since_report.max(interval);
+
+            if interval > self.target_frame_duration.mul_f64(1.5) {
+                self.slow_frames += 1;
+            }
+
+            if interval >= Duration::from_millis(250) {
+                println!(
+                    "renderer_event=long_frame_gap gap_ms={:.1} uptime_s={:.1}",
+                    duration_ms(interval),
+                    now.duration_since(started_at).as_secs_f64(),
+                );
+            }
+            if interval >= Duration::from_secs(5) {
+                println!(
+                    "renderer_event=display_wake_inferred gap_ms={:.1} uptime_s={:.1}",
+                    duration_ms(interval),
+                    now.duration_since(started_at).as_secs_f64(),
+                );
+            }
+        }
+        self.last_frame_at = Some(now);
+
+        let report_interval = now.duration_since(self.last_report);
+        if report_interval < Duration::from_secs(2) {
+            return;
+        }
+
+        let fps = self.frames_since_report as f64 / report_interval.as_secs_f64();
+        let uptime = now.duration_since(started_at).as_secs_f64();
+        let avg_interval = if self.intervals_since_report == 0 {
+            Duration::ZERO
+        } else {
+            self.interval_sum_since_report / self.intervals_since_report as u32
+        };
+        println!(
+            "renderer_event=internal_output_frame_summary fps={:.1} frames={} slow_frames={} avg_ms={:.1} max_ms={:.1} uptime_s={:.1}",
+            fps,
+            self.total_frames,
+            self.slow_frames,
+            duration_ms(avg_interval),
+            duration_ms(self.worst_interval_since_report),
+            uptime
+        );
+
+        self.frames_since_report = 0;
+        self.intervals_since_report = 0;
+        self.interval_sum_since_report = Duration::ZERO;
+        self.worst_interval_since_report = Duration::ZERO;
+        self.last_report = now;
     }
 }
 
@@ -2914,15 +3286,16 @@ mod tests {
         avatar_window_origin, avatar_window_size, avatar_window_style_mask, avatar_window_title,
         camera_debug_summary, camera_runtime_active, is_model3_path, model_menu_title,
         model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
-        output_mode_label, relaunch_command_args, runtime_camera_config, runtime_microphone_config,
-        runtime_mouse_config, selected_expression_index, set_toml_section_value,
-        set_toml_section_values, toml_string_literal, window_occlusion_visible,
+        relaunch_command_args, remove_toml_section, runtime_camera_config,
+        runtime_microphone_config, runtime_mouse_config, selected_expression_index,
+        set_toml_section_value, set_toml_section_values, toml_string_literal,
+        window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
     use crate::config::{
-        AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, RendererConfig,
-        RuntimeProfile,
+        AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, OutputMode,
+        RendererConfig, RuntimeProfile,
     };
     use crate::live2d_model::{Live2dModel, ModelExpression};
     use crate::motion::CameraMotionSample;
@@ -3013,7 +3386,7 @@ mod tests {
         assert_eq!(desktop_origin.x, 100.0);
         assert_eq!(desktop_origin.y, 140.0);
         assert_eq!(avatar_window_title(), "vtube-studio-rs");
-        assert_eq!(output_mode_label(), "window");
+        assert_eq!(OutputMode::Window.label(), "window");
     }
 
     #[test]
@@ -3145,6 +3518,20 @@ mod tests {
         assert!(updated.contains("[renderer]\nenable_msaa = false\n"));
         assert!(updated.contains("high_precision_masks = true\n"));
         assert!(updated.contains("atlas_anisotropy = 8\n"));
+    }
+
+    #[test]
+    fn remove_toml_section_removes_legacy_output_block() {
+        let updated = remove_toml_section(
+            "[app]\nwindow_level = \"screen_saver\"\n\n[output]\nmode = \"syphon\"\nsyphon_name = \"VTubeStudioRS\"\n\n[output.internal]\nwidth = 1080.0\n\n[renderer]\nenable_msaa = false\n",
+            "output",
+        );
+
+        assert!(updated.contains("[app]\nwindow_level = \"screen_saver\"\n"));
+        assert!(!updated.contains("[output]"));
+        assert!(!updated.contains("[output.internal]"));
+        assert!(!updated.contains("syphon_name"));
+        assert!(updated.contains("[renderer]\nenable_msaa = false\n"));
     }
 
     #[test]

@@ -8,6 +8,8 @@ mod camera_input;
 mod config;
 #[cfg(target_os = "macos")]
 mod cubism;
+#[cfg(all(target_os = "macos", feature = "iosurface-output"))]
+mod iosurface_output;
 #[cfg(target_os = "macos")]
 mod live2d_model;
 #[cfg(target_os = "macos")]
@@ -18,6 +20,8 @@ mod macos_camera;
 mod metal_renderer;
 #[cfg(target_os = "macos")]
 mod motion;
+#[cfg(target_os = "macos")]
+mod screen_capture_probe;
 #[cfg(all(
     target_os = "macos",
     feature = "cubism-core",

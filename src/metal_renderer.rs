@@ -1,6 +1,6 @@
 #![cfg(feature = "metal-renderer")]
 
-use crate::config::{RendererConfig, RuntimeProfile};
+use crate::config::{InternalOutputProducer, RendererConfig, RuntimeProfile};
 use crate::cubism::{
     CubismBlendMode, CubismDrawableFrame, CubismDrawableInfo, CubismModelRuntime,
     CubismOffscreenInfo, CubismPartInfo,
@@ -390,6 +390,13 @@ pub struct MetalRenderer {
     offscreen_texture_size: [u64; 2],
     blend_snapshot_texture: Option<Texture>,
     blend_snapshot_texture_size: [u64; 2],
+    internal_output_texture: Option<Texture>,
+    internal_output_texture_size: [u64; 2],
+    internal_output_frames: u64,
+    #[cfg(feature = "iosurface-output")]
+    iosurface_output: Option<crate::iosurface_output::IosurfaceOutput>,
+    #[cfg(not(feature = "iosurface-output"))]
+    internal_output_producer_unavailable_reported: bool,
     quad_vertex_buffer: Buffer,
     quad_index_buffer: Buffer,
     drawable_buffers: Vec<DrawableGpuBuffers>,
@@ -500,6 +507,13 @@ impl MetalRenderer {
             offscreen_texture_size: [0, 0],
             blend_snapshot_texture: None,
             blend_snapshot_texture_size: [0, 0],
+            internal_output_texture: None,
+            internal_output_texture_size: [0, 0],
+            internal_output_frames: 0,
+            #[cfg(feature = "iosurface-output")]
+            iosurface_output: None,
+            #[cfg(not(feature = "iosurface-output"))]
+            internal_output_producer_unavailable_reported: false,
             quad_vertex_buffer,
             quad_index_buffer,
             drawable_buffers: Vec::new(),
@@ -579,6 +593,12 @@ impl MetalRenderer {
             self.offscreen_texture_size = [0, 0];
             self.blend_snapshot_texture = None;
             self.blend_snapshot_texture_size = [0, 0];
+            self.internal_output_texture = None;
+            self.internal_output_texture_size = [0, 0];
+            #[cfg(feature = "iosurface-output")]
+            {
+                self.iosurface_output = None;
+            }
         }
         self.layer
             .set_drawable_size(CGSize::new(physical_size, physical_size));
@@ -815,6 +835,152 @@ impl MetalRenderer {
         Ok(())
     }
 
+    pub fn render_internal(
+        &mut self,
+        runtime: &CubismModelRuntime,
+        producer: InternalOutputProducer,
+    ) -> Result<(), String> {
+        let output_texture = self.internal_output_texture(producer)?;
+        let mut draw_items = collect_draw_items(runtime);
+        draw_items.retain(|item| self.should_render_drawable(&item.drawable));
+        let transform = bounds_for(&draw_items).and_then(|bounds| {
+            bounds.fit_transform(
+                self.drawable_size as f32,
+                (self.drawable_size as f32) * 0.04,
+            )
+        });
+
+        if let Some(transform) = transform {
+            let offscreen_items = collect_offscreen_items(runtime);
+            let use_high_precision_masks = self.high_precision_masks && offscreen_items.is_empty();
+            if self.high_precision_masks
+                && !offscreen_items.is_empty()
+                && !self.reported_offscreen_mask_fallback
+            {
+                let parts = runtime.parts();
+                let diagnostics =
+                    offscreen_fallback_diagnostics(&draw_items, &offscreen_items, &parts);
+                if self.log_events {
+                    println!(
+                        "renderer_event=high_precision_mask_fallback reason=offscreen offscreen_count={} masked_offscreen_count={} extended_offscreen_count={} masked_extended_drawable_count={} nested_offscreen_count={} max_offscreen_depth={}",
+                        diagnostics.offscreen_count,
+                        diagnostics.masked_offscreen_count,
+                        diagnostics.extended_offscreen_count,
+                        diagnostics.masked_extended_drawable_count,
+                        diagnostics.nested_offscreen_count,
+                        diagnostics.max_offscreen_depth
+                    );
+                }
+                self.reported_offscreen_mask_fallback = true;
+            }
+            prepare_drawable_buffers(
+                &self.device,
+                &mut self.vertex_ring,
+                &mut self.drawable_buffers,
+                &draw_items,
+                transform,
+            );
+            let mask_contexts = unique_mask_contexts(
+                &draw_items,
+                &offscreen_items,
+                self.disable_masks,
+                self.mask_tile_size,
+                runtime.info().pixels_per_unit,
+                use_high_precision_masks,
+            );
+            let mask_lookup = mask_set_lookup(&mask_contexts);
+            let mask_layout =
+                MaskAtlasLayout::for_mask_count(mask_contexts.len(), self.mask_tile_size);
+            if use_high_precision_masks {
+                self.ensure_high_precision_mask_textures(mask_contexts.len());
+            } else {
+                self.ensure_mask_atlas(&mask_layout);
+            }
+            if !offscreen_items.is_empty() {
+                self.ensure_offscreen_textures(offscreen_items.len());
+                self.ensure_blend_snapshot_texture();
+            }
+            self.ensure_msaa_texture();
+            self.log_memory_budget("internal_render_resources");
+            let command_buffer = self.command_queue.new_command_buffer();
+            let vertex_buffer = self
+                .vertex_ring
+                .current_buffer()
+                .ok_or_else(|| "Metal vertex ring did not allocate an active buffer".to_string())?;
+            if !mask_contexts.is_empty() && !use_high_precision_masks {
+                render_mask_atlases(
+                    command_buffer,
+                    &self.mask_pipeline_state,
+                    &self.mask_atlas_textures,
+                    &mask_layout,
+                    &draw_items,
+                    &self.drawable_buffers,
+                    &self.textures,
+                    &self.atlas_sampler,
+                    vertex_buffer,
+                    &mask_contexts,
+                )?;
+            }
+            if use_high_precision_masks {
+                self.render_high_precision_drawables(
+                    command_buffer,
+                    &output_texture,
+                    &draw_items,
+                    &self.drawable_buffers,
+                    vertex_buffer,
+                    &mask_contexts,
+                    &mask_lookup,
+                )?;
+            } else if !offscreen_items.is_empty() {
+                self.render_with_offscreens(
+                    command_buffer,
+                    &output_texture,
+                    &draw_items,
+                    &offscreen_items,
+                    &runtime.parts(),
+                    vertex_buffer,
+                    transform,
+                    &mask_contexts,
+                    &mask_lookup,
+                )?;
+            } else {
+                self.render_main_pass_to_texture(
+                    command_buffer,
+                    &output_texture,
+                    &draw_items,
+                    vertex_buffer,
+                    transform,
+                    &mask_contexts,
+                    &mask_lookup,
+                    use_high_precision_masks,
+                )?;
+            }
+            command_buffer.commit();
+        } else {
+            let command_buffer = self.command_queue.new_command_buffer();
+            clear_drawable(command_buffer, &output_texture)?;
+            command_buffer.commit();
+        }
+
+        self.internal_output_frames = self.internal_output_frames.saturating_add(1);
+        #[cfg(feature = "iosurface-output")]
+        if matches!(producer, InternalOutputProducer::Iosurface) {
+            if let Some(output) = self.iosurface_output.as_mut() {
+                output.record_frame();
+            }
+        }
+        if self.log_events && self.internal_output_frames % 120 == 1 {
+            println!(
+                "renderer_event=internal_output_frame frames={} texture={}x{} producer={}",
+                self.internal_output_frames,
+                output_texture.width(),
+                output_texture.height(),
+                producer.label()
+            );
+        }
+        Ok(())
+    }
+
     pub fn render_probe(&self, runtime: &CubismModelRuntime) -> MetalRenderProbe {
         let drawables = runtime
             .drawables()
@@ -870,6 +1036,64 @@ impl MetalRenderer {
             CubismBlendMode::Extended { .. } => &self.extended_pipeline_state,
             CubismBlendMode::Normal | CubismBlendMode::Unknown(_) => &self.normal_pipeline_state,
         }
+    }
+
+    fn internal_output_texture(
+        &mut self,
+        producer: InternalOutputProducer,
+    ) -> Result<Texture, String> {
+        let [width, height] = self.physical_drawable_size;
+        let width = width.max(1);
+        let height = height.max(1);
+
+        #[cfg(feature = "iosurface-output")]
+        if matches!(producer, InternalOutputProducer::Iosurface) {
+            let needs_new_output = self
+                .iosurface_output
+                .as_ref()
+                .is_none_or(|output| output.width() != width || output.height() != height);
+            if needs_new_output {
+                self.iosurface_output = Some(crate::iosurface_output::IosurfaceOutput::new(
+                    &self.device,
+                    width,
+                    height,
+                )?);
+            }
+            let output = self
+                .iosurface_output
+                .as_ref()
+                .expect("created iosurface output");
+            return Ok(output.texture().clone());
+        }
+
+        #[cfg(not(feature = "iosurface-output"))]
+        if matches!(producer, InternalOutputProducer::Iosurface)
+            && !self.internal_output_producer_unavailable_reported
+        {
+            println!(
+                "renderer_event=internal_output_producer_unavailable producer=iosurface reason=feature_not_enabled fallback=texture"
+            );
+            self.internal_output_producer_unavailable_reported = true;
+        }
+
+        let needs_new_texture = self
+            .internal_output_texture
+            .as_ref()
+            .is_none_or(|texture| texture.width() != width || texture.height() != height);
+        if needs_new_texture {
+            self.internal_output_texture =
+                Some(create_internal_output_texture(&self.device, width, height));
+            self.internal_output_texture_size = [width, height];
+            println!(
+                "renderer_event=internal_output_texture_created width={} height={} producer=none",
+                width, height
+            );
+        }
+        Ok(self
+            .internal_output_texture
+            .as_ref()
+            .expect("created internal output texture")
+            .clone())
     }
 
     fn is_hidden_drawable(&self, drawable: &CubismDrawableInfo) -> bool {
@@ -1495,6 +1719,109 @@ impl MetalRenderer {
             Some(index) => self.offscreen_textures.get(index).map(|texture| &**texture),
             None => Some(drawable_texture),
         }
+    }
+
+    fn render_main_pass_to_texture(
+        &self,
+        command_buffer: &CommandBufferRef,
+        target_texture: &metal::TextureRef,
+        draw_items: &[DrawItem],
+        vertex_buffer: &metal::BufferRef,
+        transform: FitTransform,
+        mask_contexts: &[MaskContext],
+        mask_lookup: &HashMap<Vec<i32>, usize>,
+        use_high_precision_masks: bool,
+    ) -> Result<(), String> {
+        let render_pass_descriptor = RenderPassDescriptor::new();
+        let color_attachment = render_pass_descriptor
+            .color_attachments()
+            .object_at(0)
+            .ok_or_else(|| "Metal render pass has no color attachment".to_string())?;
+        if self.sample_count > 1 {
+            color_attachment
+                .set_texture(self.msaa_color_texture.as_ref().map(|texture| &**texture));
+            color_attachment.set_resolve_texture(Some(target_texture));
+            color_attachment.set_store_action(MTLStoreAction::MultisampleResolve);
+        } else {
+            color_attachment.set_texture(Some(target_texture));
+            color_attachment.set_store_action(MTLStoreAction::Store);
+        }
+        color_attachment.set_load_action(MTLLoadAction::Clear);
+        color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 0.0));
+
+        let encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
+        encoder.set_cull_mode(MTLCullMode::None);
+        encoder.set_fragment_sampler_state(0, Some(&self.atlas_sampler));
+        encoder.set_fragment_sampler_state(1, Some(&self.mask_sampler));
+        let mut state_cache = MainPassStateCache::default();
+
+        for item in draw_items {
+            if !item.drawable.flags.visible || item.drawable.opacity <= 0.0 {
+                continue;
+            }
+
+            let Some(texture) = self
+                .textures
+                .get(item.drawable.texture_index.max(0) as usize)
+            else {
+                continue;
+            };
+
+            let Some(buffers) = self.drawable_buffers.get(item.drawable.index) else {
+                continue;
+            };
+            if !buffers.is_ready() {
+                continue;
+            }
+            let mask_index = mask_lookup.get(&item.drawable.masks).copied();
+            let mask_texture = if use_high_precision_masks {
+                mask_index
+                    .and_then(|index| self.high_precision_mask_textures.get(index))
+                    .unwrap_or(&self.white_mask_texture)
+            } else {
+                mask_index
+                    .and_then(|index| {
+                        mask_contexts
+                            .get(index)
+                            .and_then(|context| self.mask_atlas_textures.get(context.buffer_index))
+                    })
+                    .unwrap_or(&self.white_mask_texture)
+            };
+            let mask_context = mask_index.and_then(|index| mask_contexts.get(index));
+            let fragment_params = drawable_fragment_params(
+                &item.drawable,
+                mask_context,
+                self.is_highlighted_drawable(&item.drawable),
+                self.debug_texture_mode,
+            );
+            let cull_mode = drawable_cull_mode(&item.drawable);
+            let front_winding = drawable_front_winding(&item.frame, transform);
+
+            state_cache.bind_pipeline(
+                encoder,
+                item.drawable.blend_mode,
+                self.pipeline_state(item.drawable.blend_mode),
+            );
+            state_cache.bind_cull_state(encoder, cull_mode, front_winding);
+            encoder.set_vertex_buffer(0, Some(vertex_buffer), buffers.vertex_offset);
+            state_cache.bind_atlas_texture(encoder, texture);
+            state_cache.bind_mask_texture(encoder, mask_texture);
+            encoder.set_fragment_bytes(
+                0,
+                std::mem::size_of::<FragmentParams>() as u64,
+                (&raw const fragment_params).cast(),
+            );
+            encoder.draw_indexed_primitives(
+                MTLPrimitiveType::Triangle,
+                buffers.index_count as u64,
+                MTLIndexType::UInt16,
+                buffers.index_buffer.as_ref().expect("checked by is_ready"),
+                0,
+            );
+        }
+
+        encoder.end_encoding();
+        Ok(())
     }
 
     fn render_high_precision_drawables(
@@ -2435,6 +2762,17 @@ fn create_msaa_color_texture(
 }
 
 fn create_offscreen_texture(device: &Device, width: u64, height: u64) -> Texture {
+    let descriptor = TextureDescriptor::new();
+    descriptor.set_texture_type(MTLTextureType::D2);
+    descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+    descriptor.set_width(width.max(1));
+    descriptor.set_height(height.max(1));
+    descriptor.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+    descriptor.set_resource_options(MTLResourceOptions::StorageModePrivate);
+    device.new_texture(&descriptor)
+}
+
+fn create_internal_output_texture(device: &Device, width: u64, height: u64) -> Texture {
     let descriptor = TextureDescriptor::new();
     descriptor.set_texture_type(MTLTextureType::D2);
     descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);

@@ -4,11 +4,25 @@ window_level = "screen_saver"
 window_width = 540.0
 window_height = 720.0
 
+[output]
+mode = "window"
+
+[output.internal]
+width = 1080.0
+height = 1080.0
+producer = "none"
+
 [model]
 path = "public/model/0.model3.json"
 
 [diagnostics]
 show = false
+
+[capture.screen_capture_kit]
+enabled = false
+target_fps = 10
+log_interval_seconds = 2.0
+stalled_after_seconds = 2.0
 
 [renderer]
 disable_masks = false
