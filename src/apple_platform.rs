@@ -16,8 +16,7 @@ use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
     NSEventMask, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSVariableStatusItemLength, NSView,
-    NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
-    NSWindowTitleVisibility, NSWorkspace,
+    NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
@@ -66,14 +65,6 @@ pub struct PanelStyle {
     pub title: &'static str,
     pub excluded_from_windows_menu: bool,
     pub sharing_read_only: bool,
-}
-
-#[derive(Clone, Copy)]
-pub struct WindowChromeStyle {
-    pub borderless: bool,
-    pub titlebar_transparent: bool,
-    pub title_hidden: bool,
-    pub standard_buttons_hidden: bool,
 }
 
 #[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
@@ -151,34 +142,6 @@ pub unsafe fn create_transparent_panel(style: PanelStyle) -> Result<*mut c_void,
         style.sharing_read_only,
     );
     Ok(ObjcRetained::into_raw(panel).cast())
-}
-
-pub unsafe fn create_transparent_window(style: PanelStyle) -> Result<*mut c_void, String> {
-    let mtm = main_thread_marker()?;
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            cg_rect(style.frame),
-            NSWindowStyleMask(style.style_mask as usize),
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    configure_transparent_window(
-        &window,
-        style.level,
-        style.collection_behavior,
-        style.title,
-        style.excluded_from_windows_menu,
-        style.sharing_read_only,
-        WindowChromeStyle {
-            borderless: false,
-            titlebar_transparent: true,
-            title_hidden: true,
-            standard_buttons_hidden: true,
-        },
-    );
-    Ok(ObjcRetained::into_raw(window).cast())
 }
 
 pub unsafe fn set_panel_space_policy(panel: *mut c_void, level: i64, collection_behavior: u64) {
@@ -653,60 +616,6 @@ fn configure_transparent_panel(
         );
     }
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
-}
-
-fn configure_transparent_window(
-    window: &NSWindow,
-    level: i64,
-    collection_behavior: u64,
-    title: &str,
-    excluded_from_windows_menu: bool,
-    sharing_read_only: bool,
-    chrome: WindowChromeStyle,
-) {
-    window.setOpaque(false);
-    window.setTitle(&NSString::from_str(title));
-    if sharing_read_only {
-        window.setSharingType(NSWindowSharingType::ReadOnly);
-    }
-    window.setMovableByWindowBackground(true);
-    unsafe {
-        window.setReleasedWhenClosed(false);
-    }
-    window.setCanHide(false);
-    window.setExcludedFromWindowsMenu(excluded_from_windows_menu);
-    if chrome.titlebar_transparent {
-        window.setTitlebarAppearsTransparent(true);
-    }
-    if chrome.title_hidden {
-        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-    }
-    if chrome.borderless {
-        window.setStyleMask(NSWindowStyleMask(0));
-    }
-    if chrome.standard_buttons_hidden {
-        hide_standard_window_buttons(window);
-    }
-    unsafe {
-        set_panel_space_policy(
-            (window as *const NSWindow).cast_mut().cast(),
-            level,
-            collection_behavior,
-        );
-    }
-    window.setBackgroundColor(Some(&NSColor::clearColor()));
-}
-
-fn hide_standard_window_buttons(window: &NSWindow) {
-    for button in [
-        NSWindowButton::CloseButton,
-        NSWindowButton::MiniaturizeButton,
-        NSWindowButton::ZoomButton,
-    ] {
-        if let Some(view) = window.standardWindowButton(button) {
-            view.setHidden(true);
-        }
-    }
 }
 
 unsafe fn set_text_layer_string(layer: &CATextLayer, text: &str) {

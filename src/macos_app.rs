@@ -35,10 +35,6 @@ const NIL: Id = ptr::null_mut();
 const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: NSInteger = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
-const NS_TITLED_WINDOW_MASK: NSUInteger = 1 << 0;
-const NS_CLOSABLE_WINDOW_MASK: NSUInteger = 1 << 1;
-const NS_MINIATURIZABLE_WINDOW_MASK: NSUInteger = 1 << 2;
-const NS_RESIZABLE_WINDOW_MASK: NSUInteger = 1 << 3;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
 const NS_EVENT_MASK_ANY: NSUInteger = NSUInteger::MAX;
 const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: NSUInteger = 1 << 0;
@@ -653,11 +649,7 @@ unsafe fn create_avatar_window(
         excluded_from_windows_menu: !app_config.window_capture_friendly,
         sharing_read_only: app_config.window_capture_friendly,
     };
-    let window = if app_config.window_capture_friendly {
-        crate::apple_platform::create_transparent_window(style)?
-    } else {
-        crate::apple_platform::create_transparent_panel(style)?
-    };
+    let window = crate::apple_platform::create_transparent_panel(style)?;
 
     println!(
         "renderer_event=window_configured kind={} output={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
@@ -681,7 +673,7 @@ unsafe fn create_avatar_window(
     }
     if app_config.window_capture_friendly {
         println!(
-            "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false chrome=hidden",
+            "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false chrome=panel",
             avatar_window_title(app_config)
         );
     }
@@ -718,21 +710,14 @@ unsafe fn maybe_move_capture_window_offscreen(
 
 fn avatar_window_kind(app_config: &AppRuntimeConfig) -> &'static str {
     if app_config.window_capture_friendly {
-        "capture_friendly_window"
+        "capture_friendly_panel"
     } else {
         "nonactivating_panel"
     }
 }
 
-fn avatar_window_style_mask(app_config: &AppRuntimeConfig) -> NSUInteger {
-    if app_config.window_capture_friendly {
-        NS_TITLED_WINDOW_MASK
-            | NS_CLOSABLE_WINDOW_MASK
-            | NS_MINIATURIZABLE_WINDOW_MASK
-            | NS_RESIZABLE_WINDOW_MASK
-    } else {
-        NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
-    }
+fn avatar_window_style_mask(_app_config: &AppRuntimeConfig) -> NSUInteger {
+    NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
 }
 
 fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
@@ -3250,12 +3235,14 @@ impl AppLifecycleMonitor {
             self.window_occlusion_state = Some(occlusion_state);
         }
 
+        if offscreen_capture_window(app_config) && window_visible {
+            return;
+        }
+
         if !window_visible || !window_occlusion_visible(occlusion_state) {
             apply_avatar_window_space_policy(window, app_config);
             crate::apple_platform::order_panel_front_regardless(window);
-            if app_config.window_capture_friendly
-                && valid_window_position(app_config.window_x, 100.0) <= -1000.0
-            {
+            if offscreen_capture_window(app_config) {
                 let window_size = avatar_window_size(app_config);
                 maybe_move_capture_window_offscreen(
                     window,
@@ -3286,6 +3273,11 @@ unsafe fn window_can_present_frame(window: Id, app_config: &AppRuntimeConfig) ->
 
 fn capture_friendly_window_bypasses_present_suspension(app_config: &AppRuntimeConfig) -> bool {
     app_config.window_capture_friendly
+}
+
+fn offscreen_capture_window(app_config: &AppRuntimeConfig) -> bool {
+    app_config.window_capture_friendly
+        && valid_window_position(app_config.window_x, 100.0) <= -1000.0
 }
 
 #[derive(Debug, Clone)]
@@ -3655,7 +3647,7 @@ mod tests {
     use super::{
         EventPump, InputPreset, NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
         NS_APPLICATION_ACTIVATION_POLICY_REGULAR, NS_NONACTIVATING_PANEL_MASK,
-        NS_TITLED_WINDOW_MASK, NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
+        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
@@ -3666,10 +3658,10 @@ mod tests {
         avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
         capture_friendly_window_bypasses_present_suspension, is_model3_path, model_menu_title,
         model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
-        relaunch_command_args, remove_toml_section, runtime_camera_config,
-        runtime_microphone_config, runtime_mouse_config, selected_expression_index,
-        set_toml_section_value, set_toml_section_values, toml_string_literal,
-        window_occlusion_visible,
+        offscreen_capture_window, relaunch_command_args, remove_toml_section,
+        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
+        selected_expression_index, set_toml_section_value, set_toml_section_values,
+        toml_string_literal, window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
     use crate::camera_input::CameraStatus;
@@ -3734,7 +3726,7 @@ mod tests {
             avatar_window_style_mask(&AppRuntimeConfig {
                 window_capture_friendly: true,
                 ..AppRuntimeConfig::default()
-            }) & NS_TITLED_WINDOW_MASK
+            }) & NS_NONACTIVATING_PANEL_MASK
                 != 0
         );
         assert_eq!(configured_size.width, 540.0);
@@ -3892,6 +3884,25 @@ mod tests {
         assert!(!capture_friendly_window_bypasses_present_suspension(
             &AppRuntimeConfig::default()
         ));
+    }
+
+    #[test]
+    fn offscreen_capture_windows_treat_occlusion_as_expected() {
+        assert!(offscreen_capture_window(&AppRuntimeConfig {
+            window_capture_friendly: true,
+            window_x: Some(-20000.0),
+            ..AppRuntimeConfig::default()
+        }));
+        assert!(!offscreen_capture_window(&AppRuntimeConfig {
+            window_capture_friendly: true,
+            window_x: Some(100.0),
+            ..AppRuntimeConfig::default()
+        }));
+        assert!(!offscreen_capture_window(&AppRuntimeConfig {
+            window_capture_friendly: false,
+            window_x: Some(-20000.0),
+            ..AppRuntimeConfig::default()
+        }));
     }
 
     #[test]
