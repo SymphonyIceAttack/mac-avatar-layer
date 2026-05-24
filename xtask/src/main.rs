@@ -1332,7 +1332,9 @@ fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
         .arg(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID)
         .arg(bundle_dir)
         .current_dir(root)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     run_status(&mut command).map_err(|error| {
         format!(
             "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
@@ -1341,16 +1343,6 @@ or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
             identity.value
         )
     })?;
-    if identity.is_ad_hoc() {
-        println!(
-            "Code signed Camera Extension prototype with ad-hoc identity. No valid Apple codesigning identity was found in Keychain."
-        );
-    } else {
-        println!(
-            "Code signed Camera Extension prototype with identity `{}` ({}).",
-            identity.value, identity.source
-        );
-    }
     Ok(())
 }
 
@@ -1845,7 +1837,9 @@ fn sign_camera_dev_app(
         .arg(DEV_CAMERA_BUNDLE_ID)
         .arg(bundle_dir)
         .current_dir(root)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     run_status(&mut command).map_err(|error| {
         format!(
             "failed to codesign camera dev app with identity `{}`: {error}. \
@@ -1855,19 +1849,6 @@ or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
         )
     })?;
 
-    if identity.is_ad_hoc() {
-        println!(
-            "Code signed camera dev app with ad-hoc identity and stable identifier {DEV_CAMERA_BUNDLE_ID}."
-        );
-        println!(
-            "No valid Apple codesigning identity was found. Once Xcode installs one, cargo xtask build-app will auto-detect it."
-        );
-    } else {
-        println!(
-            "Code signed camera dev app with identity `{}` ({}).",
-            identity.value, identity.source
-        );
-    }
     Ok(())
 }
 
@@ -1879,12 +1860,6 @@ fn camera_codesign_identity() -> String {
 struct CodesignIdentityChoice {
     value: String,
     source: &'static str,
-}
-
-impl CodesignIdentityChoice {
-    fn is_ad_hoc(&self) -> bool {
-        self.value == "-"
-    }
 }
 
 fn camera_codesign_identity_choice() -> CodesignIdentityChoice {
