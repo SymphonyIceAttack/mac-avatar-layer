@@ -4,4 +4,7 @@ public
 vtube-studio-rs.toml
 vtube-studio-rs.dev.toml
 vtube-studio-rs.build.toml
+mac-avatar-layer.toml
+mac-avatar-layer.dev.toml
+mac-avatar-layer.build.toml
 CubismSdkForNative*/

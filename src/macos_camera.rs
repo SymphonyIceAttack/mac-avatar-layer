@@ -156,7 +156,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
                 return Err(CameraProbe {
                     status: CameraStatus::PermissionDenied,
                     diagnostic: Some(crate::apple_platform::local_only_camera_message(
-                        "Camera permission was denied. Enable camera access for vtube-studio-rs Dev in System Settings > Privacy & Security > Camera.",
+                        "Camera permission was denied. Enable camera access for MacAvatarLayer Dev in System Settings > Privacy & Security > Camera.",
                     )),
                 });
             }
@@ -164,7 +164,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
                 return Err(CameraProbe {
                     status: CameraStatus::WaitingForPermission,
                     diagnostic: Some(crate::apple_platform::local_only_camera_message(&format!(
-                        "Camera permission has not been granted yet. macOS has been asked for access, but no response arrived before startup continued: {error}. Approve camera access for vtube-studio-rs Dev, then run the app again if the camera did not start.",
+                        "Camera permission has not been granted yet. macOS has been asked for access, but no response arrived before startup continued: {error}. Approve camera access for MacAvatarLayer Dev, then run the app again if the camera did not start.",
                     ))),
                 });
             }
@@ -173,7 +173,7 @@ fn setup_camera(config: &CameraConfig, start_session: bool) -> Result<CameraSetu
             return Err(CameraProbe {
                 status: CameraStatus::PermissionDenied,
                 diagnostic: Some(crate::apple_platform::local_only_camera_message(
-                    "Camera permission is denied or restricted. Enable camera access for the terminal/app that launches vtube-studio-rs in System Settings > Privacy & Security > Camera.",
+                    "Camera permission is denied or restricted. Enable camera access for the terminal/app that launches MacAvatarLayer in System Settings > Privacy & Security > Camera.",
                 )),
             });
         }
@@ -306,7 +306,10 @@ fn build_capture_session(device: &AVCaptureDevice) -> Result<CameraCapturePipeli
         })?;
     let output = unsafe { AVCaptureVideoDataOutput::new() };
     let delegate = CameraSampleBufferDelegate::new();
-    let queue = DispatchQueue::new("rs.vtube-studio.camera.samples", None);
+    let queue = DispatchQueue::new(
+        "io.github.symphonyiceattack.mac-avatar-layer.camera.samples",
+        None,
+    );
 
     unsafe {
         output.setAlwaysDiscardsLateVideoFrames(true);

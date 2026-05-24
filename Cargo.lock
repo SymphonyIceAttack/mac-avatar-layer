@@ -527,6 +527,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "mac-avatar-layer"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "core-graphics-types",
+ "cpal",
+ "dispatch2",
+ "image",
+ "live2d-cubism-core-sys",
+ "metal",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-av-foundation",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-media-io",
+ "objc2-core-video",
+ "objc2-foundation",
+ "objc2-io-surface",
+ "objc2-quartz-core",
+ "objc2-screen-capture-kit",
+ "objc2-system-extensions",
+ "objc2-vision",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "mac-avatar-layer-camera-extension"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-media-io",
+ "objc2-core-video",
+ "objc2-foundation",
+ "objc2-io-surface",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1257,51 +1302,6 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[package]]
-name = "vtube-studio-rs"
-version = "0.1.0"
-dependencies = [
- "block2",
- "core-graphics-types",
- "cpal",
- "dispatch2",
- "image",
- "live2d-cubism-core-sys",
- "metal",
- "objc2",
- "objc2-app-kit",
- "objc2-av-foundation",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-media",
- "objc2-core-media-io",
- "objc2-core-video",
- "objc2-foundation",
- "objc2-io-surface",
- "objc2-quartz-core",
- "objc2-screen-capture-kit",
- "objc2-system-extensions",
- "objc2-vision",
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
-name = "vtube-studio-rs-camera-extension"
-version = "0.1.0"
-dependencies = [
- "objc2",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-media-io",
- "objc2-core-video",
- "objc2-foundation",
- "objc2-io-surface",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "walkdir"

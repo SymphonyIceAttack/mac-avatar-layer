@@ -23,19 +23,22 @@ use serde::Deserialize;
 use sysinfo::{Process, ProcessesToUpdate, Signal, System};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-const DEVELOPMENT_CONFIG_PATH: &str = "vtube-studio-rs.dev.toml";
-const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml";
-const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
-const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
-const DEV_CAMERA_BUNDLE_ID: &str = "rs.vtube-studio.dev";
-const VIRTUAL_CAMERA_NAME: &str = "VTube Studio RS Camera";
-const VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExtension";
-const VIRTUAL_CAMERA_MACH_SERVICE: &str = "rs.vtube-studio.dev.CameraExtension";
-const VIRTUAL_CAMERA_APP_GROUP: &str = "group.rs.vtube-studio.dev";
-const VIRTUAL_CAMERA_BUNDLE_NAME: &str = "VTube Studio RS Camera.systemextension";
-const DEV_APP_BUNDLE_NAME: &str = "vtube-studio-rs Dev.app";
-const CONTAINER_PROVISION_PROFILE_ENV: &str = "VTUBE_RS_CONTAINER_PROVISION_PROFILE";
-const CAMERA_EXTENSION_PROVISION_PROFILE_ENV: &str = "VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE";
+const DEVELOPMENT_CONFIG_PATH: &str = "mac-avatar-layer.dev.toml";
+const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.dev.example.toml";
+const BUILD_CONFIG_PATH: &str = "mac-avatar-layer.build.toml";
+const BUILD_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.build.example.toml";
+const DEV_CAMERA_BUNDLE_ID: &str = "io.github.symphonyiceattack.mac-avatar-layer";
+const VIRTUAL_CAMERA_NAME: &str = "MacAvatarLayer Camera";
+const VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID: &str =
+    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+const VIRTUAL_CAMERA_MACH_SERVICE: &str =
+    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+const VIRTUAL_CAMERA_APP_GROUP: &str = "group.io.github.symphonyiceattack.mac-avatar-layer";
+const VIRTUAL_CAMERA_BUNDLE_NAME: &str = "MacAvatarLayer Camera.systemextension";
+const DEV_APP_BUNDLE_NAME: &str = "MacAvatarLayer Dev.app";
+const CONTAINER_PROVISION_PROFILE_ENV: &str = "MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE";
+const CAMERA_EXTENSION_PROVISION_PROFILE_ENV: &str =
+    "MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE";
 const DEFAULT_CONTAINER_PROVISION_PROFILE: &str =
     "public/provisioning/ContainerApp.provisionprofile";
 const DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE: &str =
@@ -120,7 +123,7 @@ fn run() -> Result<()> {
 fn print_help() {
     println!(
         "\
-vtube-studio-rs xtask
+mac-avatar-layer xtask
 
 Usage:
   cargo xtask build-app [--release]
@@ -225,7 +228,7 @@ fn clean(args: Vec<String>) -> Result<()> {
     remove_path(target.join("virtual-camera"))?;
     remove_path(target.join("codesign"))?;
     remove_path(target.join("dev-app"))?;
-    remove_path(target.join("vtube-studio-rs.pid"))?;
+    remove_path(target.join("mac-avatar-layer.pid"))?;
 
     if mode == "--all" {
         run_status(
@@ -444,7 +447,7 @@ fn doctor(args: Vec<String>) -> Result<()> {
     }
 
     let root = project_root()?;
-    println!("vtube-studio-rs doctor");
+    println!("MacAvatarLayer doctor");
     println!("Project: {}", root.display());
     println!();
 
@@ -1155,7 +1158,7 @@ fn run_metal(args: Vec<String>) -> Result<()> {
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
         terminate_app_processes(&root);
-        let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
+        let _ = fs::remove_file(root.join("target/mac-avatar-layer.pid"));
     }
 
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
@@ -1236,7 +1239,7 @@ fn build_metal_executable_with_features(
     Ok(root
         .join("target")
         .join(profile_dir)
-        .join("vtube-studio-rs"))
+        .join("mac-avatar-layer"))
 }
 
 fn build_camera_extension(args: Vec<String>) -> Result<()> {
@@ -1252,7 +1255,7 @@ fn build_camera_extension(args: Vec<String>) -> Result<()> {
     println!("Bundle id: {VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID}");
     println!("Mach service: {VIRTUAL_CAMERA_MACH_SERVICE}");
     println!(
-        "Next: run `cargo xtask build-app --release`, move the app to /Applications, then use the VT menu activation prototype."
+        "Next: run `cargo xtask build-app --release`, move the app to /Applications, then use the MA menu activation prototype."
     );
     println!("Embed with: cargo xtask build-app --release");
     Ok(())
@@ -1263,7 +1266,7 @@ fn build_camera_extension_executable(root: &Path, release: bool) -> Result<PathB
     command
         .arg("build")
         .arg("-p")
-        .arg("vtube-studio-rs-camera-extension");
+        .arg("mac-avatar-layer-camera-extension");
     if release {
         command.arg("--release");
     }
@@ -1339,7 +1342,7 @@ fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
         format!(
             "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
 Install an Apple Development or Developer ID Application certificate in Keychain, \
-or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
+or set MAC_AVATAR_LAYER_CODESIGN_IDENTITY to a valid local codesigning identity.",
             identity.value
         )
     })?;
@@ -1352,7 +1355,7 @@ fn install_camera_app_wrapper(
     release: bool,
     system_camera_source_enabled: bool,
 ) -> Result<PathBuf> {
-    let executable_name = "vtube-studio-rs";
+    let executable_name = "mac-avatar-layer";
     let bundle_dir = root.join("target/dev-app").join(DEV_APP_BUNDLE_NAME);
     let contents_dir = bundle_dir.join("Contents");
     let macos_dir = contents_dir.join("MacOS");
@@ -1761,12 +1764,12 @@ fn launch_camera_app_wrapper(
 
     let status = command.status()?;
     if !status.success() {
-        return Err(format!("vtube-studio-rs app wrapper failed with status {status}").into());
+        return Err(format!("MacAvatarLayer app wrapper failed with status {status}").into());
     }
 
-    let pid_path = root.join("target/vtube-studio-rs.pid");
+    let pid_path = root.join("target/mac-avatar-layer.pid");
     let pid = wait_for_pid_file(&pid_path, Duration::from_secs(10))?;
-    println!("vtube-studio-rs app launched with pid {pid}.");
+    println!("MacAvatarLayer app launched with pid {pid}.");
     println!("Camera stdout: {}", relative_display(&root, &stdout_path));
     println!("Camera stderr: {}", relative_display(&root, &stderr_path));
     println!("Close the avatar window to end this command.");
@@ -1789,7 +1792,7 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
   <key>CFBundleIdentifier</key>
   <string>{DEV_CAMERA_BUNDLE_ID}</string>
   <key>CFBundleName</key>
-  <string>vtube-studio-rs Dev</string>
+  <string>MacAvatarLayer Dev</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -1799,11 +1802,11 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSCameraUsageDescription</key>
-  <string>vtube-studio-rs uses the local camera to estimate face landmarks and drive the avatar. Frames are not stored, written to disk, or logged.</string>
+  <string>MacAvatarLayer uses the local camera to estimate face landmarks and drive the avatar. Frames are not stored, written to disk, or logged.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>vtube-studio-rs can use the local microphone level to drive avatar mouth movement when microphone input is enabled.</string>
+  <string>MacAvatarLayer can use the local microphone level to drive avatar mouth movement when microphone input is enabled.</string>
   <key>NSSystemExtensionUsageDescription</key>
-  <string>vtube-studio-rs can install its Camera Extension to publish avatar frames as a system camera source.</string>
+  <string>MacAvatarLayer can install its Camera Extension to publish avatar frames as a system camera source.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -1844,7 +1847,7 @@ fn sign_camera_dev_app(
         format!(
             "failed to codesign camera dev app with identity `{}`: {error}. \
 Install an Apple Development or Developer ID Application certificate in Keychain, \
-or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
+or set MAC_AVATAR_LAYER_CODESIGN_IDENTITY to a valid local codesigning identity.",
             identity.value
         )
     })?;
@@ -1863,13 +1866,13 @@ struct CodesignIdentityChoice {
 }
 
 fn camera_codesign_identity_choice() -> CodesignIdentityChoice {
-    env::var("VTUBE_RS_CODESIGN_IDENTITY")
+    env::var("MAC_AVATAR_LAYER_CODESIGN_IDENTITY")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| CodesignIdentityChoice {
             value,
-            source: "VTUBE_RS_CODESIGN_IDENTITY",
+            source: "MAC_AVATAR_LAYER_CODESIGN_IDENTITY",
         })
         .or_else(|| {
             detect_codesign_identity().map(|value| CodesignIdentityChoice {
@@ -2030,7 +2033,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
         .unwrap_or_else(|| root.join("target/space-test"));
     fs::create_dir_all(&output_dir)?;
 
-    if env::var("VTUBE_RS_SKIP_TARGET_CLEAN").unwrap_or_default() != "1" {
+    if env::var("MAC_AVATAR_LAYER_SKIP_TARGET_CLEAN").unwrap_or_default() != "1" {
         clean(vec!["--generated".to_string()])?;
         fs::create_dir_all(&output_dir)?;
     }
@@ -2041,9 +2044,9 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
     let (include_dir, lib_dir) = cubism_core_paths(&root)?;
 
     terminate_app_processes(&root);
-    let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
+    let _ = fs::remove_file(root.join("target/mac-avatar-layer.pid"));
 
-    println!("Starting vtube-studio-rs Space/display reliability run.");
+    println!("Starting MacAvatarLayer Space/display reliability run.");
     println!("Model: {model_label}");
     println!("Log: {}", log_path.display());
     println!("Report: {}", report_path.display());
@@ -2079,7 +2082,7 @@ fn run_space_test(args: Vec<String>) -> Result<()> {
         .spawn()?;
     let mut app = ChildCleanupGuard {
         child: app_child,
-        pid_path: root.join("target/vtube-studio-rs.pid"),
+        pid_path: root.join("target/mac-avatar-layer.pid"),
     };
     let mut tail = TailThreadGuard::start(log_path.clone());
 
@@ -2171,8 +2174,8 @@ struct CaptureRunOptions {
 
 fn capture_options_from_env() -> CaptureRunOptions {
     CaptureRunOptions {
-        clean_before: env::var("VTUBE_RS_SKIP_TARGET_CLEAN").unwrap_or_default() != "1",
-        report_after: env::var("VTUBE_RS_SKIP_REPORT").unwrap_or_default() != "1",
+        clean_before: env::var("MAC_AVATAR_LAYER_SKIP_TARGET_CLEAN").unwrap_or_default() != "1",
+        report_after: env::var("MAC_AVATAR_LAYER_SKIP_REPORT").unwrap_or_default() != "1",
     }
 }
 
@@ -2525,7 +2528,7 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
     );
     println!("Note: this is not an internal no-desktop OBS output path.");
     println!(
-        "Window: level screen_saver | size 540x720 | title `vtube-studio-rs OBS Source` | capture-friendly on | diagnostics off"
+        "Window: level screen_saver | size 540x720 | title `MacAvatarLayer OBS Source` | capture-friendly on | diagnostics off"
     );
     println!("Renderer: MSAA on | mipmaps on | anisotropy 8 | masks enabled");
     println!("ScreenCaptureKit probe: off (not an OBS output path)");
@@ -2602,7 +2605,7 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
         "Output: Metal renders into IOSurface without a desktop avatar window and auto-requests Camera Extension activation"
     );
     println!("Manifest: target/internal-output/iosurface.json");
-    println!("OBS: use `VTube Studio RS Camera` after macOS approves the Camera Extension.");
+    println!("OBS: use `MacAvatarLayer Camera` after macOS approves the Camera Extension.");
     println!(
         "Run with: cargo xtask run-metal{}",
         if matches!(target, SelectModelTarget::Build) {
@@ -3561,7 +3564,7 @@ fn build_virtual_camera_readiness_report(
 ) -> Result<VirtualCameraReadinessReport> {
     let output = inspect_internal_output_readiness(root, config_path)?;
     let platform_ok = env::consts::OS == "macos";
-    let app_bundle_path = root.join("target/dev-app/vtube-studio-rs Dev.app");
+    let app_bundle_path = root.join("target/dev-app/MacAvatarLayer Dev.app");
     let app_bundle_exists = app_bundle_path.is_dir();
     let embedded_extension_path = app_bundle_path
         .join("Contents/Library/SystemExtensions")
@@ -3678,7 +3681,7 @@ Generated for `{target_label}` profile.\n\n\
 Status: **{status}**\n\n\
 ## Product Boundary\n\n\
 - The project will not ship an OBS-specific plugin.\n\
-- The no-desktop path stays inside vtube-studio-rs as a macOS virtual camera output.\n\
+- The no-desktop path stays inside MacAvatarLayer as a macOS virtual camera output.\n\
 - OBS, QuickRecord, Zoom, Discord, and similar apps should eventually consume the same system camera source.\n\n\
 ## Current Checks\n\n\
 | Check | Status | Detail |\n\
@@ -3709,9 +3712,9 @@ Status: **{status}**\n\n\
 ## Next Implementation Slice\n\n\
 1. Keep the existing internal IOSurface producer as the frame source.\n\
 2. Build and embed the macOS Camera Extension target owned by this project.\n\
-3. Use `VT -> OBS / Recording Output -> Apply System Camera Source...` or `cargo xtask configure-internal-output --{target_flag}` so IOSurface output and Camera Extension activation are enabled together for `{extension_bundle_id}`.\n\
+3. Use `MA -> OBS / Recording Output -> Apply System Camera Source...` or `cargo xtask configure-internal-output --{target_flag}` so IOSurface output and Camera Extension activation are enabled together for `{extension_bundle_id}`.\n\
 4. Feed the extension from the IOSurface manifest/producer bridge as `1080x1080 60fps BGRA` sample buffers.\n\
-5. Register one camera named `VTube Studio RS Camera` and validate in QuickRecord, then OBS.\n\n\
+5. Register one camera named `MacAvatarLayer Camera` and validate in QuickRecord, then OBS.\n\n\
 Generate the prototype bundle templates with `cargo xtask camera-extension-plan --{target_flag}`.\n\n\
 ## Setup Commands\n\n\
 ```bash\n\
@@ -3722,7 +3725,7 @@ cargo xtask camera-extension-plan --{target_flag}\n\
 cargo xtask build-camera-extension --{target_flag}\n\
 cargo xtask build-app{run_release_flag}\n\
 ```\n\n\
-If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple Development or Developer ID Application identity before building a real Camera Extension.\n",
+If `Codesign identity` is `warn`, set `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` to an Apple Development or Developer ID Application identity before building a real Camera Extension.\n",
         target_label = target.label(),
         status = status,
         platform_status = readiness_status(platform_ok),
@@ -3843,7 +3846,7 @@ fn virtual_camera_next_action(
     if !system_extension_active {
         return "launch the /Applications app, approve the Camera Extension in System Settings > General > Login Items & Extensions > Camera Extensions, then re-run this readiness check.".to_string();
     }
-    "test VTube Studio RS Camera in QuickRecord or OBS.".to_string()
+    "test MacAvatarLayer Camera in QuickRecord or OBS.".to_string()
 }
 
 fn profile_readiness_detail(exists: bool, summary: Option<&ProvisioningProfileSummary>) -> String {
@@ -3971,7 +3974,7 @@ fn camera_extension_info_plist() -> String {
     <key>CFBundleIdentifier</key>
     <string>{bundle_id}</string>
     <key>CFBundleName</key>
-    <string>VTube Studio RS Camera Extension</string>
+    <string>MacAvatarLayer Camera Extension</string>
     <key>CFBundlePackageType</key>
     <string>SYSX</string>
     <key>CFBundleShortVersionString</key>
@@ -3981,7 +3984,7 @@ fn camera_extension_info_plist() -> String {
     <key>CMIOExtensionMachServiceName</key>
     <string>{mach_service}</string>
     <key>NSSystemExtensionUsageDescription</key>
-    <string>Publishes VTube Studio RS frames as a macOS virtual camera.</string>
+    <string>Publishes MacAvatarLayer frames as a macOS virtual camera.</string>
 </dict>
 </plist>
 "#,
@@ -4383,7 +4386,7 @@ fn capture_metal_to(root: &Path, model_path: &str, output_dir: &Path) -> Result<
     fs::create_dir_all(output_dir)?;
     let (include_dir, lib_dir) = cubism_core_paths(root)?;
     terminate_app_processes(root);
-    let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
+    let _ = fs::remove_file(root.join("target/mac-avatar-layer.pid"));
 
     let capture_log_path = output_dir.join("capture.log");
     let capture_log = fs::File::create(&capture_log_path)?;
@@ -4402,7 +4405,7 @@ fn capture_metal_to(root: &Path, model_path: &str, output_dir: &Path) -> Result<
         .spawn()?;
     let mut app = ChildCleanupGuard {
         child,
-        pid_path: root.join("target/vtube-studio-rs.pid"),
+        pid_path: root.join("target/mac-avatar-layer.pid"),
     };
 
     let wait_seconds = env_f64("WAIT_SECONDS", 12.0)?;
@@ -4499,19 +4502,19 @@ fn wait_for_app_window(
     loop {
         if app.has_exited()? {
             return Err(format!(
-                "vtube-studio-rs exited before a window appeared. Last log lines:\n{}",
+                "MacAvatarLayer exited before a window appeared. Last log lines:\n{}",
                 tail_lines(capture_log_path, 40)
             )
             .into());
         }
 
-        if let Some(window_id) = find_vtube_window_id()? {
+        if let Some(window_id) = find_mac_avatar_layer_window_id()? {
             return Ok(window_id);
         }
 
         if Instant::now() >= deadline {
             return Err(format!(
-                "Could not find vtube-studio-rs window. Last log lines:\n{}",
+                "Could not find MacAvatarLayer window. Last log lines:\n{}",
                 tail_lines(capture_log_path, 40)
             )
             .into());
@@ -4520,8 +4523,13 @@ fn wait_for_app_window(
     }
 }
 
-fn find_vtube_window_id() -> Result<Option<String>> {
-    macos_window::find_window_id_by_owner("vtube-studio-rs")
+fn find_mac_avatar_layer_window_id() -> Result<Option<String>> {
+    for owner in ["MacAvatarLayer Dev", "MacAvatarLayer", "mac-avatar-layer"] {
+        if let Some(window_id) = macos_window::find_window_id_by_owner(owner)? {
+            return Ok(Some(window_id));
+        }
+    }
+    Ok(None)
 }
 
 fn capture_window_with_retries(
@@ -4543,7 +4551,7 @@ fn capture_window_with_retries(
             }
             Err(error) => {
                 return Err(format!(
-                    "Could not capture vtube-studio-rs window {window_id} after {attempts} attempts through CoreGraphics.\nLast capture error:\n{error}\nLast app log lines:\n{}",
+                    "Could not capture MacAvatarLayer window {window_id} after {attempts} attempts through CoreGraphics.\nLast capture error:\n{error}\nLast app log lines:\n{}",
                     tail_lines(capture_log_path, 40)
                 )
                 .into());
@@ -5076,7 +5084,7 @@ fn write_space_test_report(
 
     let markdown = format!(
         "\
-# vtube-studio-rs Space Reliability Report
+# MacAvatarLayer Space Reliability Report
 
 - Generated: {}
 - Model: `{}`
@@ -5597,8 +5605,8 @@ fn yes_no(value: bool) -> &'static str {
 }
 
 fn run_render_regression_report_safe(root: &Path) -> Result<()> {
-    if env::var("VTUBE_RS_SKIP_REPORT").unwrap_or_default() == "1" {
-        println!("Render regression report: skipped (VTUBE_RS_SKIP_REPORT=1)");
+    if env::var("MAC_AVATAR_LAYER_SKIP_REPORT").unwrap_or_default() == "1" {
+        println!("Render regression report: skipped (MAC_AVATAR_LAYER_SKIP_REPORT=1)");
         return Ok(());
     }
 
@@ -5644,7 +5652,7 @@ fn run_model_probe(root: &Path, roots: &[String], probe_path: &Path) -> Result<(
         .output()?;
 
     let mut report = String::new();
-    report.push_str("# vtube-studio-rs Model Risk Probe\n\n");
+    report.push_str("# MacAvatarLayer Model Risk Probe\n\n");
     report.push_str(&format!("Generated: {}\n", generated_stamp()));
     report.push_str(&format!("Roots: {}\n\n", roots.join(" ")));
     report.push_str(std::str::from_utf8(&output.stdout)?);
@@ -5688,7 +5696,7 @@ fn cubism_core_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
 
 fn compatibility_report(root: &Path, samples_root: &str, probe_path: &Path, probe: &str) -> String {
     let mut report = String::new();
-    report.push_str("# vtube-studio-rs Sample Compatibility Sweep\n\n");
+    report.push_str("# MacAvatarLayer Sample Compatibility Sweep\n\n");
     report.push_str(&format!("- Generated: {}\n", generated_stamp()));
     report.push_str(&format!("- Samples root: `{samples_root}`\n"));
     report.push_str(&format!(
@@ -6582,7 +6590,7 @@ fn model_label(model: &str) -> &str {
 
 fn render_regression_report_markdown(root: &Path, output_dir: &Path) -> String {
     let mut report = String::new();
-    report.push_str("# vtube-studio-rs Render Regression Report\n\n");
+    report.push_str("# MacAvatarLayer Render Regression Report\n\n");
     report.push_str(&format!("- Generated: {}\n", generated_stamp()));
     report.push_str(&format!("- Root: `{}`\n", root.display()));
     report.push_str(&format!(
@@ -7887,7 +7895,7 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
 }
 
 fn terminate_app_processes(root: &Path) {
-    let binary = root.join("target/debug/vtube-studio-rs");
+    let binary = root.join("target/debug/mac-avatar-layer");
     let canonical_binary = binary.canonicalize().unwrap_or_else(|_| binary.clone());
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
@@ -7910,7 +7918,7 @@ fn process_matches_binary(process: &Process, binary: &Path, canonical_binary: &P
         return true;
     }
 
-    if process.name() == "vtube-studio-rs" {
+    if process.name() == "mac-avatar-layer" {
         return true;
     }
 
@@ -8309,7 +8317,7 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     #[test]
     fn review_focus_links_anisotropy_quality_captures_when_present() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-xtask-test-{}",
+            "mac-avatar-layer-xtask-test-{}",
             timestamp_for_filename()
         ));
         let output_dir = root.join("target/render-regression");
@@ -8332,7 +8340,7 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     #[test]
     fn msaa_summary_reports_sample_count_and_resize_events() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-xtask-msaa-test-{}",
+            "mac-avatar-layer-xtask-msaa-test-{}",
             timestamp_for_filename()
         ));
         let output_dir = root.join("target/render-regression");
@@ -8362,7 +8370,7 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     #[test]
     fn retina_resize_summary_reports_geometry_and_texture_events() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-xtask-retina-test-{}",
+            "mac-avatar-layer-xtask-retina-test-{}",
             timestamp_for_filename()
         ));
         let output_dir = root.join("target/render-regression");
@@ -8505,7 +8513,7 @@ window_level = "screen_saver"
 
 [output]
 mode = "syphon"
-syphon_name = "VTubeStudioRS"
+syphon_name = "MacAvatarLayer"
 
 [output.internal]
 width = 1080.0
@@ -8645,7 +8653,7 @@ atlas_anisotropy = 1
     #[test]
     fn collect_provisioning_profile_paths_accepts_expected_extensions() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-profile-scan-test-{}",
+            "mac-avatar-layer-profile-scan-test-{}",
             timestamp_for_filename()
         ));
         let nested = root.join("nested");
@@ -8676,12 +8684,12 @@ atlas_anisotropy = 1
     #[test]
     fn camera_extension_templates_include_coremediaio_identifiers() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-camera-extension-plan-test-{}",
+            "mac-avatar-layer-camera-extension-plan-test-{}",
             timestamp_for_filename()
         ));
         let plan = camera_extension_plan_markdown(SelectModelTarget::Build, &root);
         assert!(plan.contains("objc2-core-media-io"));
-        assert!(plan.contains("VTube Studio RS Camera"));
+        assert!(plan.contains("MacAvatarLayer Camera"));
         assert!(plan.contains("CMIOExtensionStreamSource"));
 
         let info = camera_extension_info_plist();
@@ -8696,12 +8704,12 @@ atlas_anisotropy = 1
     #[test]
     fn validates_container_provisioning_profile_contract() {
         let value = serde_json::json!({
-            "Name": "VTube Studio RS Container",
+            "Name": "MacAvatarLayer Container",
             "TeamIdentifier": ["TEAM123456"],
             "Entitlements": {
-                "application-identifier": "TEAM123456.rs.vtube-studio.dev",
+                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer",
                 "com.apple.developer.system-extension.install": true,
-                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
             }
         });
         let summary =
@@ -8713,11 +8721,11 @@ atlas_anisotropy = 1
     #[test]
     fn rejects_container_profile_without_system_extension_entitlement() {
         let value = serde_json::json!({
-            "Name": "VTube Studio RS Container",
+            "Name": "MacAvatarLayer Container",
             "TeamIdentifier": ["TEAM123456"],
             "Entitlements": {
-                "application-identifier": "TEAM123456.rs.vtube-studio.dev",
-                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer",
+                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
             }
         });
         let summary =
@@ -8735,11 +8743,11 @@ atlas_anisotropy = 1
     #[test]
     fn validates_camera_extension_provisioning_profile_contract() {
         let value = serde_json::json!({
-            "Name": "VTube Studio RS Camera Extension",
+            "Name": "MacAvatarLayer Camera Extension",
             "TeamIdentifier": ["TEAM123456"],
             "Entitlements": {
-                "application-identifier": "TEAM123456.rs.vtube-studio.dev.CameraExtension",
-                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer.CameraExtension",
+                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
             }
         });
         let summary =
@@ -8756,7 +8764,7 @@ atlas_anisotropy = 1
             "Entitlements": {
                 "application-identifier": "TEAM123456.com.example.other",
                 "com.apple.developer.system-extension.install": true,
-                "com.apple.security.application-groups": ["group.rs.vtube-studio.dev"]
+                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
             }
         });
         let summary =
@@ -8770,7 +8778,7 @@ atlas_anisotropy = 1
     #[test]
     fn virtual_camera_readiness_report_reads_iosurface_manifest() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-virtual-camera-test-{}",
+            "mac-avatar-layer-virtual-camera-test-{}",
             timestamp_for_filename()
         ));
         let manifest_path = root.join("target/internal-output/iosurface.json");
@@ -8931,11 +8939,11 @@ activate_virtual_camera = true
 
     #[test]
     fn camera_dev_info_plist_declares_privacy_usage() {
-        let plist = dev_camera_info_plist("vtube-studio-rs");
-        assert!(plist.contains("<string>vtube-studio-rs</string>"));
+        let plist = dev_camera_info_plist("mac-avatar-layer");
+        assert!(plist.contains("<string>MacAvatarLayer Dev</string>"));
         assert!(plist.contains("NSCameraUsageDescription"));
         assert!(plist.contains("NSMicrophoneUsageDescription"));
-        assert!(plist.contains("rs.vtube-studio.dev"));
+        assert!(plist.contains("io.github.symphonyiceattack.mac-avatar-layer"));
     }
 
     #[test]
@@ -9103,7 +9111,7 @@ path = "public/model/0.model3.json"
     #[test]
     fn model_manifest_summary_counts_resources() {
         let root = env::temp_dir().join(format!(
-            "vtube-studio-rs-model-list-test-{}",
+            "mac-avatar-layer-model-list-test-{}",
             timestamp_for_filename()
         ));
         fs::create_dir_all(&root).expect("test dir should be created");

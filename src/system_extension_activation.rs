@@ -4,7 +4,8 @@ use dispatch2::DispatchQueue;
 use objc2_foundation::NSString;
 use objc2_system_extensions::{OSSystemExtensionManager, OSSystemExtensionRequest};
 
-pub const CAMERA_EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExtension";
+pub const CAMERA_EXTENSION_BUNDLE_ID: &str =
+    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -60,7 +61,7 @@ mod tests {
     fn camera_extension_bundle_id_matches_planned_extension() {
         assert_eq!(
             CAMERA_EXTENSION_BUNDLE_ID,
-            "rs.vtube-studio.dev.CameraExtension"
+            "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension"
         );
         assert!(activation_note().contains("/Applications"));
     }

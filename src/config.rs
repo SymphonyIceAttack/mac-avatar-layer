@@ -2,10 +2,10 @@ use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 
-const DEVELOPMENT_CONFIG_PATH: &str = "vtube-studio-rs.dev.toml";
-const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
-const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml";
-const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
+const DEVELOPMENT_CONFIG_PATH: &str = "mac-avatar-layer.dev.toml";
+const BUILD_CONFIG_PATH: &str = "mac-avatar-layer.build.toml";
+const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.dev.example.toml";
+const BUILD_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.build.example.toml";
 const DEFAULT_MODEL_PATH: &str = "public/model/0.model3.json";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -786,8 +786,8 @@ path = "public/model/from-config.model3.json"
     fn creates_missing_local_config_from_example() {
         let root = unique_temp_dir("config-create");
         fs::create_dir_all(&root).expect("temp dir should be created");
-        let config_path = root.join("vtube-studio-rs.dev.toml");
-        let example_path = root.join("vtube-studio-rs.dev.example.toml");
+        let config_path = root.join("mac-avatar-layer.dev.toml");
+        let example_path = root.join("mac-avatar-layer.dev.example.toml");
         fs::write(
             &example_path,
             "[model]\npath = \"public/model/from-example.model3.json\"\n",
@@ -814,7 +814,7 @@ path = "public/model/from-config.model3.json"
     fn missing_example_keeps_default_config_path_optional() {
         let root = unique_temp_dir("config-missing-example");
         fs::create_dir_all(&root).expect("temp dir should be created");
-        let config_path = root.join("vtube-studio-rs.dev.toml");
+        let config_path = root.join("mac-avatar-layer.dev.toml");
         let example_path = root.join("missing.example.toml");
 
         assert!(
@@ -832,7 +832,7 @@ path = "public/model/from-config.model3.json"
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "vtube-studio-rs-{name}-{}-{nanos}",
+            "mac-avatar-layer-{name}-{}-{nanos}",
             std::process::id()
         ))
     }

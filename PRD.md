@@ -1,4 +1,4 @@
-# vtube-studio-rs PRD
+# MacAvatarLayer PRD
 
 ## Product Goal
 
@@ -88,8 +88,8 @@ files:
   `[app].window_height`; local dev/build configs use `540x720`, 1.5x the
   original prototype size.
 - The render loop targets roughly 60 FPS and reports frame timing diagnostics.
-- App startup uses a local PID guard under `target/vtube-studio-rs.pid` to avoid
-  duplicate development windows. `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` is only
+- App startup uses a local PID guard under `target/mac-avatar-layer.pid` to avoid
+  duplicate development windows. `MAC_AVATAR_LAYER_ALLOW_DUPLICATE_INSTANCE=1` is only
   for deliberate debugging.
 - Renderer lifecycle events use `renderer_event=...` records for startup,
   drawable size changes, mask/offscreen/MSAA texture changes, drawable
@@ -108,7 +108,7 @@ files:
   through the local signed `.app` wrapper for stable camera permissions, and
   the active TOML controls whether camera capture and the ScreenCaptureKit
   probe start. `cargo xtask run-metal --release` runs the optimized build
-  profile against `vtube-studio-rs.build.toml`, where local camera input is
+  profile against `mac-avatar-layer.build.toml`, where local camera input is
   enabled by default and the ScreenCaptureKit probe is disabled by default.
 - `cargo xtask capture-full-matrix` runs the standard visual regression matrix
   and writes one final Markdown report.
@@ -201,7 +201,7 @@ Priority 1: Model And Runtime Usability
   available as menu controls.
 - Keep improving missing SDK/model/microphone/camera permission messages so
   failures are visible to non-developer users beyond the terminal. The first
-  pass now includes `VT` menu shortcuts to macOS Camera and Microphone privacy
+  pass now includes `MA` menu shortcuts to macOS Camera and Microphone privacy
   settings.
 
 Priority 2: Tracking And Input
@@ -350,7 +350,7 @@ Goals:
 - If no camera is available, permission is denied, or Vision cannot find a
   face, the avatar should continue rendering with idle blink/breath and any
   enabled mouse/microphone inputs.
-- Expose camera state in the `VT` status bar menu and diagnostics overlay:
+- Expose camera state in the `MA` status bar menu and diagnostics overlay:
   disabled, waiting for permission, running, no face, no camera, or failed.
 
 Parameter mapping:
@@ -420,7 +420,7 @@ Implementation plan:
 
 - Done: add `CameraConfig` under `[input.camera]` with defaults and README
   examples.
-- Done: add a safe Rust-facing camera input scaffold plus `VT` menu and
+- Done: add a safe Rust-facing camera input scaffold plus `MA` menu and
   diagnostics status lines for the native backend.
 - Done: add the optional `camera-tracking` feature and a macOS AVFoundation
   permission/device probe that reports disabled, waiting for permission,
@@ -452,11 +452,11 @@ Implementation plan:
   restarts.
 - Done: make `cargo xtask run-metal` the single local launch path for dev and
   release: it builds `metal-renderer camera-tracking`, installs the binary into
-  `target/dev-app/vtube-studio-rs Dev.app`, launches through LaunchServices with
-  `--config`, and uses the stable `rs.vtube-studio.dev` identity for camera
+  `target/dev-app/MacAvatarLayer Dev.app`, launches through LaunchServices with
+  `--config`, and uses the stable `io.github.symphonyiceattack.mac-avatar-layer` identity for camera
   permissions.
 - Done: keep the `.app` path stable and code sign it after each build using
-  `VTUBE_RS_CODESIGN_IDENTITY` or a detected local development identity when
+  `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` or a detected local development identity when
   available, with ad-hoc signing as a fallback.
 - Done: add the first Vision request call site inside the sample buffer
   delegate. Frames are throttled by `[input.camera].target_fps`, processed with
@@ -466,18 +466,18 @@ Implementation plan:
   center drives face offset, roll drives face roll, pupil-vs-eye geometry
   drives gaze, eye vertical ratio drives optional eye openness, and lip
   vertical ratio drives mouth openness.
-- Done: surface camera calibration data in diagnostics and the `VT` menu:
+- Done: surface camera calibration data in diagnostics and the `MA` menu:
   status, face offset, roll, gaze, mouth openness, and eye openness update while
   the app is running so real-camera tuning has visible feedback.
-- Done: add `VT` menu Soft/Normal/Expressive camera calibration presets that
+- Done: add `MA` menu Soft/Normal/Expressive camera calibration presets that
   scale camera head/eye ranges and mouth gain for the current session.
 - Done: add `cargo xtask tune-input [--dev|--build] <mouse|mouth|camera>
   <soft|normal|expressive>` so session calibration choices can be persisted to
   profile TOML without hand-editing every range/gain field.
-- Done: add a `VT` menu Camera Tracking toggle that can start/stop the native
+- Done: add a `MA` menu Camera Tracking toggle that can start/stop the native
   camera capture lifecycle during the current session and keeps the motion
   layer's camera driver in sync with the selected camera calibration preset.
-- Done: surface actionable camera status details in diagnostics and the `VT`
+- Done: surface actionable camera status details in diagnostics and the `MA`
   menu for permission denied, no camera, no face, backend missing, and failed
   setup states.
 - Done: add normalized camera calibration offsets for face center, gaze, roll,
@@ -524,7 +524,7 @@ Required outcomes:
 - Keep diagnostics overlay visibility and runtime debug controls in local TOML
   config rather than process environment variables.
 - Split local runtime config into development and build files:
-  `vtube-studio-rs.dev.toml` and `vtube-studio-rs.build.toml`.
+  `mac-avatar-layer.dev.toml` and `mac-avatar-layer.build.toml`.
 - Keep `app.runtime_profile = "development" | "release"` available so release
   style runs can default renderer event logs and MSAA off without removing
   Cubism, clipping, or offscreen correctness paths.
@@ -622,7 +622,7 @@ Acceptance criteria:
 - `cargo xtask run-metal --release` still launches through the stable local
   `.app` identity, preserves camera permission behavior, and shows only the
   transparent Live2D model by default.
-- The `VT` menu still supports diagnostics, model selection, window size
+- The `MA` menu still supports diagnostics, model selection, window size
   presets, expression selection, input toggles, and calibration presets.
 - Space reliability behavior is not regressed: no duplicate windows, startup
   guard remains active, and `window_configured` logs the expected panel policy.
@@ -802,7 +802,7 @@ Status: next product milestone.
 
 - Add model selection and switching.
 - Keep startup model selection available through `[model].path` in
-  `vtube-studio-rs.dev.toml` / `vtube-studio-rs.build.toml`; command-line model
+  `mac-avatar-layer.dev.toml` / `mac-avatar-layer.build.toml`; command-line model
   paths override TOML for one run.
 - Done: when the active dev/build TOML is missing, startup creates it from the
   matching committed example config before loading. If the example is also
@@ -811,17 +811,17 @@ Status: next product milestone.
   `cargo xtask list-models`.
 - Reuse the local model selection path currently exposed by
   `cargo xtask select-model [--dev|--build] MODEL_PATH`.
-- Done: expose a first-pass `VT` menu local model list. It scans `public/`,
+- Done: expose a first-pass `MA` menu local model list. It scans `public/`,
   writes the selected `.model3.json` to the active profile TOML, relaunches the
   local `.app` with that selected model, and avoids stale command-line model
   overrides; full in-process hot switching remains planned.
-- Done: expose `VT` menu `Reveal Active Model...` so users can locate the
+- Done: expose `MA` menu `Reveal Active Model...` so users can locate the
   loaded `.model3.json` in Finder and inspect local `public/` resources without
   reading terminal paths.
-- Done: expose `VT` menu `Open Models Folder...`; it opens the local `public/`
+- Done: expose `MA` menu `Open Models Folder...`; it opens the local `public/`
   folder and creates it first when missing, so model resource setup does not
   require terminal directory work.
-- Done: expose `VT` menu Window Size presets. Selecting 100%, 125%, 150%, or
+- Done: expose `MA` menu Window Size presets. Selecting 100%, 125%, 150%, or
   200% writes `[app].window_width` / `[app].window_height` to the active
   dev/build TOML and relaunches the local `.app`.
 - Removed: Syphon is no longer a product path. The app now focuses on normal
@@ -835,14 +835,14 @@ Status: next product milestone.
   Window Capture/macOS Screen Capture.
 - Done: `cargo xtask configure-obs-recording [--dev|--build] --offscreen`
   writes the same capture-friendly window path but sets `[app].window_x` to a
-  far negative coordinate, so OBS can still select `vtube-studio-rs OBS Source`
+  far negative coordinate, so OBS can still select `MacAvatarLayer OBS Source`
   while the avatar stays outside the visible desktop.
 - Done: when `window_capture_friendly` is enabled, the app uses a regular
-  activation policy, a stable `vtube-studio-rs OBS Source` window title,
+  activation policy, a stable `MacAvatarLayer OBS Source` window title,
   a normal transparent `NSWindow` instead of the desktop-overlay `NSPanel`,
   read-only WindowServer sharing, and includes the window in app/window
   enumeration so OBS has a visible source to select.
-- Done: expose `VT` menu `OBS / Recording Output -> Apply Desktop Window
+- Done: expose `MA` menu `OBS / Recording Output -> Apply Desktop Window
   Capture Preset...`; it writes the same preset to the active dev/build TOML
   and relaunches the app, so users do not need a terminal-only workflow for OBS
   window-capture setup. The menu marks the active mutually exclusive recording
@@ -850,7 +850,7 @@ Status: next product milestone.
 - Done: expose `Apply Offscreen Window Capture Preset...`; it is mutually
   exclusive with desktop window capture and System Camera Source, and uses the
   same OBS-capturable transparent window moved off desktop.
-- Done: add first-pass `output.mode = "internal"` and `VT` menu
+- Done: add first-pass `output.mode = "internal"` and `MA` menu
   `OBS / Recording Output -> Apply System Camera Source...`. This is one
   relaunching preset, not two separate switches: it enables the IOSurface
   producer, sets `output.internal.obs_preview_window = false`, and sets
@@ -858,7 +858,7 @@ Status: next product milestone.
   embedded CoreMediaIO System Extension activation request after relaunch.
   Internal mode renders the Live2D frame into an offscreen texture and logs
   frame summaries. It intentionally does not create a desktop avatar or OBS
-  preview window; OBS should use `VTube Studio RS Camera` once the system Camera
+  preview window; OBS should use `MacAvatarLayer Camera` once the system Camera
   Extension is approved by macOS. The raw IOSurface itself is still not directly
   capturable by OBS.
 - Done: add `iosurface-output` feature and first-pass
@@ -870,7 +870,7 @@ Status: next product milestone.
   consumers a real GPU-shareable frame handoff contract.
 - Planned: add a consumer-visible bridge on top of the IOSurface manifest as a
   project-owned macOS virtual camera output. Do not implement this as an OBS
-  plugin; OBS should see vtube-studio-rs the same way QuickRecord, Zoom,
+  plugin; OBS should see MacAvatarLayer the same way QuickRecord, Zoom,
   Discord, and other apps would see it: as a normal system camera source.
   Hiding the current window alone would make normal OBS Window Capture/macOS
   Screen Capture lose the avatar instead of recording it.
@@ -878,22 +878,22 @@ Status: next product milestone.
   `target/virtual-camera/readiness.md` and checks the selected profile,
   internal IOSurface producer config, IOSurface heartbeat manifest, app wrapper,
   and codesigning identity before the Camera Extension prototype begins.
-- Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
+- Done: expose first-pass `MA` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
   renderer reconfiguration remains planned.
 - Continue expanding the status bar controls into a broader settings surface.
-  The first-pass `VT` menu already shows renderer/model state and controls
+  The first-pass `MA` menu already shows renderer/model state and controls
   diagnostics, expression selection, mouse tracking, microphone input, camera
   tracking, input calibration presets, local model selection, window size, and
   renderer quality.
-- Done: add first-pass `VT` menu shortcuts for Camera and Microphone privacy
+- Done: add first-pass `MA` menu shortcuts for Camera and Microphone privacy
   settings so users can repair macOS permission issues without searching
   terminal logs.
 - Continue improving user-facing permission and missing-file messages beyond
   the current startup terminal diagnostics.
 - Prototype the selected AVFoundation + Vision camera-tracking path and expose
-  it through `[input.camera]` plus the `VT` status bar menu.
+  it through `[input.camera]` plus the `MA` status bar menu.
 - Done: add `cargo xtask build-app [--release]` as the first packaging/signing
   entry point. It builds the Metal + camera app wrapper, signs it with the same
   stable local bundle identity as `run-metal`, prints the active profile config,
@@ -925,7 +925,7 @@ Status: ScreenCaptureKit probe and IOSurface handoff diagnostics in progress.
 - Keep transparent window output as the supported OBS capture path.
 - Add a ScreenCaptureKit runtime sampling probe for the avatar window. It
   counts frame metadata, logs stall/recovery events, and surfaces status in the
-  diagnostics overlay and `VT` menu without reading or storing frame pixels.
+  diagnostics overlay and `MA` menu without reading or storing frame pixels.
 - Document Screen Recording permission behavior, development/build defaults,
   Space-switch behavior, and display sleep/wake observations from generated
   Space reports.
@@ -957,7 +957,7 @@ Extension activation requires Apple Developer Program provisioning profiles.
   entitlements under `target/virtual-camera/`.
 - Use `cargo xtask build-camera-extension` to build the standalone Rust
   prototype binary and package
-  `target/virtual-camera/VTube Studio RS Camera.systemextension`.
+  `target/virtual-camera/MacAvatarLayer Camera.systemextension`.
 - Embed the prototype `.systemextension` into the local app wrapper under
   `Contents/Library/SystemExtensions/` during `cargo xtask build-app`.
 - Submit a first-pass activation request from the app menu through
@@ -972,8 +972,8 @@ Extension activation requires Apple Developer Program provisioning profiles.
 - Done: xtask embeds provisioning profiles before signing when they exist at
   `public/provisioning/ContainerApp.provisionprofile` and
   `public/provisioning/CameraExtension.provisionprofile`, or when
-  `VTUBE_RS_CONTAINER_PROVISION_PROFILE` /
-  `VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE` point to profile files.
+  `MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE` /
+  `MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE` point to profile files.
 - Done: provisioning profiles are decoded and validated before embedding:
   bundle id must match the container app or Camera Extension, the shared app
   group must be present, and the container app profile must include
@@ -988,8 +988,8 @@ Extension activation requires Apple Developer Program provisioning profiles.
   directories can be passed explicitly with `--from DIR`. Profile issuance still
   requires Apple Developer Program/Xcode; xtask automates local discovery and
   setup only.
-- Blocker: OBS will not see `VTube Studio RS Camera` until macOS reports
-  `rs.vtube-studio.dev.CameraExtension` as `[activated enabled]`. A local Apple
+- Blocker: OBS will not see `MacAvatarLayer Camera` until macOS reports
+  `io.github.symphonyiceattack.mac-avatar-layer.CameraExtension` as `[activated enabled]`. A local Apple
   Development certificate alone can sign the prototype, but a real Camera
   Extension path still needs Apple Developer Program provisioning profiles that
   authorize the System Extension entitlement. If the Apple Developer portal
@@ -1014,7 +1014,7 @@ Extension activation requires Apple Developer Program provisioning profiles.
   `CMSampleBuffer` via `CMIOSampleBufferCreateForImageBuffer`, and sends it
   through `CMIOExtensionStream::sendSampleBuffer`.
 - Add a project-owned Camera Extension that exposes one system camera named
-  `VTube Studio RS Camera`.
+  `MacAvatarLayer Camera`.
 - Continue hardening extension frames from the internal IOSurface handoff:
   stale producer handling, transparent fallback frames, app-group manifest
   handoff, lifecycle cleanup, and client compatibility testing.
@@ -1026,10 +1026,10 @@ Extension activation requires Apple Developer Program provisioning profiles.
 ## Debug Controls
 
 Runtime debug controls are read once at startup from local profile configs.
-Development runs use `vtube-studio-rs.dev.toml`; release builds use
-`vtube-studio-rs.build.toml`. Both files are ignored by Git; committed defaults
-live in `vtube-studio-rs.dev.example.toml` and
-`vtube-studio-rs.build.example.toml`.
+Development runs use `mac-avatar-layer.dev.toml`; release builds use
+`mac-avatar-layer.build.toml`. Both files are ignored by Git; committed defaults
+live in `mac-avatar-layer.dev.example.toml` and
+`mac-avatar-layer.build.example.toml`.
 
 ```toml
 [app]

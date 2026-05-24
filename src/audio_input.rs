@@ -87,10 +87,10 @@ fn microphone_startup_failure_message(error: &str) -> String {
     format!(
         "Microphone input is enabled but could not start.\n\
          Cause: {error}\n\
-         macOS: open System Settings > Privacy & Security > Microphone, then allow the terminal, Codex, or packaged app that launches vtube-studio-rs.\n\
+         macOS: open System Settings > Privacy & Security > Microphone, then allow the terminal, Codex, or packaged app that launches MacAvatarLayer.\n\
          To keep the avatar running without microphone input, set [input.microphone].enabled = false in the active profile config.\n\
-         Development config: vtube-studio-rs.dev.toml\n\
-         Build config: vtube-studio-rs.build.toml"
+         Development config: mac-avatar-layer.dev.toml\n\
+         Build config: mac-avatar-layer.build.toml"
     )
 }
 
@@ -135,8 +135,8 @@ mod tests {
         assert!(message.contains("permission denied"));
         assert!(message.contains("System Settings > Privacy & Security > Microphone"));
         assert!(message.contains("[input.microphone].enabled = false"));
-        assert!(message.contains("vtube-studio-rs.dev.toml"));
-        assert!(message.contains("vtube-studio-rs.build.toml"));
+        assert!(message.contains("mac-avatar-layer.dev.toml"));
+        assert!(message.contains("mac-avatar-layer.build.toml"));
     }
 
     #[test]

@@ -1,9 +1,11 @@
 #![cfg(all(target_os = "macos", feature = "virtual-camera-extension"))]
 
-pub const CAMERA_LOCALIZED_NAME: &str = "VTube Studio RS Camera";
-pub const EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExtension";
-pub const EXTENSION_MACH_SERVICE: &str = "rs.vtube-studio.dev.CameraExtension";
-pub const APP_GROUP_ID: &str = "group.rs.vtube-studio.dev";
+pub const CAMERA_LOCALIZED_NAME: &str = "MacAvatarLayer Camera";
+pub const EXTENSION_BUNDLE_ID: &str =
+    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+pub const EXTENSION_MACH_SERVICE: &str =
+    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+pub const APP_GROUP_ID: &str = "group.io.github.symphonyiceattack.mac-avatar-layer";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct VirtualCameraExtensionDescriptor {
@@ -41,7 +43,7 @@ mod tests {
     #[test]
     fn descriptor_names_the_system_camera_source() {
         let descriptor = VirtualCameraExtensionDescriptor::current();
-        assert_eq!(descriptor.camera_name, "VTube Studio RS Camera");
+        assert_eq!(descriptor.camera_name, "MacAvatarLayer Camera");
         assert!(descriptor.bundle_id.ends_with(".CameraExtension"));
         assert_eq!(descriptor.bundle_id, descriptor.mach_service);
         assert!(descriptor.app_group_id.starts_with("group."));

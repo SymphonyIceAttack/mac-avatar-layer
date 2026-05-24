@@ -114,7 +114,7 @@ impl IosurfaceOutput {
             &self.manifest_path,
             &IosurfaceManifest {
                 schema_version: 1,
-                producer: "vtube-studio-rs",
+                producer: "mac-avatar-layer",
                 producer_kind: "iosurface",
                 pid: std::process::id(),
                 iosurface_id: self.id(),

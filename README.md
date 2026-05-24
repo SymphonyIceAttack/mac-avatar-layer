@@ -1,6 +1,6 @@
-# vtube-studio-rs
+# MacAvatarLayer
 
-A Rust-first macOS prototype for a VTube Studio-like avatar host.
+A Rust-first macOS prototype for a macOS-native Live2D avatar host.
 
 The first product goal is reliability on macOS: keep the avatar window and
 render loop alive across Desktop/Space switches, full-screen apps, and ordinary
@@ -217,11 +217,11 @@ cargo xtask run-metal
 With no argument it uses `[model].path` from the active profile config, falling
 back to `public/model/0.model3.json` when unset. It auto-detects
 `public/CubismSdkForNative`, sets `CUBISM_CORE_LIB_DIR` and
-`CUBISM_CORE_INCLUDE_DIR`, and closes old `vtube-studio-rs` instances before
+`CUBISM_CORE_INCLUDE_DIR`, and closes old `mac-avatar-layer` instances before
 launching through the local `.app` wrapper so camera permissions use the stable
-`rs.vtube-studio.dev` identity. By default it runs the development profile and
-reads `vtube-studio-rs.dev.toml`. Pass `--release` to run an optimized build
-profile that reads `vtube-studio-rs.build.toml`:
+`io.github.symphonyiceattack.mac-avatar-layer` identity. By default it runs the development profile and
+reads `mac-avatar-layer.dev.toml`. Pass `--release` to run an optimized build
+profile that reads `mac-avatar-layer.build.toml`:
 
 ```bash
 cargo xtask run-metal --release
@@ -234,11 +234,11 @@ cargo xtask build-app
 cargo xtask build-app --release
 ```
 
-This uses Cubism Core SDK auto-detection, the stable `rs.vtube-studio.dev`
+This uses Cubism Core SDK auto-detection, the stable `io.github.symphonyiceattack.mac-avatar-layer`
 bundle identity, and the same auto-detected local codesigning path as
 `run-metal`.
 Development and release builds both use the normal transparent window output.
-Release builds use the optimized profile in `vtube-studio-rs.build.toml` without
+Release builds use the optimized profile in `mac-avatar-layer.build.toml` without
 requiring `Syphon.framework`.
 
 `run-metal` always compiles `metal-renderer`, `camera-tracking`, and
@@ -269,12 +269,12 @@ cargo xtask run-metal --release
 ```
 
 This still creates a real transparent macOS window named
-`vtube-studio-rs OBS Source`, but places it at a far negative screen
+`MacAvatarLayer OBS Source`, but places it at a far negative screen
 coordinate. OBS can select the window; the user should not see it on the
 desktop. Use `--desktop` to move the same capture-friendly window back to the
 visible desktop.
 
-The same preset is available in the running app from the `VT` menu under
+The same preset is available in the running app from the `MA` menu under
 `OBS / Recording Output` as `Apply Desktop Window Capture Preset...` and
 `Apply Offscreen Window Capture Preset...`. The menu action writes the active
 dev/build TOML profile and relaunches the app. The active recording output
@@ -293,7 +293,7 @@ The preset writes the build profile to a transparent `screen_saver` level
 window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
 MSAA/mipmaps/8x anisotropy, keeps masks on, and disables the ScreenCaptureKit
 probe because it is diagnostic-only and not an OBS output path. The
-capture-friendly flag gives the avatar window a stable `vtube-studio-rs OBS
+capture-friendly flag gives the avatar window a stable `MacAvatarLayer OBS
 Source` title, keeps it as a transparent `NSPanel`, exposes it through normal
 app/window enumeration, marks the window as read-only shareable for WindowServer
 capture, and moves it outside the visible desktop for the offscreen preset. Use
@@ -306,7 +306,7 @@ Status: **currently unavailable as a usable OBS input source**. The menu item
 `Apply System Camera Source...` and the related xtask commands below are
 prototype/scaffold commands only. They may write config files, build prototype
 bundles, or generate readiness reports, but they do not currently produce a
-reliable `VTube Studio RS Camera` source in OBS, QuickRecord, Zoom, Discord, or
+reliable `MacAvatarLayer Camera` source in OBS, QuickRecord, Zoom, Discord, or
 other camera consumers.
 
 This path is blocked unless the Apple ID belongs to a paid Apple Developer
@@ -317,7 +317,7 @@ create/download the provisioning profiles needed for the System Extension
 entitlement. Until this path is completed, the supported OBS path is the Desktop
 Window Capture or Offscreen Window Capture preset above.
 
-The first no-desktop output prototype is available from the `VT` menu under
+The first no-desktop output prototype is available from the `MA` menu under
 `OBS / Recording Output` as `Apply System Camera Source...`, but it should be
 treated as disabled for end users. This single option enables the IOSurface
 producer and submits the Camera Extension activation request on the next launch.
@@ -354,8 +354,8 @@ id. It also writes a small heartbeat manifest to
 size, pixel format, frame count, update timestamp, and the camera handoff
 contract: `1080x1080`, `BGRA8Unorm`, `60fps`. This is the GPU sharing
 foundation for the project-owned virtual camera output. The project does not
-plan to ship an OBS plugin. In this preset OBS should consume vtube-studio-rs
-through the system camera source once macOS approves `VTube Studio RS Camera`;
+plan to ship an OBS plugin. In this preset OBS should consume MacAvatarLayer
+through the system camera source once macOS approves `MacAvatarLayer Camera`;
 there is intentionally no desktop window fallback.
 
 The related readiness command is also diagnostic only; it does not install or
@@ -384,11 +384,11 @@ This writes `target/virtual-camera/camera-extension-plan.md` plus
 `target/virtual-camera/camera-extension-prototype/`. The Rust binding stack for
 this path is `objc2-core-media-io` plus `objc2-core-video`, matching the rest of
 the project's `objc2-*` Apple-framework bridge approach. The target camera name
-is `VTube Studio RS Camera`.
+is `MacAvatarLayer Camera`.
 
 `cargo xtask build-camera-extension --build` also builds the standalone
 prototype binary and packages it as
-`target/virtual-camera/VTube Studio RS Camera.systemextension`. This bundle is
+`target/virtual-camera/MacAvatarLayer Camera.systemextension`. This bundle is
 still a scaffold: it links the CoreMediaIO/CoreVideo bindings, carries the
 right identifiers, and declares the provider/device/stream contract for a
 1080x1080 60fps BGRA camera stream fed by the IOSurface manifest. It also
@@ -406,10 +406,10 @@ consumer apps.
 
 `cargo xtask build-app --release` now embeds that prototype bundle under the
 local app wrapper at
-`target/dev-app/vtube-studio-rs Dev.app/Contents/Library/SystemExtensions/`.
+`target/dev-app/MacAvatarLayer Dev.app/Contents/Library/SystemExtensions/`.
 When the build profile is configured for `Apply System Camera Source...`, the
 command also copies the signed app wrapper to
-`/Applications/vtube-studio-rs Dev.app`, because macOS System Extension
+`/Applications/MacAvatarLayer Dev.app`, because macOS System Extension
 activation is only accepted from an app bundle in `/Applications`.
 
 The generated files are not a finished installed camera yet. A real macOS
@@ -422,13 +422,13 @@ approval; the menu preset is the activation prototype, not a finished
 distributable camera. The planned frame path remains:
 
 Important: a visible OBS camera source requires the Camera Extension to be
-listed by `systemextensionsctl list` as `rs.vtube-studio.dev.CameraExtension`
+listed by `systemextensionsctl list` as `io.github.symphonyiceattack.mac-avatar-layer.CameraExtension`
 with `[activated enabled]`. The app and extension must be signed with the
 required System Extension entitlement and valid embedded provisioning profiles
 from an Apple Developer Program team. A local Apple Development certificate can
 sign the bundles, but without matching provisioning profiles macOS may reject or
 kill the app before it can register the camera, and OBS will not show
-`VTube Studio RS Camera`. If Apple Developer shows `This resource is only for
+`MacAvatarLayer Camera`. If Apple Developer shows `This resource is only for
 developers enrolled in a developer program or members of an organization’s team
 in a developer program`, this feature cannot be completed with the current
 Apple ID. Check the current state with:
@@ -470,8 +470,8 @@ Use `--force` to replace already-copied valid profiles.
 Or point xtask at profiles stored elsewhere:
 
 ```bash
-VTUBE_RS_CONTAINER_PROVISION_PROFILE=/path/to/ContainerApp.provisionprofile \
-VTUBE_RS_CAMERA_EXTENSION_PROVISION_PROFILE=/path/to/CameraExtension.provisionprofile \
+MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE=/path/to/ContainerApp.provisionprofile \
+MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE=/path/to/CameraExtension.provisionprofile \
   cargo xtask build-app --release
 ```
 
@@ -507,7 +507,7 @@ stalled_after_seconds = 2.0
 ```
 
 If the probe reports `permission denied` or `waiting permission`, enable Screen
-Recording for `vtube-studio-rs Dev` in macOS System Settings > Privacy &
+Recording for `MacAvatarLayer Dev` in macOS System Settings > Privacy &
 Security > Screen Recording, then restart the app.
 
 ### Why Syphon Was Removed
@@ -538,8 +538,8 @@ cargo xtask select-model --dev public/model/0.model3.json
 cargo xtask select-model --build public/model/0.model3.json
 ```
 
-`select-model` writes `[model].path` to `vtube-studio-rs.dev.toml` by default;
-use `--build` to write `vtube-studio-rs.build.toml`. Later `cargo xtask
+`select-model` writes `[model].path` to `mac-avatar-layer.dev.toml` by default;
+use `--build` to write `mac-avatar-layer.build.toml`. Later `cargo xtask
 run-metal` uses the development config when no model path argument is passed,
 while `cargo xtask run-metal --release` uses the build config.
 If startup cannot find the selected `.model3.json`, the app prints the active
@@ -549,7 +549,7 @@ Run `cargo xtask doctor` to check dev/build config files, selected model
 manifests, window size settings, renderer, motion, mouse, microphone, camera
 input settings, and local Cubism Core SDK paths before launching.
 
-The running app installs a first-pass macOS status bar item named `VT` near the
+The running app installs a first-pass macOS status bar item named `MA` near the
 right side of the menu bar. Its menu shows the active model, expression count,
 and renderer quality state, and it can toggle diagnostics, mouse tracking, and
 microphone mouth input for the current session. When the model declares
@@ -648,7 +648,7 @@ should wait longer for diagnostics and motion to settle after the window appears
 `cargo xtask capture-mask-matrix` temporarily switches the local dev renderer config and
 captures the `Mao` stress model in shared-mask, high-precision-mask, and
 no-mask modes under `target/render-regression/mask-matrix/`, then restores the
-previous `vtube-studio-rs.dev.toml`.
+previous `mac-avatar-layer.dev.toml`.
 `cargo xtask mao-mask-audit` writes `target/render-regression/mao-mask-audit.md`, a
 focused report for Mao's dense clipping, inverted masks, eye masks, capture
 references, and manual pass/investigate decision before changing clipping
@@ -690,7 +690,7 @@ anisotropy 1/8 for the default model, `Mao`, and `Ren` across whole-image and
 focused avatar regions. The main render regression report also links the
 `mipmaps-on-aniso8` screenshots in its review focus and contact sheet.
 Each capture command refreshes `target/render-regression/report.md` unless
-`VTUBE_RS_SKIP_REPORT=1` is set for chained captures.
+`MAC_AVATAR_LAYER_SKIP_REPORT=1` is set for chained captures.
 `cargo xtask capture-full-matrix` is the preferred complete visual sweep: it cleans
 generated render artifacts once, runs the risk, mask, offscreen, optional Rice
 stress, and quality matrices with report generation skipped inside each step,
@@ -704,7 +704,7 @@ fallback events, MSAA/edge-quality summaries, focused audit summaries, and
 Retina/resize stability summaries from capture logs.
 Generated test artifacts under `target/render-regression/` and
 `target/space-test/` are cleaned automatically before these commands run. Set
-`VTUBE_RS_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
+`MAC_AVATAR_LAYER_SKIP_TARGET_CLEAN=1` to keep previous local artifacts for comparison.
 Run `cargo xtask clean --all` when you also want to remove Cargo build
 outputs.
 
@@ -721,7 +721,7 @@ renderer-owned atlas, mask, offscreen, MSAA, and blend snapshot texture memory;
 Activity Monitor RSS can be higher because it also includes debug runtime,
 driver/cache, and system allocation overhead.
 The app prevents duplicate local avatar instances with
-`target/vtube-studio-rs.pid`; set `VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1` only
+`target/mac-avatar-layer.pid`; set `MAC_AVATAR_LAYER_ALLOW_DUPLICATE_INSTANCE=1` only
 when intentionally debugging multiple windows.
 `cargo xtask run-space-test` writes machine logs to `target/space-test/*.log`
 and a Markdown checklist/report to `target/space-test/*.md`.
@@ -729,11 +729,11 @@ and a Markdown checklist/report to `target/space-test/*.md`.
 ## App Configuration
 
 Runtime options are read once at startup from a profile-specific local config in
-the project root. Debug/development runs use `vtube-studio-rs.dev.toml`; release
-builds use `vtube-studio-rs.build.toml`. Both files are local-only and ignored
+the project root. Debug/development runs use `mac-avatar-layer.dev.toml`; release
+builds use `mac-avatar-layer.build.toml`. Both files are local-only and ignored
 by Git. If the active local config is missing, startup creates it from the
 matching committed example before loading. You can also copy or edit
-`vtube-studio-rs.dev.example.toml` or `vtube-studio-rs.build.example.toml` when
+`mac-avatar-layer.dev.example.toml` or `mac-avatar-layer.build.example.toml` when
 you want to customize a run.
 
 ```toml
@@ -846,7 +846,7 @@ volume into
 `response_curve` values such as `0.45` make quiet speech open the mouth more;
 higher values such as `1.0` behave closer to linear RMS.
 
-Persist a starter tuning profile after trying the session presets in the `VT`
+Persist a starter tuning profile after trying the session presets in the `MA`
 menu:
 
 ```bash
@@ -882,15 +882,15 @@ body/part pulses on models that wire `ParamEyeLOpen/ROpen` into physics.
 
 Camera tracking is implemented behind the optional `camera-tracking` feature.
 `cargo xtask run-metal` always compiles it and launches through
-`target/dev-app/vtube-studio-rs Dev.app`, which declares
+`target/dev-app/MacAvatarLayer Dev.app`, which declares
 `NSCameraUsageDescription` / `NSMicrophoneUsageDescription` and uses the stable
-bundle identifier `rs.vtube-studio.dev`. The active TOML controls whether the
+bundle identifier `io.github.symphonyiceattack.mac-avatar-layer`. The active TOML controls whether the
 camera opens through `[input.camera].enabled`. If macOS asks for permission,
-allow `vtube-studio-rs Dev`, then restart `cargo xtask run-metal`. If a previous
+allow `MacAvatarLayer Dev`, then restart `cargo xtask run-metal`. If a previous
 denial is cached, reset just the dev bundle identity and run again:
 
 ```bash
-tccutil reset Camera rs.vtube-studio.dev
+tccutil reset Camera io.github.symphonyiceattack.mac-avatar-layer
 cargo xtask run-metal
 ```
 
@@ -900,7 +900,7 @@ exist:
 
 ```bash
 security find-identity -v -p codesigning
-VTUBE_RS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
+MAC_AVATAR_LAYER_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
   cargo xtask run-metal
 ```
 
@@ -919,8 +919,8 @@ pupil-vs-eye geometry, eye openness, and lip openness. It does not retain,
 write, or log frame image data. The mapping is still first-pass and needs
 real-camera calibration. When diagnostics are visible, the overlay shows the
 current camera status plus face offset, roll, gaze, mouth, and eye sample
-values; the `VT` menu also updates the camera status line while the app is
-running. Use the same `VT` menu to toggle Camera Tracking on/off at runtime.
+values; the `MA` menu also updates the camera status line while the app is
+running. Use the same `MA` menu to toggle Camera Tracking on/off at runtime.
 Permission denied, no camera, no face, missing backend, and setup failure states
 show short menu hints and actionable diagnostics overlay text.
 
@@ -933,7 +933,7 @@ camera mouth samples can combine with the microphone mouth driver using
 degrees of real head turn reaches the configured Live2D head range; roll uses a
 roughly 45 degree range. Camera `invert_x` defaults to `true` so webcam tracking
 behaves like a mirrored avatar view; set it to `false` if your camera pipeline is
-already mirrored. The `VT` menu's Camera Calibration presets scale camera
+already mirrored. The `MA` menu's Camera Calibration presets scale camera
 head/eye ranges and mouth gain for the current session. If Camera Tracking is
 off, choosing a preset is remembered and applied the next time the menu toggle
 starts camera tracking.
@@ -941,7 +941,7 @@ starts camera tracking.
 To test the current native camera probe:
 
 ```bash
-# First set [input.camera].enabled = true in vtube-studio-rs.dev.toml.
+# First set [input.camera].enabled = true in mac-avatar-layer.dev.toml.
 cargo xtask run-metal public/model/0.model3.json
 ```
 
@@ -949,7 +949,7 @@ If microphone input is enabled and macOS denies access, the app prints a
 startup diagnostic with the active dev/build config names and the permission
 path to repair it.
 
-For lower-overhead build/release-style runs, use `vtube-studio-rs.build.toml`:
+For lower-overhead build/release-style runs, use `mac-avatar-layer.build.toml`:
 
 ```toml
 [app]

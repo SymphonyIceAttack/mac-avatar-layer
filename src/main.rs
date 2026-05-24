@@ -44,7 +44,7 @@ fn main() {
             vec!["public".to_string()]
         };
         if let Err(error) = probe_models(&roots) {
-            eprintln!("vtube-studio-rs model probe failed: {error}");
+            eprintln!("MacAvatarLayer model probe failed: {error}");
             std::process::exit(1);
         }
         return;
@@ -53,39 +53,39 @@ fn main() {
     let cli = match parse_cli_args(&args) {
         Ok(cli) => cli,
         Err(error) => {
-            eprintln!("vtube-studio-rs failed to start: {error}");
+            eprintln!("MacAvatarLayer failed to start: {error}");
             std::process::exit(1);
         }
     };
     if let Err(error) = set_working_directory_from_config(cli.config_path.as_deref()) {
-        eprintln!("vtube-studio-rs failed to start: {error}");
+        eprintln!("MacAvatarLayer failed to start: {error}");
         std::process::exit(1);
     }
 
     let config = match load_app_config(cli.config_path.as_deref()) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("vtube-studio-rs failed to start: {error}");
+            eprintln!("MacAvatarLayer failed to start: {error}");
             std::process::exit(1);
         }
     };
     let cli_model_path = cli.model_path.as_deref();
     let model_path = config.resolved_model_path(cli_model_path);
     if let Err(error) = validate_model_manifest_path(&model_path, cli_model_path.is_some()) {
-        eprintln!("vtube-studio-rs failed to start: {error}");
+        eprintln!("MacAvatarLayer failed to start: {error}");
         std::process::exit(1);
     }
 
     let _instance_guard = match AppInstanceGuard::acquire() {
         Ok(guard) => guard,
         Err(error) => {
-            eprintln!("vtube-studio-rs failed to start: {error}");
+            eprintln!("MacAvatarLayer failed to start: {error}");
             std::process::exit(1);
         }
     };
 
     if let Err(error) = macos_app::run(&model_path, config) {
-        eprintln!("vtube-studio-rs failed to start: {error}");
+        eprintln!("MacAvatarLayer failed to start: {error}");
         std::process::exit(1);
     }
 }
@@ -114,7 +114,7 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: vtube-studio-rs [--config CONFIG_PATH] [MODEL_PATH]".to_string()
+                    "usage: mac-avatar-layer [--config CONFIG_PATH] [MODEL_PATH]".to_string(),
                 );
             }
             value if value.starts_with('-') => {
@@ -204,9 +204,11 @@ struct AppInstanceGuard {
 #[cfg(target_os = "macos")]
 impl AppInstanceGuard {
     fn acquire() -> Result<Self, String> {
-        if std::env::var("VTUBE_RS_ALLOW_DUPLICATE_INSTANCE").is_ok_and(|value| value == "1") {
+        if std::env::var("MAC_AVATAR_LAYER_ALLOW_DUPLICATE_INSTANCE")
+            .is_ok_and(|value| value == "1")
+        {
             let path =
-                std::env::temp_dir().join(format!("vtube-studio-rs-{}.pid", std::process::id()));
+                std::env::temp_dir().join(format!("mac-avatar-layer-{}.pid", std::process::id()));
             let file = std::fs::File::create(&path)
                 .map_err(|error| format!("Failed to create temporary instance guard: {error}"))?;
             return Ok(Self { path, _file: file });
@@ -217,7 +219,7 @@ impl AppInstanceGuard {
             .join("target");
         std::fs::create_dir_all(&target_dir)
             .map_err(|error| format!("Failed to create target directory: {error}"))?;
-        let path = target_dir.join("vtube-studio-rs.pid");
+        let path = target_dir.join("mac-avatar-layer.pid");
 
         for attempt in 0..2 {
             match std::fs::OpenOptions::new()
@@ -240,7 +242,7 @@ impl AppInstanceGuard {
                     let existing_pid = read_pid_file(&path);
                     if let Some(pid) = existing_pid.filter(|pid| process_is_alive(*pid)) {
                         return Err(format!(
-                            "another vtube-studio-rs instance is already running (pid {pid}). Close it first, or set VTUBE_RS_ALLOW_DUPLICATE_INSTANCE=1 for debugging."
+                            "another MacAvatarLayer instance is already running (pid {pid}). Close it first, or set MAC_AVATAR_LAYER_ALLOW_DUPLICATE_INSTANCE=1 for debugging."
                         ));
                     }
                     let _ = std::fs::remove_file(&path);
@@ -1095,14 +1097,14 @@ mod tests {
     fn cli_args_accept_config_and_model_path() {
         let args = vec![
             "--config".to_string(),
-            "/tmp/vtube-studio-rs.dev.toml".to_string(),
+            "/tmp/mac-avatar-layer.dev.toml".to_string(),
             "/tmp/model/0.model3.json".to_string(),
         ];
 
         assert_eq!(
             parse_cli_args(&args).expect("args should parse"),
             CliArgs {
-                config_path: Some("/tmp/vtube-studio-rs.dev.toml".to_string()),
+                config_path: Some("/tmp/mac-avatar-layer.dev.toml".to_string()),
                 model_path: Some("/tmp/model/0.model3.json".to_string()),
             }
         );
@@ -1111,6 +1113,6 @@ mod tests {
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("vtube-studio-rs currently targets macOS because the first milestone uses AppKit.");
+    eprintln!("MacAvatarLayer currently targets macOS because the first milestone uses AppKit.");
     std::process::exit(1);
 }

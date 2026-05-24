@@ -27,12 +27,12 @@ use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSSet, NSSt
 use objc2_io_surface::IOSurfaceRef;
 use serde::Deserialize;
 
-const CAMERA_LOCALIZED_NAME: &str = "VTube Studio RS Camera";
-const PROVIDER_NAME: &str = "VTube Studio RS";
+const CAMERA_LOCALIZED_NAME: &str = "MacAvatarLayer Camera";
+const PROVIDER_NAME: &str = "MacAvatarLayer";
 const PROVIDER_MANUFACTURER: &str = "SymphonyIceAttack";
-const EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExtension";
-const EXTENSION_MACH_SERVICE: &str = "rs.vtube-studio.dev.CameraExtension";
-const APP_GROUP_ID: &str = "group.rs.vtube-studio.dev";
+const EXTENSION_BUNDLE_ID: &str = "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+const EXTENSION_MACH_SERVICE: &str = "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
+const APP_GROUP_ID: &str = "group.io.github.symphonyiceattack.mac-avatar-layer";
 const PRODUCER_MANIFEST: &str = "target/internal-output/iosurface.json";
 const DEVICE_UUID: &str = "B0E13F44-B9B5-45D0-9D9A-4C46D2026A01";
 const STREAM_UUID: &str = "34B2FC2E-10DE-42C2-94C6-A59D0F2026A1";
@@ -198,7 +198,7 @@ define_class!(
     // - NSObject has no special subclassing requirements for this source object.
     // - The class does not implement Drop and stores no Rust-owned ivars.
     #[unsafe(super(NSObject))]
-    #[name = "VTubeStudioRSCameraProviderSource"]
+    #[name = "MacAvatarLayerCameraProviderSource"]
     struct CameraProviderSource;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
@@ -258,7 +258,7 @@ define_class!(
     // - NSObject has no special subclassing requirements for this source object.
     // - The class does not implement Drop and stores no Rust-owned ivars.
     #[unsafe(super(NSObject))]
-    #[name = "VTubeStudioRSCameraDeviceSource"]
+    #[name = "MacAvatarLayerCameraDeviceSource"]
     struct CameraDeviceSource;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
@@ -303,7 +303,7 @@ define_class!(
     // - NSObject has no special subclassing requirements for this source object.
     // - Stream lifecycle state is held in atomics until real per-client state is added.
     #[unsafe(super(NSObject))]
-    #[name = "VTubeStudioRSCameraStreamSource"]
+    #[name = "MacAvatarLayerCameraStreamSource"]
     struct CameraStreamSource;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
@@ -1020,7 +1020,7 @@ mod tests {
     #[test]
     fn prototype_identifiers_match_container_app_plan() {
         let prototype = CameraExtensionPrototype::current();
-        assert_eq!(prototype.device.localized_name, "VTube Studio RS Camera");
+        assert_eq!(prototype.device.localized_name, "MacAvatarLayer Camera");
         assert_eq!(prototype.bundle_id, prototype.mach_service);
         assert!(prototype.bundle_id.ends_with(".CameraExtension"));
         assert!(prototype.app_group_id.starts_with("group."));
@@ -1077,7 +1077,7 @@ mod tests {
     #[test]
     fn producer_manifest_snapshot_validates_camera_contract() {
         let root = std::env::temp_dir().join(format!(
-            "vtube-studio-rs-camera-extension-manifest-{}",
+            "mac-avatar-layer-camera-extension-manifest-{}",
             std::process::id()
         ));
         fs::create_dir_all(&root).expect("temp dir should be created");

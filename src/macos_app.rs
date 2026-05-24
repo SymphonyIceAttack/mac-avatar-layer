@@ -608,7 +608,7 @@ unsafe fn set_layer_bitmap(
 unsafe fn prevent_app_nap() -> Result<Id, String> {
     let options = NS_ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP
         | NS_ACTIVITY_AUTOMATIC_TERMINATION_DISABLED;
-    let reason = ns_string("Keep vtube-studio-rs avatar rendering while switching Spaces")?;
+    let reason = ns_string("Keep MacAvatarLayer avatar rendering while switching Spaces")?;
     let process_info = msg_id(class("NSProcessInfo")?, "processInfo");
     if process_info.is_null() {
         return Err("NSProcessInfo processInfo returned nil".to_string());
@@ -730,9 +730,9 @@ fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
 
 fn avatar_window_title(app_config: &AppRuntimeConfig) -> &'static str {
     if app_config.window_capture_friendly {
-        "vtube-studio-rs OBS Source"
+        "MacAvatarLayer OBS Source"
     } else {
-        "vtube-studio-rs"
+        "MacAvatarLayer"
     }
 }
 
@@ -1317,10 +1317,10 @@ unsafe fn install_settings_menu(
     let app_menu_item = ns_menu_item("", None, "")?;
     crate::apple_platform::add_menu_item(main_menu, app_menu_item);
 
-    let app_menu = ns_menu("vtube-studio-rs")?;
+    let app_menu = ns_menu("MacAvatarLayer")?;
     crate::apple_platform::set_menu_item_submenu(app_menu_item, app_menu);
 
-    add_disabled_menu_item(app_menu, "vtube-studio-rs")?;
+    add_disabled_menu_item(app_menu, "MacAvatarLayer")?;
     add_separator_menu_item(app_menu)?;
 
     let model_title = format!("Model: {}", model_title(model_path));
@@ -1611,7 +1611,7 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, "Model selection relaunches the app")?;
     add_separator_menu_item(app_menu)?;
 
-    let quit_item = ns_menu_item("Quit vtube-studio-rs", Some("terminate:"), "q")?;
+    let quit_item = ns_menu_item("Quit MacAvatarLayer", Some("terminate:"), "q")?;
     crate::apple_platform::add_menu_item(app_menu, quit_item);
 
     msg_void_id(app, "setMainMenu:", main_menu);
@@ -1636,7 +1636,7 @@ unsafe fn install_settings_menu(
         camera_preset_items,
     };
     update_settings_menu_state(&menu, state);
-    println!("renderer_event=settings_menu_installed kind=main_menu status_item=VT");
+    println!("renderer_event=settings_menu_installed kind=main_menu status_item=MA");
     Ok(menu)
 }
 
@@ -2000,7 +2000,7 @@ unsafe fn update_screen_capture_menu_status(
 }
 
 unsafe fn install_status_bar_item(menu: Id) -> Result<Id, String> {
-    crate::apple_platform::install_status_bar_item(menu, "VT", "vtube-studio-rs settings")
+    crate::apple_platform::install_status_bar_item(menu, "MA", "MacAvatarLayer settings")
 }
 
 unsafe fn ns_menu(title: &str) -> Result<Id, String> {
@@ -2518,7 +2518,7 @@ fn schedule_model_relaunch(model_path: &str) -> Result<(), String> {
     Command::new("sh")
         .arg("-c")
         .arg(script)
-        .arg("vtube-studio-rs-relaunch")
+        .arg("mac-avatar-layer-relaunch")
         .arg(std::process::id().to_string())
         .args(command_args)
         .spawn()
@@ -2789,7 +2789,7 @@ fn camera_runtime_active(status: CameraStatus) -> bool {
 
 fn settings_menu_controller_class() -> Result<Class, String> {
     crate::apple_platform::settings_menu_controller_class(
-        c"VTubeStudioRsSettingsMenuController",
+        c"MacAvatarLayerSettingsMenuController",
         &[
             ("toggleDiagnostics:", settings_toggle_diagnostics),
             ("toggleMouseTracking:", settings_toggle_mouse),
@@ -3147,7 +3147,7 @@ fn camera_status_fallback_detail(status: CameraStatus) -> &'static str {
         CameraStatus::Disabled => "Camera tracking is disabled.",
         CameraStatus::WaitingForPermission => "Approve the macOS camera permission prompt.",
         CameraStatus::PermissionDenied => {
-            "Enable Camera permission for vtube-studio-rs Dev in System Settings."
+            "Enable Camera permission for MacAvatarLayer Dev in System Settings."
         }
         CameraStatus::NoCamera => "No matching camera was found.",
         CameraStatus::BackendPending => "Rebuild with the camera-tracking feature.",
@@ -3791,14 +3791,14 @@ mod tests {
         assert_eq!(offscreen_origin.y, -10720.0);
         assert_eq!(
             avatar_window_title(&AppRuntimeConfig::default()),
-            "vtube-studio-rs"
+            "MacAvatarLayer"
         );
         assert_eq!(
             avatar_window_title(&AppRuntimeConfig {
                 window_capture_friendly: true,
                 ..AppRuntimeConfig::default()
             }),
-            "vtube-studio-rs OBS Source"
+            "MacAvatarLayer OBS Source"
         );
         assert_eq!(OutputMode::Window.label(), "window");
     }
@@ -3976,7 +3976,7 @@ mod tests {
     #[test]
     fn remove_toml_section_removes_legacy_output_block() {
         let updated = remove_toml_section(
-            "[app]\nwindow_level = \"screen_saver\"\n\n[output]\nmode = \"syphon\"\nsyphon_name = \"VTubeStudioRS\"\n\n[output.internal]\nwidth = 1080.0\n\n[renderer]\nenable_msaa = false\n",
+            "[app]\nwindow_level = \"screen_saver\"\n\n[output]\nmode = \"syphon\"\nsyphon_name = \"MacAvatarLayer\"\n\n[output.internal]\nwidth = 1080.0\n\n[renderer]\nenable_msaa = false\n",
             "output",
         );
 

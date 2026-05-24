@@ -351,7 +351,10 @@ mod backend {
             };
             let stream_config = stream_configuration(&window, config);
             let output = ScreenCaptureProbeOutput::new();
-            let queue = DispatchQueue::new("rs.vtube-studio.screen-capture-probe", None);
+            let queue = DispatchQueue::new(
+                "io.github.symphonyiceattack.mac-avatar-layer.screen-capture-probe",
+                None,
+            );
             let stream = unsafe {
                 SCStream::initWithFilter_configuration_delegate(
                     SCStream::alloc(),
@@ -506,7 +509,7 @@ mod backend {
             Err(error) => Err(ScreenCaptureStartError {
                 status: ScreenCaptureProbeStatus::WaitingPermission,
                 diagnostic: local_screen_capture_detail(&format!(
-                    "Timed out while waiting for ScreenCaptureKit shareable content: {error}. Approve Screen Recording permission for vtube-studio-rs Dev, then restart."
+                    "Timed out while waiting for ScreenCaptureKit shareable content: {error}. Approve Screen Recording permission for MacAvatarLayer Dev, then restart."
                 )),
             }),
         }
@@ -533,7 +536,7 @@ mod backend {
             Err(error) => Err(ScreenCaptureStartError {
                 status: ScreenCaptureProbeStatus::WaitingPermission,
                 diagnostic: local_screen_capture_detail(&format!(
-                    "Timed out while starting ScreenCaptureKit stream: {error}. Approve Screen Recording permission for vtube-studio-rs Dev, then restart."
+                    "Timed out while starting ScreenCaptureKit stream: {error}. Approve Screen Recording permission for MacAvatarLayer Dev, then restart."
                 )),
             }),
         }
