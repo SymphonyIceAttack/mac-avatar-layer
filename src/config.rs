@@ -15,7 +15,6 @@ pub struct AppConfig {
     pub model: ModelConfig,
     pub diagnostics: DiagnosticsConfig,
     pub renderer: RendererConfig,
-    pub output: OutputConfig,
     pub motion: MotionConfig,
     pub input: InputConfig,
     pub overrides: OverridesConfig,
@@ -126,7 +125,6 @@ impl Default for AppConfig {
             model: ModelConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             renderer: RendererConfig::default(),
-            output: OutputConfig::default(),
             motion: MotionConfig::default(),
             input: InputConfig::default(),
             overrides: OverridesConfig::default(),
@@ -244,31 +242,6 @@ impl RendererConfig {
     pub fn log_events(&self, runtime_profile: RuntimeProfile) -> bool {
         self.log_events
             .unwrap_or_else(|| runtime_profile.default_log_renderer_events())
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct OutputConfig {
-    pub mode: String,
-    pub syphon_name: String,
-}
-
-impl Default for OutputConfig {
-    fn default() -> Self {
-        Self {
-            mode: "window".to_string(),
-            syphon_name: "VTubeStudioRS".to_string(),
-        }
-    }
-}
-
-impl OutputConfig {
-    pub fn is_syphon(&self) -> bool {
-        matches!(
-            self.mode.trim().to_ascii_lowercase().as_str(),
-            "syphon" | "syphon_output" | "syphon-output"
-        )
     }
 }
 
@@ -477,10 +450,6 @@ only_parts = ["PartFocus"]
 highlight_drawables = ["ArtMeshProbe"]
 highlight_parts = ["PartProbe"]
 
-[output]
-mode = "syphon"
-syphon_name = "VTubeStudioRS"
-
 [motion]
 expression = "smile"
 blink_interval = 4.2
@@ -567,9 +536,6 @@ mouth_open = 0.7
         assert_eq!(config.renderer.only_parts, ["PartFocus"]);
         assert_eq!(config.renderer.highlight_drawables, ["ArtMeshProbe"]);
         assert_eq!(config.renderer.highlight_parts, ["PartProbe"]);
-        assert_eq!(config.output.mode, "syphon");
-        assert!(config.output.is_syphon());
-        assert_eq!(config.output.syphon_name, "VTubeStudioRS");
         assert_eq!(config.motion.expression.as_deref(), Some("smile"));
         assert_eq!(config.motion.blink_interval, 4.2);
         assert_eq!(config.motion.blink_duration, 0.18);

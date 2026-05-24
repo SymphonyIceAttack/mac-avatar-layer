@@ -786,19 +786,10 @@ Status: next product milestone.
 - Done: expose `VT` menu Window Size presets. Selecting 100%, 125%, 150%, or
   200% writes `[app].window_width` / `[app].window_height` to the active
   dev/build TOML and relaunches the local `.app`.
-- Done: restore `VT` menu Output Mode presets without restoring OBS capture.
-  `Desktop Window` writes `[output].mode = "window"` and `Syphon Producer`
-  writes `[output].mode = "syphon"`, then relaunches so the renderer initializes
-  the selected output path.
-- Removed: the old OBS/window-capture mode is no longer a product path. Capture
-  output now goes through the standard Syphon Producer instead of app-specific
-  window enumeration tricks.
-- Done: add first-pass standard Syphon Producer plumbing. `syphon-output` is an
-  optional feature that links a local `Syphon.framework`, `[output].mode =
-  "syphon"` renders to an offscreen BGRA Metal final texture, and release/build
-  profile configs default to Syphon output. `cargo xtask run-syphon` remains as
-  an explicit development helper that publishes the `VTubeStudioRS` server for
-  OBS, TouchDesigner, Resolume, and other Syphon clients.
+- Removed: Syphon is no longer a product path. The app now focuses on normal
+  transparent macOS window output for OBS Window Capture and macOS Screen
+  Capture. Future high-performance frame sharing should evaluate
+  ScreenCaptureKit, Metal, or IOSurface instead of restoring Syphon.
 - Done: expose first-pass `VT` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -829,11 +820,9 @@ Status: next product milestone.
 - Done: extend `cargo xtask doctor` to validate common `[renderer]` and
   `[motion]` mistakes, including `debug_texture_mode`, atlas anisotropy, blink
   interval/duration, and empty expression overrides.
-- Done: extend `cargo xtask doctor` to validate `[output].mode` and
-  `[output].syphon_name`, and to check the local `Syphon.framework` only when a
-  dev/build profile requests Syphon output. This keeps the default window mode
-  free of Syphon setup requirements while catching missing headers, metallib, or
-  non-arm64 framework binaries before a Syphon run.
+- Done: keep `cargo xtask doctor` focused on active window, model, renderer,
+  motion, input, and Cubism Core SDK checks. Legacy `[output]` settings are no
+  longer validated because Syphon output has been removed.
 - Continue packaging/signing/launch-at-login decisions; launch-at-login remains
   intentionally unimplemented until the app bundle/install location is settled.
 - Start the objc2 AppKit/Foundation migration phase from section 3a before

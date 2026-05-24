@@ -113,9 +113,8 @@ available:
   `screencapture`.
 - Stale renderer process cleanup is implemented in Rust, so run/capture
   commands no longer require `pkill`.
-- Syphon output is optional. To build or run it, install the local framework
-  with `cargo xtask install-syphon`, or set
-  `SYPHON_FRAMEWORK_DIR=/path/to/Syphon.framework` if you manage it yourself.
+- Syphon support has been removed. OBS integration now uses the normal
+  transparent app window through OBS Window Capture or macOS Screen Capture.
 
 Install missing macOS tools with:
 
@@ -142,7 +141,6 @@ cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
 cargo xtask doctor
-cargo xtask install-syphon
 cargo xtask list-models
 cargo xtask mao-mask-audit
 cargo xtask probe-risk-models public/model
@@ -153,8 +151,6 @@ cargo xtask render-regression-report
 cargo xtask rice-stress-audit
 cargo xtask run-metal
 cargo xtask run-metal --release
-cargo xtask run-syphon
-cargo xtask run-syphon --release
 cargo xtask run-space-test
 cargo xtask sample-compatibility-sweep
 cargo xtask select-model --dev public/model/0.model3.json
@@ -190,38 +186,27 @@ cargo xtask build-app --release
 
 This uses Cubism Core SDK auto-detection, the stable `rs.vtube-studio.dev`
 bundle identity, and the same local codesigning path as `run-metal`.
-Development builds use the normal window output. Release builds use
-`metal-renderer camera-tracking syphon-output`, require the local
-`Syphon.framework`, and read `vtube-studio-rs.build.toml`, which defaults to
-`[output].mode = "syphon"`.
+Development and release builds both use the normal transparent window output.
+Release builds use the optimized profile in `vtube-studio-rs.build.toml` without
+requiring `Syphon.framework`.
 
-`run-metal` always compiles both `metal-renderer` and `camera-tracking`; release
-runs also compile `syphon-output` because the build profile publishes Syphon by
-default. The active TOML decides whether the camera opens through
-`[input.camera].enabled`. The local build config enables camera input by
-default, so `cargo xtask run-metal --release` is the optimized
-camera-capable Syphon run path. App stdout/stderr are written under
+`run-metal` always compiles both `metal-renderer` and `camera-tracking`. The
+active TOML decides whether the camera opens through `[input.camera].enabled`.
+The local build config enables camera input by default, so
+`cargo xtask run-metal --release` is the optimized camera-capable transparent
+window run path. App stdout/stderr are written under
 `target/camera-test/run-metal-*.log`.
 
-To publish a standard Syphon Producer instead of relying on screen/window
-capture, install `Syphon.framework` locally and run:
+### Why Syphon Was Removed
 
-```bash
-cargo xtask install-syphon
-cargo xtask run-syphon
-```
+Syphon support has been removed from this project. Although Syphon is still
+useful in some VJ and creative-coding workflows, it is not a good long-term
+dependency for this app. The project is focused on a modern macOS rendering
+pipeline based on wgpu/Metal and standard window capture workflows.
 
-`install-syphon` downloads the macOS universal2 package used by
-`syphon-python`, extracts its bundled `Syphon.framework`, verifies
-`SyphonMetalServer.h`, thins the framework binary to arm64 for Apple Silicon,
-and installs it to `public/Syphon.framework`. `public/` is a local asset
-directory and is not committed to Git. `run-syphon` then generates a temporary
-`target/syphon-output/*.toml` profile with `[output].mode = "syphon"` and
-publishes a server named `VTubeStudioRS`.
-OBS, TouchDesigner, Resolume, and other Syphon clients should discover that
-server through their Syphon source/client UI. The development profile keeps the
-normal window output when `[output].mode = "window"`; the build profile defaults
-to Syphon.
+For OBS integration, capture the app window directly with OBS Window Capture or
+macOS Screen Capture. Future high-performance capture or frame-sharing work will
+prefer ScreenCaptureKit, Metal, or IOSurface instead of reintroducing Syphon.
 
 Pass a different model path as an argument to override local config for that
 run:
@@ -249,11 +234,7 @@ profile config path and the matching `list-models` / `select-model` command to
 repair it before opening the avatar window.
 Run `cargo xtask doctor` to check dev/build config files, selected model
 manifests, window size settings, renderer, motion, mouse, microphone, camera
-input settings, output mode, and local Cubism Core SDK paths before launching.
-When either profile sets `[output].mode = "syphon"`,
-doctor also checks `public/Syphon.framework` or `SYPHON_FRAMEWORK_DIR` for the
-Syphon binary, `SyphonMetalServer.h`, `default.metallib`, and an arm64-capable
-framework binary.
+input settings, and local Cubism Core SDK paths before launching.
 
 The running app installs a first-pass macOS status bar item named `VT` near the
 right side of the menu bar. Its menu shows the active model, expression count,
@@ -267,10 +248,7 @@ not keep the old avatar loaded. `Reveal Active Model...` selects the loaded
 `.model3.json` in Finder, and `Open Models Folder...` opens the local `public/`
 folder, creating it first if needed. The menu also includes Window Size presets
 that write `[app].window_width` / `[app].window_height` and relaunch with 100%,
-125%, 150%, or 200% sizing. Output Mode presets write `[output].mode` and
-relaunch between `Desktop Window` (`mode = "window"`) and `Syphon Producer`
-(`mode = "syphon"`). This is the replacement for the removed OBS window-capture
-mode; it does not restore the old offscreen capture window path.
+125%, 150%, or 200% sizing.
 Renderer Quality presets write `[renderer]` quality fields and relaunch with
 Performance, Balanced, or High Quality settings. The menu also includes
 Soft/Normal/Expressive mouse, mouth, and camera calibration presets for quick

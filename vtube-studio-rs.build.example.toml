@@ -26,12 +26,6 @@ only_parts = []
 highlight_drawables = []
 highlight_parts = []
 
-[output]
-# Build/release defaults to a standard Syphon Metal server for OBS,
-# TouchDesigner, Resolume, and other Syphon clients.
-mode = "syphon"
-syphon_name = "VTubeStudioRS"
-
 [motion]
 # expression = "smile"
 blink_interval = 3.8

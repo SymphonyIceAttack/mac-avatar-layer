@@ -27,12 +27,6 @@ only_parts = []
 highlight_drawables = []
 highlight_parts = []
 
-[output]
-# Development defaults to the normal transparent CAMetalLayer avatar window.
-# Use the build profile or cargo xtask run-syphon for standard Syphon output.
-mode = "window"
-syphon_name = "VTubeStudioRS"
-
 [motion]
 # expression = "smile"
 blink_interval = 3.8

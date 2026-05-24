@@ -28,7 +28,6 @@ const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml"
 const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
 const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
 const DEV_CAMERA_BUNDLE_ID: &str = "rs.vtube-studio.dev";
-const SYPHON_PYTHON_WHEEL_URL: &str = "https://files.pythonhosted.org/packages/ee/94/ccc2749af546a080f3ce96e344c01591dd0758bd9edcf19de0c92b37b591/syphon_python-0.1.1-cp312-cp312-macosx_10_9_universal2.whl";
 
 fn main() {
     if let Err(error) = run() {
@@ -50,7 +49,6 @@ fn run() -> Result<()> {
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
         Some("doctor") => doctor(args.collect()),
-        Some("install-syphon") => install_syphon(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
@@ -60,7 +58,6 @@ fn run() -> Result<()> {
         Some("render-regression-report") => render_regression_report(args.collect()),
         Some("rice-stress-audit") => rice_stress_audit(args.collect()),
         Some("run-metal") => run_metal(args.collect()),
-        Some("run-syphon") => run_syphon(args.collect()),
         Some("run-space-test") => run_space_test(args.collect()),
         Some("sample-compatibility-sweep") => sample_compatibility_sweep(args.collect()),
         Some("select-model") => select_model(args.collect()),
@@ -89,7 +86,6 @@ Usage:
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
   cargo xtask doctor
-  cargo xtask install-syphon [--force]
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
@@ -99,7 +95,6 @@ Usage:
   cargo xtask render-regression-report
   cargo xtask rice-stress-audit [MODEL_PATH]
   cargo xtask run-metal [--release] [MODEL_PATH]
-  cargo xtask run-syphon [--release] [MODEL_PATH]
   cargo xtask run-space-test [MODEL_PATH]
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
   cargo xtask select-model [--dev|--build] MODEL_PATH
@@ -122,7 +117,6 @@ Commands:
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
   doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
-  install-syphon    Download Syphon.framework into public/Syphon.framework.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
@@ -135,7 +129,6 @@ Commands:
                      Generate target/render-regression/report.md.
   rice-stress-audit Generate target/render-regression/rice-stress-audit.md.
   run-metal         Run the Metal renderer with local Cubism Core env; --release uses the build config.
-  run-syphon        Run the Metal renderer as a standard Syphon Producer.
   run-space-test    Run Space/display reliability test and write a Markdown report.
   sample-compatibility-sweep
                      Generate target/render-regression/compatibility-sweep.md.
@@ -162,7 +155,6 @@ fn clean(args: Vec<String>) -> Result<()> {
     remove_path(target.join("space-test-live.pid"))?;
     remove_path(target.join("space-test-smoke.out"))?;
     remove_path(target.join("camera-test"))?;
-    remove_path(target.join("syphon-output"))?;
     remove_path(target.join("dev-app"))?;
     remove_path(target.join("vtube-studio-rs.pid"))?;
 
@@ -391,9 +383,6 @@ fn doctor(args: Vec<String>) -> Result<()> {
     let development_check = check_local_config(&root, SelectModelTarget::Development)?;
     let build_check = check_local_config(&root, SelectModelTarget::Build)?;
     issues += development_check.issues + build_check.issues;
-    if development_check.syphon_requested || build_check.syphon_requested {
-        issues += check_syphon_framework(&root);
-    }
     issues += check_cubism_core_sdk(&root);
 
     println!();
@@ -707,19 +696,7 @@ fn build_app(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
-    let example_config_path = if options.release {
-        root.join(BUILD_EXAMPLE_CONFIG_PATH)
-    } else {
-        root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH)
-    };
-    let syphon_framework = syphon_framework_for_profile(&root, &config_path, &example_config_path)?;
-    let executable = build_metal_executable(
-        &root,
-        options.release,
-        &include_dir,
-        &lib_dir,
-        syphon_framework.as_deref(),
-    )?;
+    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
     let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
 
     println!("App wrapper: {}", bundle_dir.display());
@@ -750,25 +727,13 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
-    let example_config_path = if options.release {
-        root.join(BUILD_EXAMPLE_CONFIG_PATH)
-    } else {
-        root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH)
-    };
-    let syphon_framework = syphon_framework_for_profile(&root, &config_path, &example_config_path)?;
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
         terminate_app_processes(&root);
         let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
     }
 
-    let executable = build_metal_executable(
-        &root,
-        options.release,
-        &include_dir,
-        &lib_dir,
-        syphon_framework.as_deref(),
-    )?;
+    let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
     let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
     println!("App wrapper: {}", bundle_dir.display());
 
@@ -777,10 +742,6 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     } else {
         "run-metal-dev"
     };
-    let extra_env = syphon_framework
-        .as_deref()
-        .map(|path| vec![("SYPHON_FRAMEWORK_DIR", path)])
-        .unwrap_or_default();
     launch_camera_app_wrapper(
         &root,
         &bundle_dir,
@@ -789,120 +750,8 @@ fn run_metal(args: Vec<String>) -> Result<()> {
         &config_path,
         options.model_path.as_deref(),
         log_stem,
-        &extra_env,
+        &[],
     )
-}
-
-fn run_syphon(args: Vec<String>) -> Result<()> {
-    let options = parse_run_metal_args(args)?;
-
-    let root = project_root()?;
-    let (include_dir, lib_dir) = cubism_core_paths(&root)?;
-    let syphon_framework = syphon_framework_path(&root)?;
-
-    if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
-        terminate_app_processes(&root);
-        let _ = fs::remove_file(root.join("target/vtube-studio-rs.pid"));
-    }
-
-    let executable = build_metal_executable_with_features(
-        &root,
-        options.release,
-        &include_dir,
-        &lib_dir,
-        "metal-renderer camera-tracking syphon-output",
-        Some(&syphon_framework),
-    )?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
-    println!("App wrapper: {}", bundle_dir.display());
-
-    let config_path = write_syphon_run_config(&root, options.release)?;
-    let log_stem = if options.release {
-        "run-syphon-release"
-    } else {
-        "run-syphon-dev"
-    };
-    launch_camera_app_wrapper(
-        &root,
-        &bundle_dir,
-        &include_dir,
-        &lib_dir,
-        &config_path,
-        options.model_path.as_deref(),
-        log_stem,
-        &[("SYPHON_FRAMEWORK_DIR", &syphon_framework)],
-    )
-}
-
-fn install_syphon(args: Vec<String>) -> Result<()> {
-    let force = parse_install_syphon_args(args)?;
-    let root = project_root()?;
-    let framework_dir = root.join("public/Syphon.framework");
-    if framework_dir.join("Headers/SyphonMetalServer.h").is_file()
-        && framework_dir.join("Syphon").is_file()
-        && !force
-    {
-        println!(
-            "Syphon.framework already installed at {}",
-            relative_display(&root, &framework_dir)
-        );
-        println!("Use cargo xtask install-syphon --force to reinstall it.");
-        return Ok(());
-    }
-
-    let work_dir = root.join("target/syphon-install");
-    remove_path(work_dir.clone())?;
-    fs::create_dir_all(&work_dir)?;
-    let wheel_path = work_dir.join("syphon_python-0.1.1-macosx_universal2.whl");
-    println!("Downloading Syphon framework package...");
-    run_status(
-        Command::new("curl")
-            .arg("-L")
-            .arg("--fail")
-            .arg(SYPHON_PYTHON_WHEEL_URL)
-            .arg("-o")
-            .arg(&wheel_path)
-            .current_dir(&root)
-            .stdin(Stdio::null()),
-    )?;
-
-    let unpack_dir = work_dir.join("wheel");
-    fs::create_dir_all(&unpack_dir)?;
-    run_status(
-        Command::new("unzip")
-            .arg("-q")
-            .arg(&wheel_path)
-            .arg("-d")
-            .arg(&unpack_dir)
-            .current_dir(&root)
-            .stdin(Stdio::null()),
-    )?;
-
-    let extracted = find_syphon_framework(&unpack_dir)
-        .ok_or_else(|| "Downloaded package did not contain Syphon.framework".to_string())?;
-    require_file(
-        &extracted.join("Headers/SyphonMetalServer.h"),
-        "Downloaded Syphon.framework is missing SyphonMetalServer.h",
-    )?;
-    require_file(
-        &extracted.join("Syphon"),
-        "Downloaded Syphon.framework is missing the Syphon binary",
-    )?;
-    if let Some(parent) = framework_dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    remove_path(framework_dir.clone())?;
-    copy_dir_recursive(&extracted, &framework_dir)?;
-    clear_quarantine(&framework_dir);
-    thin_syphon_framework_to_arm64(&framework_dir)?;
-    codesign_ad_hoc_framework(&framework_dir);
-
-    println!(
-        "Installed Syphon.framework: {}",
-        relative_display(&root, &framework_dir)
-    );
-    println!("Run Syphon output with: cargo xtask run-syphon");
-    Ok(())
 }
 
 fn build_metal_executable(
@@ -910,45 +759,14 @@ fn build_metal_executable(
     release: bool,
     include_dir: &Path,
     lib_dir: &Path,
-    syphon_framework: Option<&Path>,
 ) -> Result<PathBuf> {
-    let features = if syphon_framework.is_some() {
-        "metal-renderer camera-tracking syphon-output"
-    } else {
-        "metal-renderer camera-tracking"
-    };
     build_metal_executable_with_features(
         root,
         release,
         include_dir,
         lib_dir,
-        features,
-        syphon_framework,
+        "metal-renderer camera-tracking",
     )
-}
-
-fn syphon_framework_for_profile(
-    root: &Path,
-    config_path: &Path,
-    example_config_path: &Path,
-) -> Result<Option<PathBuf>> {
-    if profile_requests_syphon(config_path, example_config_path)? {
-        return syphon_framework_path(root).map(Some);
-    }
-
-    Ok(syphon_framework_path(root).ok())
-}
-
-fn profile_requests_syphon(config_path: &Path, example_config_path: &Path) -> Result<bool> {
-    let content = if config_path.is_file() {
-        fs::read_to_string(config_path)?
-    } else if example_config_path.is_file() {
-        fs::read_to_string(example_config_path)?
-    } else {
-        String::new()
-    };
-    let config: DoctorConfig = toml::from_str(&content).unwrap_or_default();
-    Ok(doctor_output_mode(&config.output) == Some("syphon"))
 }
 
 fn build_metal_executable_with_features(
@@ -957,7 +775,6 @@ fn build_metal_executable_with_features(
     include_dir: &Path,
     lib_dir: &Path,
     features: &str,
-    syphon_framework: Option<&Path>,
 ) -> Result<PathBuf> {
     let mut command = Command::new("cargo");
     command.arg("build");
@@ -969,9 +786,6 @@ fn build_metal_executable_with_features(
         .current_dir(&root)
         .env("CUBISM_CORE_INCLUDE_DIR", &include_dir)
         .env("CUBISM_CORE_LIB_DIR", &lib_dir);
-    if let Some(syphon_framework) = syphon_framework {
-        command.env("SYPHON_FRAMEWORK_DIR", syphon_framework);
-    }
     let status = command.status()?;
     if !status.success() {
         let profile = if release { " --release" } else { "" };
@@ -1043,13 +857,6 @@ fn launch_camera_app_wrapper(
         command
             .arg("--env")
             .arg(format!("{name}={}", value.display()));
-        if *name == "SYPHON_FRAMEWORK_DIR" {
-            if let Some(parent) = value.parent() {
-                command
-                    .arg("--env")
-                    .arg(format!("DYLD_FRAMEWORK_PATH={}", parent.display()));
-            }
-        }
     }
     command.arg("--args").arg("--config").arg(config_path);
     if let Some(model_path) = model_path {
@@ -1259,25 +1066,6 @@ fn parse_run_metal_args(args: Vec<String>) -> Result<RunMetalOptions> {
         release,
         model_path,
     })
-}
-
-fn parse_install_syphon_args(args: Vec<String>) -> Result<bool> {
-    let mut force = false;
-    for arg in args {
-        match arg.as_str() {
-            "--force" => {
-                if force {
-                    return Err("usage: cargo xtask install-syphon [--force]".into());
-                }
-                force = true;
-            }
-            "-h" | "--help" => {
-                return Err("usage: cargo xtask install-syphon [--force]".into());
-            }
-            value => return Err(format!("unknown install-syphon option: {value}").into()),
-        }
-    }
-    Ok(force)
 }
 
 fn run_space_test(args: Vec<String>) -> Result<()> {
@@ -1900,7 +1688,6 @@ fn format_decimal(value: f64) -> String {
 #[derive(Debug, Default)]
 struct DoctorLocalCheck {
     issues: usize,
-    syphon_requested: bool,
 }
 
 fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLocalCheck> {
@@ -1913,10 +1700,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
             target.example_config_path(),
             target.config_path()
         );
-        return Ok(DoctorLocalCheck {
-            issues: 1,
-            syphon_requested: false,
-        });
+        return Ok(DoctorLocalCheck { issues: 1 });
     }
 
     let content = fs::read_to_string(&config_path)?;
@@ -1929,19 +1713,14 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
                 display_path
             );
             println!("    {error}");
-            return Ok(DoctorLocalCheck {
-                issues: 1,
-                syphon_requested: false,
-            });
+            return Ok(DoctorLocalCheck { issues: 1 });
         }
     };
 
     let issues = check_doctor_app_config(target, &config.app)
-        + check_doctor_output_config(target, &config.output)
         + check_doctor_renderer_config(target, &config.renderer)
         + check_doctor_motion_config(target, &config.motion)
         + check_doctor_input_config(target, &config.input);
-    let syphon_requested = doctor_output_mode(&config.output) == Some("syphon");
 
     let Some(model_path) = config.model.path.as_deref() else {
         println!("[!] {} config has no [model].path", target.label());
@@ -1949,10 +1728,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
             "    Run: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(DoctorLocalCheck {
-            issues: issues + 1,
-            syphon_requested,
-        });
+        return Ok(DoctorLocalCheck { issues: issues + 1 });
     };
 
     let full_model_path = root.join(model_path);
@@ -1966,10 +1742,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(DoctorLocalCheck {
-            issues: issues + 1,
-            syphon_requested,
-        });
+        return Ok(DoctorLocalCheck { issues: issues + 1 });
     }
     if !full_model_path.is_file() {
         println!(
@@ -1981,10 +1754,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
             "    Then: cargo xtask select-model --{} MODEL_PATH",
             target.flag_name()
         );
-        return Ok(DoctorLocalCheck {
-            issues: issues + 1,
-            syphon_requested,
-        });
+        return Ok(DoctorLocalCheck { issues: issues + 1 });
     }
 
     match ModelManifestSummary::load(&full_model_path) {
@@ -2000,10 +1770,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
                 yes_no(summary.has_physics),
                 yes_no(summary.has_display_info)
             );
-            Ok(DoctorLocalCheck {
-                issues,
-                syphon_requested,
-            })
+            Ok(DoctorLocalCheck { issues })
         }
         Err(error) => {
             println!(
@@ -2011,10 +1778,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
                 target.label()
             );
             println!("    {error}");
-            Ok(DoctorLocalCheck {
-                issues: issues + 1,
-                syphon_requested,
-            })
+            Ok(DoctorLocalCheck { issues: issues + 1 })
         }
     }
 }
@@ -2054,64 +1818,6 @@ fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> 
 
 fn valid_doctor_window_dimension(value: f64) -> bool {
     value.is_finite() && (96.0..=2400.0).contains(&value)
-}
-
-fn check_doctor_output_config(target: SelectModelTarget, output: &DoctorOutputConfig) -> usize {
-    let mut issues = 0usize;
-    let mode = doctor_output_mode(output);
-    match mode {
-        Some(mode) => {
-            println!(
-                "[x] {} output config: mode {mode} | syphon {}",
-                target.label(),
-                output
-                    .syphon_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or("VTubeStudioRS")
-            );
-            if mode == "syphon"
-                && output
-                    .syphon_name
-                    .as_deref()
-                    .is_some_and(|name| name.trim().is_empty())
-            {
-                println!(
-                    "[!] {} output.syphon_name is empty; runtime will fall back to VTubeStudioRS",
-                    target.label()
-                );
-                issues += 1;
-            }
-        }
-        None => {
-            let configured = output.mode.as_deref().unwrap_or_default();
-            println!(
-                "[!] {} output.mode is invalid: {:?}",
-                target.label(),
-                configured
-            );
-            println!("    Use output.mode = \"window\" or output.mode = \"syphon\"");
-            issues += 1;
-        }
-    }
-    issues
-}
-
-fn doctor_output_mode(output: &DoctorOutputConfig) -> Option<&'static str> {
-    output
-        .mode
-        .as_deref()
-        .map(normalized_output_mode)
-        .unwrap_or(Some("window"))
-}
-
-fn normalized_output_mode(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "window" | "desktop" => Some("window"),
-        "syphon" | "syphon_output" | "syphon-output" => Some("syphon"),
-        _ => None,
-    }
 }
 
 fn check_doctor_renderer_config(
@@ -2548,84 +2254,6 @@ fn check_cubism_core_sdk(root: &Path) -> usize {
     }
 }
 
-fn check_syphon_framework(root: &Path) -> usize {
-    let framework_dir = env::var_os("SYPHON_FRAMEWORK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("public/Syphon.framework"));
-    let mut issues = 0usize;
-    let binary = framework_dir.join("Syphon");
-    let header = framework_dir.join("Headers/SyphonMetalServer.h");
-    let metallib = framework_dir.join("Resources/default.metallib");
-
-    if !binary.is_file() || !header.is_file() || !metallib.is_file() {
-        println!("[!] Syphon.framework missing or incomplete");
-        println!(
-            "    Expected: {}, {}, {}",
-            relative_display(root, &binary),
-            relative_display(root, &header),
-            relative_display(root, &metallib)
-        );
-        println!("    Run: cargo xtask install-syphon");
-        issues += 1;
-    } else {
-        let arch = syphon_binary_architecture(&binary);
-        match arch.as_deref() {
-            Some("arm64") => {
-                println!(
-                    "[x] Syphon.framework: {} | architecture arm64",
-                    relative_display(root, &framework_dir)
-                );
-            }
-            Some("universal2") => {
-                println!(
-                    "[x] Syphon.framework: {} | architecture universal2",
-                    relative_display(root, &framework_dir)
-                );
-                println!(
-                    "    Optional: cargo xtask install-syphon --force will reinstall arm64-only."
-                );
-            }
-            Some(other) => {
-                println!(
-                    "[!] Syphon.framework architecture is {other}; Apple Silicon runs require arm64"
-                );
-                println!("    Run: cargo xtask install-syphon --force");
-                issues += 1;
-            }
-            None => {
-                println!("[!] Could not inspect Syphon.framework architecture");
-                println!("    Run: cargo xtask install-syphon --force");
-                issues += 1;
-            }
-        }
-    }
-
-    issues
-}
-
-fn syphon_binary_architecture(binary: &Path) -> Option<String> {
-    let output = Command::new("lipo")
-        .arg("-info")
-        .arg(binary)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(normalized_lipo_architecture(&String::from_utf8_lossy(&output.stdout)).to_string())
-}
-
-fn normalized_lipo_architecture(info: &str) -> &'static str {
-    let has_arm64 = info.contains("arm64");
-    let has_x86_64 = info.contains("x86_64");
-    match (has_arm64, has_x86_64) {
-        (true, true) => "universal2",
-        (true, false) => "arm64",
-        (false, true) => "x86_64",
-        (false, false) => "unknown",
-    }
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorConfig {
@@ -2633,7 +2261,6 @@ struct DoctorConfig {
     input: DoctorInputConfig,
     model: DoctorModelConfig,
     motion: DoctorMotionConfig,
-    output: DoctorOutputConfig,
     renderer: DoctorRendererConfig,
 }
 
@@ -2657,13 +2284,6 @@ struct DoctorMotionConfig {
     expression: Option<String>,
     blink_interval: Option<f64>,
     blink_duration: Option<f64>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct DoctorOutputConfig {
-    mode: Option<String>,
-    syphon_name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4092,55 +3712,6 @@ fn cubism_core_paths(root: &Path) -> Result<(PathBuf, PathBuf)> {
     )?;
 
     Ok((include_dir, lib_dir))
-}
-
-fn syphon_framework_path(root: &Path) -> Result<PathBuf> {
-    let framework_dir = env::var_os("SYPHON_FRAMEWORK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("public/Syphon.framework"));
-    require_file(
-        &framework_dir.join("Syphon"),
-        "Missing Syphon.framework. Set SYPHON_FRAMEWORK_DIR=/path/to/Syphon.framework or install it under public/Syphon.framework",
-    )?;
-    Ok(framework_dir)
-}
-
-fn write_syphon_run_config(root: &Path, release: bool) -> Result<PathBuf> {
-    let source_path = if release {
-        root.join(BUILD_CONFIG_PATH)
-    } else {
-        root.join(DEVELOPMENT_CONFIG_PATH)
-    };
-    let example_path = if release {
-        root.join(BUILD_EXAMPLE_CONFIG_PATH)
-    } else {
-        root.join(DEVELOPMENT_EXAMPLE_CONFIG_PATH)
-    };
-    let content = if source_path.is_file() {
-        fs::read_to_string(&source_path)?
-    } else if example_path.is_file() {
-        fs::read_to_string(&example_path)?
-    } else {
-        String::new()
-    };
-    let updated = set_toml_section_values(
-        &content,
-        "output",
-        &[
-            ("mode", toml_string_literal("syphon")),
-            ("syphon_name", toml_string_literal("VTubeStudioRS")),
-        ],
-    );
-    let output_dir = root.join("target/syphon-output");
-    fs::create_dir_all(&output_dir)?;
-    let config_path = output_dir.join(if release {
-        "vtube-studio-rs.syphon.build.toml"
-    } else {
-        "vtube-studio-rs.syphon.dev.toml"
-    });
-    fs::write(&config_path, updated)?;
-    println!("Syphon config: {}", relative_display(root, &config_path));
-    Ok(config_path)
 }
 
 fn compatibility_report(root: &Path, samples_root: &str, probe_path: &Path, probe: &str) -> String {
@@ -6391,104 +5962,6 @@ fn require_file(path: &Path, message: &str) -> Result<()> {
     }
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
-            fs::copy(&source_path, &destination_path)?;
-            #[cfg(unix)]
-            {
-                let permissions = fs::metadata(&source_path)?.permissions();
-                fs::set_permissions(&destination_path, permissions)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn find_syphon_framework(root: &Path) -> Option<PathBuf> {
-    if root.file_name().and_then(|name| name.to_str()) == Some("Syphon.framework")
-        && root.join("Syphon").is_file()
-    {
-        return Some(root.to_path_buf());
-    }
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_type().ok()?.is_dir() {
-            if let Some(found) = find_syphon_framework(&path) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-fn clear_quarantine(path: &Path) {
-    let _ = Command::new("xattr")
-        .arg("-dr")
-        .arg("com.apple.quarantine")
-        .arg(path)
-        .stdin(Stdio::null())
-        .status();
-}
-
-fn thin_syphon_framework_to_arm64(framework_dir: &Path) -> Result<()> {
-    for binary in syphon_framework_binaries(framework_dir) {
-        let output = Command::new("lipo").arg("-info").arg(&binary).output()?;
-        let info = String::from_utf8_lossy(&output.stdout);
-        if output.status.success() && info.contains("x86_64") && info.contains("arm64") {
-            let thin_path = binary.with_extension("arm64-thin");
-            run_status(
-                Command::new("lipo")
-                    .arg(&binary)
-                    .arg("-thin")
-                    .arg("arm64")
-                    .arg("-output")
-                    .arg(&thin_path)
-                    .stdin(Stdio::null()),
-            )?;
-            fs::rename(&thin_path, &binary)?;
-        }
-    }
-    Ok(())
-}
-
-fn syphon_framework_binaries(framework_dir: &Path) -> Vec<PathBuf> {
-    [
-        framework_dir.join("Syphon"),
-        framework_dir.join("Versions/A/Syphon"),
-        framework_dir.join("Versions/Current/Syphon"),
-    ]
-    .into_iter()
-    .filter(|path| path.is_file())
-    .collect()
-}
-
-fn codesign_ad_hoc_framework(framework_dir: &Path) {
-    for binary in syphon_framework_binaries(framework_dir)
-        .into_iter()
-        .filter(|path| {
-            path.components()
-                .any(|component| component.as_os_str() == "Versions")
-        })
-    {
-        let _ = Command::new("codesign")
-            .arg("--force")
-            .arg("--sign")
-            .arg("-")
-            .arg(binary)
-            .stdin(Stdio::null())
-            .status();
-    }
-}
-
 fn latest_pngs(directory: &Path) -> Vec<PathBuf> {
     let mut images = Vec::new();
     if let Ok(entries) = fs::read_dir(directory) {
@@ -7050,16 +6523,6 @@ public/Mao/Mao.model3.json 72 22 162 37 12 15 8 0 10 0 ok risk:high
     }
 
     #[test]
-    fn install_syphon_args_support_optional_force() {
-        assert!(!parse_install_syphon_args(Vec::new()).expect("default install should parse"));
-        assert!(
-            parse_install_syphon_args(vec!["--force".to_string()])
-                .expect("force install should parse")
-        );
-        assert!(parse_install_syphon_args(vec!["--again".to_string()]).is_err());
-    }
-
-    #[test]
     fn tune_input_args_choose_target_input_and_preset() {
         let (target, input, preset) =
             parse_tune_input_args(vec!["camera".to_string(), "expressive".to_string()])
@@ -7245,85 +6708,6 @@ path = "public/model/0.model3.json"
         assert!(!valid_doctor_window_dimension(95.9));
         assert!(!valid_doctor_window_dimension(2400.1));
         assert!(!valid_doctor_window_dimension(f64::NAN));
-    }
-
-    #[test]
-    fn doctor_output_mode_validation_accepts_runtime_aliases() {
-        assert_eq!(normalized_output_mode(""), Some("window"));
-        assert_eq!(normalized_output_mode("window"), Some("window"));
-        assert_eq!(normalized_output_mode("desktop"), Some("window"));
-        assert_eq!(normalized_output_mode("syphon"), Some("syphon"));
-        assert_eq!(normalized_output_mode("syphon-output"), Some("syphon"));
-        assert_eq!(normalized_output_mode("syphon_output"), Some("syphon"));
-        assert_eq!(normalized_output_mode("hidden"), None);
-    }
-
-    #[test]
-    fn doctor_output_mode_defaults_to_window() {
-        let output = DoctorOutputConfig::default();
-        assert_eq!(doctor_output_mode(&output), Some("window"));
-    }
-
-    #[test]
-    fn doctor_output_config_counts_invalid_and_empty_syphon_name() {
-        let target = SelectModelTarget::Development;
-        assert_eq!(
-            check_doctor_output_config(
-                target,
-                &DoctorOutputConfig {
-                    mode: Some("window".to_string()),
-                    syphon_name: None,
-                },
-            ),
-            0
-        );
-        assert_eq!(
-            check_doctor_output_config(
-                target,
-                &DoctorOutputConfig {
-                    mode: Some("syphon".to_string()),
-                    syphon_name: Some("VTubeStudioRS".to_string()),
-                },
-            ),
-            0
-        );
-        assert_eq!(
-            check_doctor_output_config(
-                target,
-                &DoctorOutputConfig {
-                    mode: Some("syphon".to_string()),
-                    syphon_name: Some("   ".to_string()),
-                },
-            ),
-            1
-        );
-        assert_eq!(
-            check_doctor_output_config(
-                target,
-                &DoctorOutputConfig {
-                    mode: Some("hidden".to_string()),
-                    syphon_name: None,
-                },
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn lipo_architecture_normalization_detects_supported_shapes() {
-        assert_eq!(
-            normalized_lipo_architecture("Architectures in the fat file: Syphon are: x86_64 arm64"),
-            "universal2"
-        );
-        assert_eq!(
-            normalized_lipo_architecture("Non-fat file: Syphon is architecture: arm64"),
-            "arm64"
-        );
-        assert_eq!(
-            normalized_lipo_architecture("Non-fat file: Syphon is architecture: x86_64"),
-            "x86_64"
-        );
-        assert_eq!(normalized_lipo_architecture("not a lipo output"), "unknown");
     }
 
     #[test]
