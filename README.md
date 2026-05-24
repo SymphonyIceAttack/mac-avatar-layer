@@ -147,6 +147,7 @@ cargo xtask capture-rice-stress
 cargo xtask configure-obs-recording --build
 cargo xtask configure-internal-output --build
 cargo xtask doctor
+cargo xtask fix-wwdr-cert
 cargo xtask list-models
 cargo xtask mao-mask-audit
 cargo xtask probe-risk-models public/model
@@ -164,6 +165,42 @@ cargo xtask select-model --build public/model/0.model3.json
 cargo xtask tune-input --build camera expressive
 cargo xtask virtual-camera-readiness --build
 ```
+
+`cargo xtask build-app` and `cargo xtask run-metal` automatically look for a
+local Apple codesigning identity in Keychain. Preferred identities are Apple
+Development, Developer ID Application, Apple Distribution, Mac Developer, then
+3rd Party Mac Developer Application. If none exists, the app is signed ad-hoc,
+which is enough for local app launching but not enough for a real Camera
+Extension install.
+
+If Xcode shows an Apple Development certificate but `security` still reports no
+valid codesigning identity, first check the local identity list:
+
+```bash
+security find-identity
+security find-identity -v -p codesigning
+```
+
+When the certificate appears with `CSSMERR_TP_NOT_TRUSTED` and the
+codesigning-specific list ends with `0 valid identities found`, the certificate
+and private key are present but the Apple WWDR intermediate trust chain is
+broken. Run the built-in repair command to install the current Apple Worldwide
+Developer Relations G3 intermediate certificate and re-check the codesigning
+identity:
+
+```bash
+cargo xtask fix-wwdr-cert
+```
+
+The expected result is one valid Apple Development identity. After that,
+`cargo xtask build-app --release` should print that the Camera Extension and app
+wrapper were signed with the auto-detected Keychain identity. If the identity is
+still not trusted, open Keychain Access, search for `Apple Worldwide Developer
+Relations Certification Authority`, remove the expired 2023 WWDR intermediate
+certificate, keep the G3 certificate that expires in 2030, and leave its trust
+setting at `Use System Defaults`. The repair command stores the downloaded
+certificate under `target/codesign/AppleWWDRCAG3.cer`, so it remains a generated
+local artifact and is not committed.
 
 The recommended local command is:
 
@@ -192,7 +229,8 @@ cargo xtask build-app --release
 ```
 
 This uses Cubism Core SDK auto-detection, the stable `rs.vtube-studio.dev`
-bundle identity, and the same local codesigning path as `run-metal`.
+bundle identity, and the same auto-detected local codesigning path as
+`run-metal`.
 Development and release builds both use the normal transparent window output.
 Release builds use the optimized profile in `vtube-studio-rs.build.toml` without
 requiring `Syphon.framework`.
@@ -216,9 +254,12 @@ cargo xtask configure-obs-recording --build
 cargo xtask run-metal --release
 ```
 
-The same preset is available in the running app from the `VT` menu:
-`Apply Window Capture Preset...`. The menu action writes the active dev/build
-TOML profile and relaunches the app.
+The same preset is available in the running app from the `VT` menu under
+`OBS / Recording Output` as `Apply Desktop Window Capture Preset...`. The menu
+action writes the active dev/build TOML profile and relaunches the app. The
+active recording output preset uses the same native macOS menu checkmark as the
+other selectable menu options; desktop window capture and system camera source
+are mutually exclusive.
 
 This is not an internal no-desktop recording mode. It still renders a visible
 transparent avatar window so OBS has a normal macOS window to capture. A true
@@ -231,15 +272,20 @@ window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
 MSAA/mipmaps/8x anisotropy, keeps masks on, and disables the ScreenCaptureKit
 probe because it is diagnostic-only and not an OBS output path. The
 capture-friendly flag gives the avatar window a stable `vtube-studio-rs OBS
-Source` title, exposes it through normal app/window enumeration, and marks the
-window as read-only shareable for WindowServer capture. Use `--dev` instead of
-`--build` if you want the same preset in the development profile.
+Source` title, creates it as a normal transparent `NSWindow` instead of the
+desktop-overlay `NSPanel`, exposes it through normal app/window enumeration, and
+marks the window as read-only shareable for WindowServer capture. The titlebar
+text and traffic-light buttons are hidden, so it behaves visually like the
+desktop avatar window while still being easier for OBS to list. Use `--dev`
+instead of `--build` if you want the same preset in the development profile.
 
-### IOSurface Producer Probe
+### System Camera Source Preset
 
-The first no-desktop output path is available from the `VT` menu:
-`Apply IOSurface Producer Probe...`. The same preset can be written from the
-terminal:
+The first no-desktop output path is available from the `VT` menu under
+`OBS / Recording Output` as `Apply System Camera Source...`. This single option
+enables the IOSurface producer, keeps the temporary OBS preview window, and
+submits the Camera Extension activation request on the next launch. The same
+preset can be written from the terminal:
 
 ```bash
 cargo xtask configure-internal-output --build
@@ -257,25 +303,30 @@ width = 1080.0
 height = 1080.0
 producer = "iosurface"
 manifest_path = "target/internal-output/iosurface.json"
+obs_preview_window = true
+activate_virtual_camera = true
 ```
 
-After relaunch, the app does not create or show the avatar `NSWindow`; the Metal
-renderer renders every frame into an offscreen texture and logs
+After relaunch, the Metal renderer writes every frame into an offscreen
+IOSurface texture and also opens a capture-friendly transparent preview window
+named `vtube-studio-rs OBS Source`. OBS can capture that preview window today
+while the future system Virtual Camera is still being built. The renderer logs
 `renderer_event=internal_output_frame_summary`. When built with
 `iosurface-output`, the internal preset creates an IOSurface-backed Metal
 texture and logs `renderer_event=iosurface_output_created` with its IOSurface
 id. It also writes a small heartbeat manifest to
 `target/internal-output/iosurface.json` with the current IOSurface id, texture
-size, pixel format, frame count, and update timestamp. This is the GPU sharing
-foundation for a future project-owned virtual camera output. The project does
-not plan to ship an OBS plugin; OBS should consume vtube-studio-rs through
-normal Window Capture today, and through a system camera source once virtual
-camera output exists.
+size, pixel format, frame count, update timestamp, and the camera handoff
+contract: `1080x1080`, `BGRA8Unorm`, `60fps`. This is the GPU sharing
+foundation for the project-owned virtual camera output. The project does not
+plan to ship an OBS plugin; OBS should consume vtube-studio-rs through normal
+Window Capture today, and through a system camera source once virtual camera
+output is fully installed.
 
-Important: this probe is not OBS-capturable by itself. OBS Window Capture and
-macOS Screen Capture need a visible window, and the IOSurface producer is only
-an internal GPU handoff. Use `cargo xtask configure-obs-recording --build` when
-you need OBS capture today.
+Important: the OBS-capturable part is the preview window, not the raw
+IOSurface. OBS Window Capture and macOS Screen Capture still need a visible
+window until the project-owned Virtual Camera output is approved by macOS and
+visible as `VTube Studio RS Camera`.
 
 Before implementing the Camera Extension itself, check the local prerequisites:
 
@@ -286,6 +337,60 @@ cargo xtask virtual-camera-readiness --build
 The command writes `target/virtual-camera/readiness.md`, checking the active
 profile, internal IOSurface manifest, app wrapper, and codesigning state for the
 future project-owned macOS virtual camera path.
+
+Generate the first CoreMediaIO Camera Extension prototype templates with:
+
+```bash
+cargo xtask camera-extension-plan --build
+cargo xtask build-camera-extension --build
+cargo test --features "virtual-camera-extension"
+```
+
+This writes `target/virtual-camera/camera-extension-plan.md` plus
+`CameraExtension.Info.plist`, `CameraExtension.entitlements`, and
+`ContainerApp.entitlements` templates under
+`target/virtual-camera/camera-extension-prototype/`. The Rust binding stack for
+this path is `objc2-core-media-io` plus `objc2-core-video`, matching the rest of
+the project's `objc2-*` Apple-framework bridge approach. The target camera name
+is `VTube Studio RS Camera`.
+
+`cargo xtask build-camera-extension --build` also builds the standalone
+prototype binary and packages it as
+`target/virtual-camera/VTube Studio RS Camera.systemextension`. This bundle is
+still a scaffold: it links the CoreMediaIO/CoreVideo bindings, carries the
+right identifiers, and declares the provider/device/stream contract for a
+1080x1080 60fps BGRA camera stream fed by the IOSurface manifest. It also
+defines first-pass Rust/ObjC bridge classes for
+`CMIOExtensionProviderSource`, `CMIOExtensionDeviceSource`, and
+`CMIOExtensionStreamSource`, then wires them into a
+`CMIOExtensionProvider -> CMIOExtensionDevice -> CMIOExtensionStream` object
+graph. The extension now calls `CMIOExtensionProvider::startServiceWithProvider`
+and, after a camera client starts the stream, attempts to open the latest
+IOSurface id from `target/internal-output/iosurface.json`, wrap it as a
+`CVPixelBuffer`, build a timestamped `CMSampleBuffer`, and send it through the
+CMIO stream. This is still a prototype and needs real System Extension
+installation/signing validation before it appears as a reliable camera in all
+consumer apps.
+
+`cargo xtask build-app --release` now embeds that prototype bundle under the
+local app wrapper at
+`target/dev-app/vtube-studio-rs Dev.app/Contents/Library/SystemExtensions/`.
+That makes the bundle layout match Apple's System Extension activation model,
+but it still does not by itself install or enable the camera in System
+Settings.
+
+The generated files are not a finished installed camera yet. A real macOS
+virtual camera still needs a real signing identity and validation from
+`/Applications`. When `activate_virtual_camera = true`, the app submits Apple's
+`OSSystemExtensionManager` activation request for the embedded prototype
+extension at launch when built with the default xtask feature set. On a local
+ad-hoc signed developer bundle this is expected to fail or require system
+approval; the menu preset is the activation prototype, not a finished
+distributable camera. The planned frame path remains:
+
+```text
+Live2D -> Metal -> IOSurface -> CVPixelBuffer/CMSampleBuffer -> CoreMediaIO Camera Extension
+```
 
 ### ScreenCaptureKit Probe
 
@@ -694,7 +799,9 @@ tccutil reset Camera rs.vtube-studio.dev
 cargo xtask run-metal
 ```
 
-To force a specific local signing identity:
+`cargo xtask run-metal` and `cargo xtask build-app` auto-detect a local Apple
+codesigning identity. To force a specific identity when multiple certificates
+exist:
 
 ```bash
 security find-identity -v -p codesigning

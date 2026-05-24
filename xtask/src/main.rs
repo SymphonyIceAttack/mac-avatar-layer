@@ -28,6 +28,13 @@ const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.dev.example.toml"
 const BUILD_CONFIG_PATH: &str = "vtube-studio-rs.build.toml";
 const BUILD_EXAMPLE_CONFIG_PATH: &str = "vtube-studio-rs.build.example.toml";
 const DEV_CAMERA_BUNDLE_ID: &str = "rs.vtube-studio.dev";
+const VIRTUAL_CAMERA_NAME: &str = "VTube Studio RS Camera";
+const VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID: &str = "rs.vtube-studio.dev.CameraExtension";
+const VIRTUAL_CAMERA_MACH_SERVICE: &str = "rs.vtube-studio.dev.CameraExtension";
+const VIRTUAL_CAMERA_APP_GROUP: &str = "group.rs.vtube-studio.dev";
+const VIRTUAL_CAMERA_BUNDLE_NAME: &str = "VTube Studio RS Camera.systemextension";
+const APPLE_WWDR_G3_URL: &str = "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer";
+const APPLE_WWDR_G3_SHA1: &str = "06EC06599F4ED0027CC58956B4D3AC1255114F35";
 
 fn main() {
     if let Err(error) = run() {
@@ -40,17 +47,20 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("build-app") => build_app(args.collect()),
+        Some("build-camera-extension") => build_camera_extension(args.collect()),
         Some("clean") => clean(args.collect()),
         Some("capture-mask-matrix") => capture_mask_matrix(args.collect()),
         Some("capture-offscreen-matrix") => capture_offscreen_matrix(args.collect()),
         Some("capture-full-matrix") => capture_full_matrix(args.collect()),
         Some("capture-metal") => capture_metal(args.collect()),
+        Some("camera-extension-plan") => camera_extension_plan(args.collect()),
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
         Some("configure-internal-output") => configure_internal_output(args.collect()),
         Some("configure-obs-recording") => configure_obs_recording(args.collect()),
         Some("doctor") => doctor(args.collect()),
+        Some("fix-wwdr-cert") => fix_wwdr_cert(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
@@ -80,7 +90,9 @@ vtube-studio-rs xtask
 
 Usage:
   cargo xtask build-app [--release]
+  cargo xtask build-camera-extension [--dev|--build]
   cargo xtask clean [--generated|--all]
+  cargo xtask camera-extension-plan [--dev|--build]
   cargo xtask capture-full-matrix
   cargo xtask capture-metal [MODEL_PATH]
   cargo xtask capture-mask-matrix [MODEL_PATH]
@@ -91,6 +103,7 @@ Usage:
   cargo xtask configure-internal-output [--dev|--build]
   cargo xtask configure-obs-recording [--dev|--build]
   cargo xtask doctor
+  cargo xtask fix-wwdr-cert
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
@@ -108,7 +121,11 @@ Usage:
 
 Commands:
   build-app          Build and sign the local macOS .app wrapper without launching it.
+  build-camera-extension
+                     Build the CoreMediaIO Camera Extension prototype bundle.
   clean              Remove generated target artifacts; --all also runs cargo clean.
+  camera-extension-plan
+                     Write CoreMediaIO Camera Extension prototype templates and plan.
   capture-full-matrix
                      Run the complete render regression capture and report matrix.
   capture-metal     Capture the Metal renderer window to target/render-regression.
@@ -125,8 +142,9 @@ Commands:
   configure-obs-recording
                      Write a transparent-window OBS Window Capture preset to dev/build config.
   configure-internal-output
-                     Write the no-desktop IOSurface producer probe preset; this is not OBS-capturable yet.
+                     Write the system camera source preset with IOSurface, preview, and activation enabled.
   doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
+  fix-wwdr-cert     Install Apple's current WWDR G3 intermediate and re-check codesigning.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
@@ -167,6 +185,8 @@ fn clean(args: Vec<String>) -> Result<()> {
     remove_path(target.join("space-test-live.pid"))?;
     remove_path(target.join("space-test-smoke.out"))?;
     remove_path(target.join("camera-test"))?;
+    remove_path(target.join("virtual-camera"))?;
+    remove_path(target.join("codesign"))?;
     remove_path(target.join("dev-app"))?;
     remove_path(target.join("vtube-studio-rs.pid"))?;
 
@@ -403,6 +423,120 @@ fn doctor(args: Vec<String>) -> Result<()> {
         Ok(())
     } else {
         Err(format!("doctor found {issues} issue(s)").into())
+    }
+}
+
+fn fix_wwdr_cert(args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        return Err("usage: cargo xtask fix-wwdr-cert".into());
+    }
+    if env::consts::OS != "macos" {
+        return Err("cargo xtask fix-wwdr-cert is only available on macOS.".into());
+    }
+
+    let root = project_root()?;
+    let cert_dir = root.join("target/codesign");
+    fs::create_dir_all(&cert_dir)?;
+    let cert_path = cert_dir.join("AppleWWDRCAG3.cer");
+
+    println!("Downloading Apple WWDR G3 intermediate certificate...");
+    run_status(
+        Command::new("curl")
+            .arg("-fsSL")
+            .arg("-o")
+            .arg(&cert_path)
+            .arg(APPLE_WWDR_G3_URL)
+            .current_dir(&root)
+            .stdin(Stdio::null()),
+    )?;
+
+    println!(
+        "Installing Apple WWDR G3 into login keychain ({})...",
+        relative_display(&root, &cert_path)
+    );
+    add_certificate_to_login_keychain(&cert_path)?;
+
+    println!("Checking local codesigning identities...");
+    let identity_output = security_find_identity(&[])?;
+    let codesign_output = security_find_identity(&["-v", "-p", "codesigning"])?;
+    if let Some(identity) = detect_codesign_identity() {
+        println!("Codesigning identity is ready: {identity}");
+        println!("Next: cargo xtask build-app --release");
+        return Ok(());
+    }
+
+    if find_untrusted_codesign_identity_line(&identity_output).is_some() {
+        return Err(format!(
+            "Apple codesigning identity is still not trusted after installing WWDR G3.\n\
+Open Keychain Access, search for `Apple Worldwide Developer Relations Certification Authority`, \
+remove the expired 2023 WWDR intermediate if present, keep the G3 certificate \
+with SHA-1 {APPLE_WWDR_G3_SHA1}, and leave trust set to `Use System Defaults`.\n\n\
+security find-identity:\n{identity_output}\n\
+security find-identity -v -p codesigning:\n{codesign_output}"
+        )
+        .into());
+    }
+
+    Err(format!(
+        "Apple WWDR G3 was installed, but no valid Apple codesigning identity was found.\n\
+Create or download an Apple Development certificate in Xcode, then run this command again.\n\n\
+security find-identity:\n{identity_output}\n\
+security find-identity -v -p codesigning:\n{codesign_output}"
+    )
+    .into())
+}
+
+fn add_certificate_to_login_keychain(cert_path: &Path) -> Result<()> {
+    let keychain = dirs_home_keychain();
+    let output = Command::new("security")
+        .arg("add-certificates")
+        .arg("-k")
+        .arg(&keychain)
+        .arg(cert_path)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        println!("Installed Apple WWDR G3 certificate.");
+        return Ok(());
+    }
+    let combined = format!("{stdout}{stderr}");
+    if combined.contains("already in") {
+        println!("Apple WWDR G3 certificate is already installed.");
+        return Ok(());
+    }
+    Err(format!(
+        "failed to install Apple WWDR G3 certificate into {} with status {}\nstdout:\n{}\nstderr:\n{}",
+        keychain.display(),
+        output.status,
+        stdout,
+        stderr
+    )
+    .into())
+}
+
+fn dirs_home_keychain() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join("Library/Keychains/login.keychain-db")
+}
+
+fn security_find_identity(args: &[&str]) -> Result<String> {
+    let output = Command::new("security")
+        .arg("find-identity")
+        .args(args)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        Ok(stdout.into_owned())
+    } else {
+        Err(format!(
+            "security find-identity failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        )
+        .into())
     }
 }
 
@@ -709,7 +843,7 @@ fn build_app(args: Vec<String>) -> Result<()> {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
+    let bundle_dir = install_camera_app_wrapper(&root, &executable, options.release)?;
 
     println!("App wrapper: {}", bundle_dir.display());
     println!(
@@ -722,6 +856,15 @@ fn build_app(args: Vec<String>) -> Result<()> {
     );
     println!("Config: {}", relative_display(&root, &config_path));
     println!("Bundle id: {DEV_CAMERA_BUNDLE_ID}");
+    println!(
+        "Embedded Camera Extension: {}",
+        relative_display(
+            &root,
+            &bundle_dir
+                .join("Contents/Library/SystemExtensions")
+                .join(VIRTUAL_CAMERA_BUNDLE_NAME)
+        )
+    );
     println!(
         "Run it with: cargo xtask run-metal{}",
         if options.release { " --release" } else { "" }
@@ -746,7 +889,7 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
+    let bundle_dir = install_camera_app_wrapper(&root, &executable, options.release)?;
     println!("App wrapper: {}", bundle_dir.display());
 
     let log_stem = if options.release {
@@ -777,7 +920,7 @@ fn build_metal_executable(
         release,
         include_dir,
         lib_dir,
-        "metal-renderer camera-tracking screen-capture-kit iosurface-output",
+        "metal-renderer camera-tracking screen-capture-kit iosurface-output system-extension-activation",
     )
 }
 
@@ -814,7 +957,108 @@ fn build_metal_executable_with_features(
         .join("vtube-studio-rs"))
 }
 
-fn install_camera_app_wrapper(root: &Path, executable: &Path) -> Result<PathBuf> {
+fn build_camera_extension(args: Vec<String>) -> Result<()> {
+    let target = parse_camera_extension_plan_args(args)?;
+    let root = project_root()?;
+    let release = matches!(target, SelectModelTarget::Build);
+    let executable = build_camera_extension_executable(&root, release)?;
+    let bundle_dir = install_camera_extension_bundle(&root, &executable)?;
+    println!("Camera Extension prototype bundle built.");
+    println!("Target: {}", target.label());
+    println!("Bundle: {}", relative_display(&root, &bundle_dir));
+    println!("Camera name: {VIRTUAL_CAMERA_NAME}");
+    println!("Bundle id: {VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID}");
+    println!("Mach service: {VIRTUAL_CAMERA_MACH_SERVICE}");
+    println!(
+        "Next: run `cargo xtask build-app --release`, move the app to /Applications, then use the VT menu activation prototype."
+    );
+    println!("Embed with: cargo xtask build-app --release");
+    Ok(())
+}
+
+fn build_camera_extension_executable(root: &Path, release: bool) -> Result<PathBuf> {
+    let mut command = Command::new("cargo");
+    command
+        .arg("build")
+        .arg("-p")
+        .arg("vtube-studio-rs-camera-extension");
+    if release {
+        command.arg("--release");
+    }
+    command.current_dir(root).stdin(Stdio::null());
+    run_status(&mut command)?;
+    let profile_dir = if release { "release" } else { "debug" };
+    Ok(root
+        .join("target")
+        .join(profile_dir)
+        .join("CameraExtension"))
+}
+
+fn install_camera_extension_bundle(root: &Path, executable: &Path) -> Result<PathBuf> {
+    let bundle_dir = root
+        .join("target/virtual-camera")
+        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
+    let contents_dir = bundle_dir.join("Contents");
+    let macos_dir = contents_dir.join("MacOS");
+    let resources_dir = contents_dir.join("Resources");
+    let executable_path = macos_dir.join("CameraExtension");
+    fs::create_dir_all(&macos_dir)?;
+    fs::create_dir_all(&resources_dir)?;
+    fs::write(
+        contents_dir.join("Info.plist"),
+        camera_extension_info_plist(),
+    )?;
+    fs::write(
+        resources_dir.join("CameraExtension.entitlements"),
+        camera_extension_entitlements(),
+    )?;
+    let _ = fs::remove_file(&executable_path);
+    fs::copy(executable, &executable_path)?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&executable_path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable_path, permissions)?;
+    }
+    sign_camera_extension_bundle(root, &bundle_dir)?;
+    Ok(bundle_dir)
+}
+
+fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
+    let identity = camera_codesign_identity_choice();
+    let mut command = Command::new("codesign");
+    command
+        .arg("--force")
+        .arg("--deep")
+        .arg("--sign")
+        .arg(&identity.value)
+        .arg("--identifier")
+        .arg(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID)
+        .arg(bundle_dir)
+        .current_dir(root)
+        .stdin(Stdio::null());
+    run_status(&mut command).map_err(|error| {
+        format!(
+            "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
+Install an Apple Development or Developer ID Application certificate in Keychain, \
+or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
+            identity.value
+        )
+    })?;
+    if identity.is_ad_hoc() {
+        println!(
+            "Code signed Camera Extension prototype with ad-hoc identity. No valid Apple codesigning identity was found in Keychain."
+        );
+    } else {
+        println!(
+            "Code signed Camera Extension prototype with identity `{}` ({}).",
+            identity.value, identity.source
+        );
+    }
+    Ok(())
+}
+
+fn install_camera_app_wrapper(root: &Path, executable: &Path, release: bool) -> Result<PathBuf> {
     let executable_name = "vtube-studio-rs";
     let bundle_dir = root.join("target/dev-app/vtube-studio-rs Dev.app");
     let contents_dir = bundle_dir.join("Contents");
@@ -833,8 +1077,19 @@ fn install_camera_app_wrapper(root: &Path, executable: &Path) -> Result<PathBuf>
         permissions.set_mode(0o755);
         fs::set_permissions(&app_executable, permissions)?;
     }
+    let extension_executable = build_camera_extension_executable(root, release)?;
+    let extension_bundle = install_camera_extension_bundle(root, &extension_executable)?;
+    embed_camera_extension_bundle(&contents_dir, &extension_bundle)?;
     sign_camera_dev_app(root, &bundle_dir)?;
     Ok(bundle_dir)
+}
+
+fn embed_camera_extension_bundle(contents_dir: &Path, extension_bundle: &Path) -> Result<PathBuf> {
+    let system_extensions_dir = contents_dir.join("Library/SystemExtensions");
+    fs::create_dir_all(&system_extensions_dir)?;
+    let embedded_bundle = system_extensions_dir.join(VIRTUAL_CAMERA_BUNDLE_NAME);
+    copy_dir_replace(extension_bundle, &embedded_bundle)?;
+    Ok(embedded_bundle)
 }
 
 fn launch_camera_app_wrapper(
@@ -918,6 +1173,8 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
   <string>vtube-studio-rs uses the local camera to estimate face landmarks and drive the avatar. Frames are not stored, written to disk, or logged.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>vtube-studio-rs can use the local microphone level to drive avatar mouth movement when microphone input is enabled.</string>
+  <key>NSSystemExtensionUsageDescription</key>
+  <string>vtube-studio-rs can install its Camera Extension to publish avatar frames as a system camera source.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -927,13 +1184,13 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
 }
 
 fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
-    let identity = camera_codesign_identity();
+    let identity = camera_codesign_identity_choice();
     let mut command = Command::new("codesign");
     command
         .arg("--force")
         .arg("--deep")
         .arg("--sign")
-        .arg(&identity)
+        .arg(&identity.value)
         .arg("--identifier")
         .arg(DEV_CAMERA_BUNDLE_ID)
         .arg(bundle_dir)
@@ -941,31 +1198,64 @@ fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
         .stdin(Stdio::null());
     run_status(&mut command).map_err(|error| {
         format!(
-            "failed to codesign camera dev app with identity `{identity}`: {error}. \
-Set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity, or use `-` for ad-hoc signing."
+            "failed to codesign camera dev app with identity `{}`: {error}. \
+Install an Apple Development or Developer ID Application certificate in Keychain, \
+or set VTUBE_RS_CODESIGN_IDENTITY to a valid local codesigning identity.",
+            identity.value
         )
     })?;
 
-    if identity == "-" {
+    if identity.is_ad_hoc() {
         println!(
             "Code signed camera dev app with ad-hoc identity and stable identifier {DEV_CAMERA_BUNDLE_ID}."
         );
         println!(
-            "For fewer macOS Camera re-prompts after rebuilds, create/use a local codesigning certificate and set VTUBE_RS_CODESIGN_IDENTITY."
+            "No valid Apple codesigning identity was found. Once Xcode installs one, cargo xtask build-app will auto-detect it."
         );
     } else {
-        println!("Code signed camera dev app with identity `{identity}`.");
+        println!(
+            "Code signed camera dev app with identity `{}` ({}).",
+            identity.value, identity.source
+        );
     }
     Ok(())
 }
 
 fn camera_codesign_identity() -> String {
+    camera_codesign_identity_choice().value
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct CodesignIdentityChoice {
+    value: String,
+    source: &'static str,
+}
+
+impl CodesignIdentityChoice {
+    fn is_ad_hoc(&self) -> bool {
+        self.value == "-"
+    }
+}
+
+fn camera_codesign_identity_choice() -> CodesignIdentityChoice {
     env::var("VTUBE_RS_CODESIGN_IDENTITY")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(detect_codesign_identity)
-        .unwrap_or_else(|| "-".to_string())
+        .map(|value| CodesignIdentityChoice {
+            value,
+            source: "VTUBE_RS_CODESIGN_IDENTITY",
+        })
+        .or_else(|| {
+            detect_codesign_identity().map(|value| CodesignIdentityChoice {
+                value,
+                source: "auto-detected Keychain identity",
+            })
+        })
+        .unwrap_or_else(|| CodesignIdentityChoice {
+            value: "-".to_string(),
+            source: "ad-hoc fallback",
+        })
 }
 
 fn detect_codesign_identity() -> Option<String> {
@@ -983,8 +1273,10 @@ fn detect_codesign_identity() -> Option<String> {
     let text = String::from_utf8_lossy(&output.stdout);
     for preferred in [
         "Apple Development",
-        "Mac Developer",
         "Developer ID Application",
+        "Apple Distribution",
+        "Mac Developer",
+        "3rd Party Mac Developer Application",
     ] {
         if let Some(identity) = find_codesign_identity_line(&text, preferred) {
             return Some(identity);
@@ -1001,6 +1293,24 @@ fn find_codesign_identity_line(text: &str, needle: &str) -> Option<String> {
             let end = line[start..].find('"')? + start;
             Some(line[start..end].to_string())
         })
+}
+
+fn find_untrusted_codesign_identity_line(text: &str) -> Option<String> {
+    text.lines()
+        .find(|line| {
+            line.contains("CSSMERR_TP_NOT_TRUSTED")
+                && [
+                    "Apple Development",
+                    "Developer ID Application",
+                    "Apple Distribution",
+                    "Mac Developer",
+                    "3rd Party Mac Developer Application",
+                ]
+                .iter()
+                .any(|needle| line.contains(needle))
+        })
+        .map(str::trim)
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -1534,6 +1844,8 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
                 "internal.manifest_path",
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
+            ("internal.obs_preview_window", "false".to_string()),
+            ("internal.activate_virtual_camera", "false".to_string()),
         ],
     );
     content = set_toml_section_values(
@@ -1623,13 +1935,17 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
                 "internal.manifest_path",
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
+            ("internal.obs_preview_window", "true".to_string()),
+            ("internal.activate_virtual_camera", "true".to_string()),
         ],
     );
-    content = set_toml_section_value(
+    content = set_toml_section_values(
         &content,
         "app",
-        "runtime_profile",
-        &toml_string_literal(runtime_profile),
+        &[
+            ("runtime_profile", toml_string_literal(runtime_profile)),
+            ("window_capture_friendly", "true".to_string()),
+        ],
     );
     content = set_toml_section_value(&content, "diagnostics", "show", "false");
     content = set_toml_section_values(
@@ -1644,13 +1960,15 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
     );
     fs::write(&config_path, content)?;
 
-    println!("Internal output probe preset updated.");
+    println!("System camera output preset updated.");
     println!("Target: {}", target.label());
     println!("Config: {}", relative_display(&root, &config_path));
-    println!("Output: no desktop avatar window; Metal renders into IOSurface");
+    println!(
+        "Output: Metal renders into IOSurface, opens an OBS preview window, and auto-requests Camera Extension activation"
+    );
     println!("Manifest: target/internal-output/iosurface.json");
     println!(
-        "Note: this is a producer probe, not an OBS-capturable source until Virtual Camera output exists."
+        "OBS: capture `vtube-studio-rs OBS Source` until `VTube Studio RS Camera` is approved by macOS."
     );
     println!(
         "Run with: cargo xtask run-metal{}",
@@ -1660,6 +1978,48 @@ fn configure_internal_output(args: Vec<String>) -> Result<()> {
             ""
         }
     );
+    Ok(())
+}
+
+fn camera_extension_plan(args: Vec<String>) -> Result<()> {
+    let target = parse_camera_extension_plan_args(args)?;
+    let root = project_root()?;
+    let config_path = root.join(target.config_path());
+    let output_dir = root.join("target/virtual-camera");
+    let template_dir = output_dir.join("camera-extension-prototype");
+    fs::create_dir_all(&template_dir)?;
+
+    let readiness = build_virtual_camera_readiness_report(&root, target, &config_path)?;
+    let readiness_path = output_dir.join("readiness.md");
+    let plan_path = output_dir.join("camera-extension-plan.md");
+    let app_entitlements_path = template_dir.join("ContainerApp.entitlements");
+    let extension_entitlements_path = template_dir.join("CameraExtension.entitlements");
+    let info_plist_path = template_dir.join("CameraExtension.Info.plist");
+
+    fs::write(&readiness_path, &readiness.markdown)?;
+    fs::write(&plan_path, camera_extension_plan_markdown(target, &root))?;
+    fs::write(&app_entitlements_path, camera_container_app_entitlements())?;
+    fs::write(
+        &extension_entitlements_path,
+        camera_extension_entitlements(),
+    )?;
+    fs::write(&info_plist_path, camera_extension_info_plist())?;
+
+    println!("Camera Extension prototype plan written.");
+    println!("Target: {}", target.label());
+    println!("Plan: {}", relative_display(&root, &plan_path));
+    println!(
+        "Info.plist template: {}",
+        relative_display(&root, &info_plist_path)
+    );
+    println!(
+        "Entitlements: {}, {}",
+        relative_display(&root, &app_entitlements_path),
+        relative_display(&root, &extension_entitlements_path)
+    );
+    println!("Camera name: {VIRTUAL_CAMERA_NAME}");
+    println!("Bundle id: {VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID}");
+    println!("Readiness: {}", readiness.status_label());
     Ok(())
 }
 
@@ -1678,14 +2038,7 @@ fn virtual_camera_readiness(args: Vec<String>) -> Result<()> {
     println!("Target: {}", target.label());
     println!("Report: {}", relative_display(&root, &report_path));
     println!("Status: {}", report.status_label());
-    println!(
-        "Next: {}",
-        if report.ready_for_extension_prototype {
-            "start the CoreMediaIO Camera Extension prototype."
-        } else {
-            "run cargo xtask configure-internal-output --build, then run the app once to create the IOSurface manifest."
-        }
-    );
+    println!("Next: {}", report.next_action);
     Ok(())
 }
 
@@ -2540,6 +2893,7 @@ struct DoctorScreenCaptureKitConfig {
 struct VirtualCameraReadinessReport {
     markdown: String,
     ready_for_extension_prototype: bool,
+    next_action: String,
 }
 
 impl VirtualCameraReadinessReport {
@@ -2556,11 +2910,15 @@ impl VirtualCameraReadinessReport {
 struct InternalOutputReadiness {
     mode: String,
     producer: String,
+    activate_virtual_camera: bool,
     manifest_path: String,
     manifest_exists: bool,
     manifest_frames: Option<u64>,
     manifest_surface_id: Option<u64>,
     manifest_size: Option<(u64, u64)>,
+    manifest_pixel_format: Option<String>,
+    manifest_frame_rate: Option<u64>,
+    manifest_updated_unix_ms: Option<u64>,
 }
 
 fn build_virtual_camera_readiness_report(
@@ -2572,13 +2930,23 @@ fn build_virtual_camera_readiness_report(
     let platform_ok = env::consts::OS == "macos";
     let app_bundle_path = root.join("target/dev-app/vtube-studio-rs Dev.app");
     let app_bundle_exists = app_bundle_path.is_dir();
+    let embedded_extension_path = app_bundle_path
+        .join("Contents/Library/SystemExtensions")
+        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
+    let embedded_extension_exists = embedded_extension_path.is_dir();
     let codesign_identity = camera_codesign_identity();
     let has_real_codesign_identity = codesign_identity != "-";
+    let manifest_contract_ok = output.manifest_size == Some((1080, 1080))
+        && output.manifest_pixel_format.as_deref() == Some("BGRA8Unorm")
+        && output.manifest_frame_rate == Some(60);
     let internal_ready = output.mode == "internal"
         && output.producer == "iosurface"
+        && output.activate_virtual_camera
         && output.manifest_exists
-        && output.manifest_frames.unwrap_or(0) > 0;
-    let ready_for_extension_prototype = platform_ok && internal_ready && has_real_codesign_identity;
+        && output.manifest_frames.unwrap_or(0) > 0
+        && manifest_contract_ok;
+    let ready_for_extension_prototype =
+        platform_ok && internal_ready && embedded_extension_exists && has_real_codesign_identity;
     let manifest_size = output
         .manifest_size
         .map(|(width, height)| format!("{width}x{height}"))
@@ -2591,8 +2959,21 @@ fn build_virtual_camera_readiness_report(
         .manifest_surface_id
         .map(|surface_id| surface_id.to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let manifest_pixel_format = output
+        .manifest_pixel_format
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let manifest_frame_rate = output
+        .manifest_frame_rate
+        .map(|frame_rate| format!("{frame_rate} fps"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let manifest_updated = output
+        .manifest_updated_unix_ms
+        .map(|updated| updated.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let config_display = relative_display(root, config_path);
     let app_bundle_display = relative_display(root, &app_bundle_path);
+    let embedded_extension_display = relative_display(root, &embedded_extension_path);
     let manifest_full_path = absolute_path(root, &output.manifest_path);
     let manifest_display = relative_display(root, &manifest_full_path);
     let status = if ready_for_extension_prototype {
@@ -2600,6 +2981,13 @@ fn build_virtual_camera_readiness_report(
     } else {
         "setup incomplete"
     };
+    let next_action = virtual_camera_next_action(
+        &output,
+        platform_ok,
+        app_bundle_exists,
+        embedded_extension_exists,
+        has_real_codesign_identity,
+    );
     let markdown = format!(
         "# Virtual Camera Readiness\n\n\
 Generated for `{target_label}` profile.\n\n\
@@ -2613,26 +3001,36 @@ Status: **{status}**\n\n\
 | --- | --- | --- |\n\
 | macOS host | {platform_status} | `{os}` |\n\
 | Camera API direction | ok | CoreMediaIO Camera Extension, not legacy DAL or OBS plugin |\n\
+| Rust CMIO bindings | ok | `objc2-core-media-io` + `objc2-core-video` behind `virtual-camera-extension` |\n\
 | Active config | ok | `{config_display}` |\n\
 | Output mode | {mode_status} | `{mode}` |\n\
 | Internal producer | {producer_status} | `{producer}` |\n\
+| Camera activation | {activation_status} | `{activate_virtual_camera}` |\n\
 | IOSurface manifest | {manifest_status} | `{manifest_display}` |\n\
 | IOSurface id | {surface_status} | `{surface_id}` |\n\
 | Internal frame count | {frames_status} | `{frames}` |\n\
 | Texture size | {size_status} | `{size}` |\n\
+| Camera pixel format | {pixel_format_status} | `{pixel_format}` |\n\
+| Camera frame rate | {frame_rate_status} | `{frame_rate}` |\n\
+| Manifest updated | {updated_status} | `{updated_unix_ms}` |\n\
 | App wrapper | {bundle_status} | `{bundle}` |\n\
+| Embedded Camera Extension | {embedded_extension_status} | `{embedded_extension}` |\n\
 | Codesign identity | {codesign_status} | `{codesign}` |\n\n\
 ## Next Implementation Slice\n\n\
 1. Keep the existing internal IOSurface producer as the frame source.\n\
-2. Add a macOS Camera Extension target owned by this project.\n\
-3. Feed the extension from the IOSurface manifest/producer bridge.\n\
-4. Register one camera named `VTube Studio RS Camera`.\n\
-5. Validate it in QuickRecord first, then OBS as a normal camera source.\n\n\
+2. Build and embed the macOS Camera Extension target owned by this project.\n\
+3. Use `VT -> OBS / Recording Output -> Apply System Camera Source...` or `cargo xtask configure-internal-output --{target_flag}` so IOSurface output and Camera Extension activation are enabled together for `{extension_bundle_id}`.\n\
+4. Feed the extension from the IOSurface manifest/producer bridge as `1080x1080 60fps BGRA` sample buffers.\n\
+5. Register one camera named `VTube Studio RS Camera` and validate in QuickRecord, then OBS.\n\n\
+Generate the prototype bundle templates with `cargo xtask camera-extension-plan --{target_flag}`.\n\n\
 ## Setup Commands\n\n\
 ```bash\n\
 cargo xtask configure-internal-output --{target_flag}\n\
 cargo xtask run-metal{run_release_flag}\n\
 cargo xtask virtual-camera-readiness --{target_flag}\n\
+cargo xtask camera-extension-plan --{target_flag}\n\
+cargo xtask build-camera-extension --{target_flag}\n\
+cargo xtask build-app{run_release_flag}\n\
 ```\n\n\
 If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple Development or Developer ID Application identity before building a real Camera Extension.\n",
         target_label = target.label(),
@@ -2644,22 +3042,34 @@ If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple D
         mode = output.mode,
         producer_status = readiness_status(output.producer == "iosurface"),
         producer = output.producer,
+        activation_status = readiness_status(output.activate_virtual_camera),
+        activate_virtual_camera = output.activate_virtual_camera,
         manifest_status = readiness_status(output.manifest_exists),
         manifest_display = manifest_display,
         surface_status = readiness_status(output.manifest_surface_id.is_some()),
         surface_id = manifest_surface_id,
         frames_status = readiness_status(output.manifest_frames.unwrap_or(0) > 0),
         frames = manifest_frames,
-        size_status = readiness_status(output.manifest_size.is_some()),
+        size_status = readiness_status(output.manifest_size == Some((1080, 1080))),
         size = manifest_size,
+        pixel_format_status =
+            readiness_status(output.manifest_pixel_format.as_deref() == Some("BGRA8Unorm")),
+        pixel_format = manifest_pixel_format,
+        frame_rate_status = readiness_status(output.manifest_frame_rate == Some(60)),
+        frame_rate = manifest_frame_rate,
+        updated_status = readiness_status(output.manifest_updated_unix_ms.is_some()),
+        updated_unix_ms = manifest_updated,
         bundle_status = readiness_status(app_bundle_exists),
         bundle = app_bundle_display,
+        embedded_extension_status = readiness_status(embedded_extension_exists),
+        embedded_extension = embedded_extension_display,
         codesign_status = if has_real_codesign_identity {
             "ok"
         } else {
             "warn"
         },
         codesign = codesign_identity,
+        extension_bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
         target_flag = target.flag_name(),
         run_release_flag = if matches!(target, SelectModelTarget::Build) {
             " --release"
@@ -2671,7 +3081,181 @@ If `Codesign identity` is `warn`, set `VTUBE_RS_CODESIGN_IDENTITY` to an Apple D
     Ok(VirtualCameraReadinessReport {
         markdown,
         ready_for_extension_prototype,
+        next_action,
     })
+}
+
+fn virtual_camera_next_action(
+    output: &InternalOutputReadiness,
+    platform_ok: bool,
+    app_bundle_exists: bool,
+    embedded_extension_exists: bool,
+    has_real_codesign_identity: bool,
+) -> String {
+    if !platform_ok {
+        return "run this readiness check on macOS.".to_string();
+    }
+    if output.mode != "internal"
+        || output.producer != "iosurface"
+        || !output.activate_virtual_camera
+    {
+        return "run cargo xtask configure-internal-output --build.".to_string();
+    }
+    if !output.manifest_exists || output.manifest_frames.unwrap_or(0) == 0 {
+        return "run cargo xtask run-metal --release once to create and update the IOSurface manifest.".to_string();
+    }
+    if output.manifest_size != Some((1080, 1080))
+        || output.manifest_pixel_format.as_deref() != Some("BGRA8Unorm")
+        || output.manifest_frame_rate != Some(60)
+    {
+        return "rebuild and rerun cargo xtask run-metal --release so the IOSurface manifest uses 1080x1080 BGRA at 60fps.".to_string();
+    }
+    if !app_bundle_exists || !embedded_extension_exists {
+        return "run cargo xtask build-app --release to embed the Camera Extension into the app wrapper.".to_string();
+    }
+    if !has_real_codesign_identity {
+        return "install an Apple Development or Developer ID Application certificate in Xcode/Keychain, then run cargo xtask build-app --release; xtask will auto-detect it.".to_string();
+    }
+    "run the app with the system camera source preset enabled, approve the Camera Extension request if macOS prompts, then test VTube Studio RS Camera in QuickRecord or OBS.".to_string()
+}
+
+fn camera_extension_plan_markdown(target: SelectModelTarget, root: &Path) -> String {
+    let prototype_dir = root.join("target/virtual-camera/camera-extension-prototype");
+    format!(
+        "# CoreMediaIO Camera Extension Prototype\n\n\
+Generated for `{target}` profile.\n\n\
+## Decision\n\n\
+- Use Apple's modern CoreMediaIO Camera Extension path, not legacy DAL, Syphon, NDI, or an OBS plugin.\n\
+- Keep the main app as the frame producer: Live2D -> Metal -> IOSurface manifest.\n\
+- Expose one system camera named `{camera_name}` so OBS, QuickRecord, Zoom, and other apps consume the same source.\n\n\
+## Rust Binding Stack\n\n\
+| Layer | Rust crate | Role |\n\
+| --- | --- | --- |\n\
+| CoreMediaIO extension API | `objc2-core-media-io = 0.3.2` | Provider, device, stream, and CMIO sample buffers |\n\
+| CoreVideo frame bridge | `objc2-core-video = 0.3.2` | CVPixelBuffer / IOSurface handoff for frames |\n\
+| Existing producer | `iosurface-output` feature | Metal render target backed by IOSurface |\n\n\
+## Identifiers\n\n\
+| Item | Value |\n\
+| --- | --- |\n\
+| Camera localized name | `{camera_name}` |\n\
+| Extension bundle id | `{bundle_id}` |\n\
+| Mach service | `{mach_service}` |\n\
+| App group | `{app_group}` |\n\
+| Producer manifest | `target/internal-output/iosurface.json` |\n\n\
+## Generated Templates\n\n\
+- `{prototype_dir}/CameraExtension.Info.plist`\n\
+- `{prototype_dir}/CameraExtension.entitlements`\n\
+- `{prototype_dir}/ContainerApp.entitlements`\n\n\
+These files are templates for the next implementation slice. The current app wrapper embeds the prototype `.systemextension` and exposes a first-pass `OSSystemExtensionManager` activation menu item. The extension now starts the CMIO provider service and contains a first-pass IOSurface -> CVPixelBuffer -> CMSampleBuffer sender, but a finished virtual camera still needs validation from `/Applications` with a real signing identity plus consumer testing.\n\n\
+## Implementation Checklist\n\n\
+- [x] Add a Rust Camera Extension target or bundle step that builds a system extension binary.\n\
+- [x] Define provider/device/stream contracts, stable UUIDs, BGRA 1080x1080 format, IOSurface manifest input, and stream lifecycle state.\n\
+- [x] Implement first-pass `CMIOExtensionProviderSource` bridge class with provider properties.\n\
+- [x] Implement first-pass `CMIOExtensionDeviceSource` bridge class with model properties.\n\
+- [x] Implement first-pass `CMIOExtensionStreamSource` bridge class with BGRA 1080x1080 60fps format and start/stop logging.\n\
+- [x] Wire bridge source classes into a `CMIOExtensionProvider`, device, and stream object graph.\n\
+- [x] Start the `CMIOExtensionProvider` service inside the installed extension runtime.\n\
+- [x] Open the latest IOSurface id from `target/internal-output/iosurface.json`.\n\
+- [x] Convert the IOSurface-backed frame into a `CVPixelBuffer` and then a `CMSampleBuffer`/`CMIOSampleBufferCreate` payload.\n\
+- [x] Keep sending frames while the stream is active.\n\
+- [ ] Add app-group manifest handoff and a neutral transparent frame when the producer is stale.\n\
+- [x] Add app-side activation command for the embedded system extension prototype.\n\
+- [ ] Add app-side deactivation/status feedback once the extension delegate is implemented.\n\
+- [ ] Validate first in QuickRecord, then OBS as a normal camera source.\n\n\
+## Local Commands\n\n\
+```bash\n\
+cargo xtask configure-internal-output --{flag}\n\
+cargo xtask run-metal{release_flag}\n\
+cargo xtask virtual-camera-readiness --{flag}\n\
+cargo xtask camera-extension-plan --{flag}\n\
+cargo xtask build-camera-extension --{flag}\n\
+cargo test --features \"virtual-camera-extension\"\n\
+```\n",
+        target = target.label(),
+        camera_name = VIRTUAL_CAMERA_NAME,
+        bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
+        mach_service = VIRTUAL_CAMERA_MACH_SERVICE,
+        app_group = VIRTUAL_CAMERA_APP_GROUP,
+        prototype_dir = relative_display(root, &prototype_dir),
+        flag = target.flag_name(),
+        release_flag = if matches!(target, SelectModelTarget::Build) {
+            " --release"
+        } else {
+            ""
+        },
+    )
+}
+
+fn camera_extension_info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>CameraExtension</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>VTube Studio RS Camera Extension</string>
+    <key>CFBundlePackageType</key>
+    <string>SYSX</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CMIOExtensionMachServiceName</key>
+    <string>{mach_service}</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>Publishes VTube Studio RS frames as a macOS virtual camera.</string>
+</dict>
+</plist>
+"#,
+        bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
+        mach_service = VIRTUAL_CAMERA_MACH_SERVICE
+    )
+}
+
+fn camera_container_app_entitlements() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.developer.system-extension.install</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>{app_group}</string>
+    </array>
+</dict>
+</plist>
+"#,
+        app_group = VIRTUAL_CAMERA_APP_GROUP
+    )
+}
+
+fn camera_extension_entitlements() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>{app_group}</string>
+    </array>
+</dict>
+</plist>
+"#,
+        app_group = VIRTUAL_CAMERA_APP_GROUP
+    )
 }
 
 fn inspect_internal_output_readiness(
@@ -2695,6 +3279,10 @@ fn inspect_internal_output_readiness(
         .unwrap_or("none")
         .trim()
         .to_ascii_lowercase();
+    let activate_virtual_camera = internal
+        .and_then(|value| value.get("activate_virtual_camera"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
     let manifest_path = internal
         .and_then(|value| value.get("manifest_path"))
         .and_then(toml::Value::as_str)
@@ -2707,11 +3295,17 @@ fn inspect_internal_output_readiness(
     Ok(InternalOutputReadiness {
         mode,
         producer,
+        activate_virtual_camera,
         manifest_path,
         manifest_exists: manifest_full_path.is_file(),
         manifest_frames: manifest.as_ref().and_then(|value| value.frames),
         manifest_surface_id: manifest.as_ref().and_then(|value| value.surface_id),
-        manifest_size: manifest.and_then(|value| value.size),
+        manifest_size: manifest.as_ref().and_then(|value| value.size),
+        manifest_pixel_format: manifest
+            .as_ref()
+            .and_then(|value| value.pixel_format.clone()),
+        manifest_frame_rate: manifest.as_ref().and_then(|value| value.frame_rate),
+        manifest_updated_unix_ms: manifest.and_then(|value| value.updated_unix_ms),
     })
 }
 
@@ -2720,6 +3314,9 @@ struct IosurfaceManifestSummary {
     frames: Option<u64>,
     surface_id: Option<u64>,
     size: Option<(u64, u64)>,
+    pixel_format: Option<String>,
+    frame_rate: Option<u64>,
+    updated_unix_ms: Option<u64>,
 }
 
 fn read_iosurface_manifest_summary(path: &Path) -> Option<IosurfaceManifestSummary> {
@@ -2731,6 +3328,14 @@ fn read_iosurface_manifest_summary(path: &Path) -> Option<IosurfaceManifestSumma
         frames: json.get("frames").and_then(serde_json::Value::as_u64),
         surface_id: json.get("iosurface_id").and_then(serde_json::Value::as_u64),
         size: width.zip(height),
+        pixel_format: json
+            .get("pixel_format")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        frame_rate: json.get("frame_rate").and_then(serde_json::Value::as_u64),
+        updated_unix_ms: json
+            .get("updated_unix_ms")
+            .and_then(serde_json::Value::as_u64),
     })
 }
 
@@ -2851,6 +3456,15 @@ fn parse_internal_output_args(args: Vec<String>) -> Result<SelectModelTarget> {
         [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
         [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
         _ => Err("usage: cargo xtask configure-internal-output [--dev|--build]".into()),
+    }
+}
+
+fn parse_camera_extension_plan_args(args: Vec<String>) -> Result<SelectModelTarget> {
+    match args.as_slice() {
+        [] => Ok(SelectModelTarget::Build),
+        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
+        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
+        _ => Err("usage: cargo xtask camera-extension-plan [--dev|--build]".into()),
     }
 }
 
@@ -6471,6 +7085,26 @@ fn remove_path(path: PathBuf) -> io::Result<()> {
     }
 }
 
+fn copy_dir_replace(source: &Path, target: &Path) -> Result<()> {
+    remove_path(target.to_path_buf())?;
+    copy_dir_recursive(source, target)
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
+}
+
 fn terminate_app_processes(root: &Path) {
     let binary = root.join("target/debug/vtube-studio-rs");
     let canonical_binary = binary.canonicalize().unwrap_or_else(|_| binary.clone());
@@ -7176,6 +7810,43 @@ atlas_anisotropy = 1
     }
 
     #[test]
+    fn camera_extension_plan_args_default_to_build_config() {
+        let target =
+            parse_camera_extension_plan_args(Vec::new()).expect("default plan target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        let target = parse_camera_extension_plan_args(vec!["--dev".to_string()])
+            .expect("dev plan target should parse");
+        assert!(matches!(target, SelectModelTarget::Development));
+
+        let target = parse_camera_extension_plan_args(vec!["--build".to_string()])
+            .expect("build plan target should parse");
+        assert!(matches!(target, SelectModelTarget::Build));
+
+        assert!(parse_camera_extension_plan_args(vec!["--release".to_string()]).is_err());
+    }
+
+    #[test]
+    fn camera_extension_templates_include_coremediaio_identifiers() {
+        let root = env::temp_dir().join(format!(
+            "vtube-studio-rs-camera-extension-plan-test-{}",
+            timestamp_for_filename()
+        ));
+        let plan = camera_extension_plan_markdown(SelectModelTarget::Build, &root);
+        assert!(plan.contains("objc2-core-media-io"));
+        assert!(plan.contains("VTube Studio RS Camera"));
+        assert!(plan.contains("CMIOExtensionStreamSource"));
+
+        let info = camera_extension_info_plist();
+        assert!(info.contains("CMIOExtensionMachServiceName"));
+        assert!(info.contains(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID));
+
+        let entitlements = camera_container_app_entitlements();
+        assert!(entitlements.contains("com.apple.developer.system-extension.install"));
+        assert!(entitlements.contains(VIRTUAL_CAMERA_APP_GROUP));
+    }
+
+    #[test]
     fn virtual_camera_readiness_report_reads_iosurface_manifest() {
         let root = env::temp_dir().join(format!(
             "vtube-studio-rs-virtual-camera-test-{}",
@@ -7190,6 +7861,9 @@ atlas_anisotropy = 1
   "iosurface_id": 42,
   "width": 1080,
   "height": 1080,
+  "pixel_format": "BGRA8Unorm",
+  "frame_rate": 60,
+  "updated_unix_ms": 123456,
   "frames": 120
 }"#,
         )
@@ -7204,6 +7878,7 @@ mode = "internal"
 [output.internal]
 producer = "iosurface"
 manifest_path = "target/internal-output/iosurface.json"
+activate_virtual_camera = true
 "#,
         )
         .expect("config should be written");
@@ -7216,6 +7891,8 @@ manifest_path = "target/internal-output/iosurface.json"
         assert!(report.markdown.contains("`42`"));
         assert!(report.markdown.contains("`120`"));
         assert!(report.markdown.contains("`1080x1080`"));
+        assert!(report.markdown.contains("`BGRA8Unorm`"));
+        assert!(report.markdown.contains("`60 fps`"));
         assert!(report.markdown.contains("OBS-specific plugin"));
 
         let _ = fs::remove_dir_all(root);
@@ -7349,6 +8026,40 @@ manifest_path = "target/internal-output/iosurface.json"
         assert_eq!(
             find_codesign_identity_line(output, "Apple Development").as_deref(),
             Some("Apple Development: Local Dev (TEAMID)")
+        );
+    }
+
+    #[test]
+    fn codesign_identity_detection_accepts_distribution_identities() {
+        let output = r#"  1) ABCDEF1234567890 "Apple Distribution: Example Team (TEAMID)"
+  2) 0123456789ABCDEF "3rd Party Mac Developer Application: Example Team (TEAMID)"
+     2 valid identities found"#;
+
+        assert_eq!(
+            find_codesign_identity_line(output, "Apple Distribution").as_deref(),
+            Some("Apple Distribution: Example Team (TEAMID)")
+        );
+        assert_eq!(
+            find_codesign_identity_line(output, "3rd Party Mac Developer Application").as_deref(),
+            Some("3rd Party Mac Developer Application: Example Team (TEAMID)")
+        );
+    }
+
+    #[test]
+    fn detects_untrusted_codesign_identity_from_security_output() {
+        let output = r#"Policy: X.509 Basic
+  Matching identities
+  1) FB1BC6B1A70D9D27086E5EA13F26170C35118C69 "Apple Development: Local Dev (TEAMID)" (CSSMERR_TP_NOT_TRUSTED)
+     1 identities found
+
+  Valid identities only
+     0 valid identities found"#;
+
+        assert_eq!(
+            find_untrusted_codesign_identity_line(output).as_deref(),
+            Some(
+                r#"1) FB1BC6B1A70D9D27086E5EA13F26170C35118C69 "Apple Development: Local Dev (TEAMID)" (CSSMERR_TP_NOT_TRUSTED)"#
+            )
         );
     }
 

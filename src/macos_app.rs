@@ -35,6 +35,10 @@ const NIL: Id = ptr::null_mut();
 const NS_APPLICATION_ACTIVATION_POLICY_REGULAR: NSInteger = 0;
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: NSInteger = 1;
 const NS_BORDERLESS_WINDOW_MASK: NSUInteger = 0;
+const NS_TITLED_WINDOW_MASK: NSUInteger = 1 << 0;
+const NS_CLOSABLE_WINDOW_MASK: NSUInteger = 1 << 1;
+const NS_MINIATURIZABLE_WINDOW_MASK: NSUInteger = 1 << 2;
+const NS_RESIZABLE_WINDOW_MASK: NSUInteger = 1 << 3;
 const NS_NONACTIVATING_PANEL_MASK: NSUInteger = 1 << 7;
 const NS_EVENT_MASK_ANY: NSUInteger = NSUInteger::MAX;
 const NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: NSUInteger = 1 << 0;
@@ -107,7 +111,7 @@ const MENU_OPEN_MICROPHONE_PRIVACY: u32 = 1 << 13;
 const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
 const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
 const MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET: u32 = 1 << 16;
-const MENU_APPLY_INTERNAL_OUTPUT_PRESET: u32 = 1 << 17;
+const MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET: u32 = 1 << 17;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
 const RENDERER_QUALITY_INDEX_UNCHANGED: i32 = -1;
@@ -174,7 +178,9 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         if !output_mode.uses_window() {
             return Err("internal output mode requires the metal-renderer feature".to_string());
         }
-        let (window, root_layer) = if output_mode.uses_window() {
+        let has_avatar_window =
+            output_mode.uses_window() || config.output.internal.obs_preview_window;
+        let (window, root_layer) = if has_avatar_window {
             let window = create_avatar_window(&config.app, output_mode)?;
             println!("renderer_event=window_created kind=avatar");
             (window, create_root_layer(window)?)
@@ -216,9 +222,10 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                     count = probe.extended_blend_count
                 );
             }
-            if output_mode.uses_window() {
+            if has_avatar_window {
                 install_metal_layer(root_layer, &mut renderer)?;
-            } else {
+            }
+            if !output_mode.uses_window() {
                 renderer
                     .set_drawable_size(config.output.internal.width, config.output.internal.height);
             }
@@ -226,7 +233,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         };
         #[cfg(not(feature = "metal-renderer"))]
         let avatar_layer = create_avatar_layer(&model)?;
-        let diagnostics_layer = if output_mode.uses_window() {
+        let diagnostics_layer = if has_avatar_window {
             let diagnostics_layer = create_diagnostics_layer()?;
             #[cfg(not(feature = "metal-renderer"))]
             crate::apple_platform::add_sublayer(root_layer, avatar_layer);
@@ -246,7 +253,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let mut camera_enabled = camera_runtime_active(camera_input.status());
         let mut mouse_enabled = config.input.mouse.enabled;
         let mut microphone_enabled = config.input.microphone.enabled;
-        let mut screen_capture_probe = if output_mode.uses_window() {
+        let mut screen_capture_probe = if has_avatar_window {
             crate::screen_capture_probe::ScreenCaptureProbe::start(
                 window,
                 &config.capture.screen_capture_kit,
@@ -277,11 +284,13 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 selected_expression_index,
                 window_size_preset: WindowSizePreset::from_config(&config.app),
                 renderer_quality_preset: RendererQualityPreset::from_config(&config),
+                recording_output_preset: RecordingOutputPreset::from_config(&config),
                 mouse_preset: InputPreset::Normal,
                 mouth_preset: InputPreset::Normal,
                 camera_preset: InputPreset::Normal,
             },
         )?;
+        maybe_submit_configured_virtual_camera_activation(&config);
 
         let event_pump = EventPump::new()?;
         let mut frame_clock = FrameClock::new(TARGET_FPS);
@@ -309,7 +318,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let started_at = Instant::now();
         let mut last_frame_at = started_at;
         let mut lifecycle_monitor = AppLifecycleMonitor::new();
-        if output_mode.uses_window() {
+        if has_avatar_window {
             lifecycle_monitor.poll(app, window, &config.app, started_at);
         }
 
@@ -333,7 +342,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut camera_input,
                 model_path,
             )?;
-            if output_mode.uses_window() {
+            if has_avatar_window {
                 lifecycle_monitor.poll(app, window, &config.app, started_at);
             }
             begin_immediate_layer_update();
@@ -344,7 +353,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut cubism_runtime,
                 now.saturating_duration_since(last_frame_at),
                 &MotionInput {
-                    pointer: if output_mode.uses_window() {
+                    pointer: if has_avatar_window {
                         normalized_mouse_position(window, &config.input.mouse)
                     } else {
                         None
@@ -355,13 +364,15 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             );
             last_frame_at = now;
             #[cfg(feature = "metal-renderer")]
-            if output_mode.uses_window() {
+            if has_avatar_window {
                 sync_metal_layer_geometry(window, root_layer, &mut metal_renderer)?;
             }
             #[cfg(feature = "metal-renderer")]
-            if output_mode.uses_window() {
+            if has_avatar_window {
                 metal_renderer.render(&cubism_runtime)?;
-            } else {
+            }
+            #[cfg(feature = "metal-renderer")]
+            if !output_mode.uses_window() {
                 metal_renderer.render_internal(&cubism_runtime, &config.output.internal)?;
             }
             #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
@@ -609,24 +620,29 @@ unsafe fn create_avatar_window(
 ) -> Result<Id, String> {
     let window_size = avatar_window_size(app_config);
     let window_origin = avatar_window_origin();
-    let window =
-        crate::apple_platform::create_transparent_panel(crate::apple_platform::PanelStyle {
-            frame: crate::apple_platform::LayerFrame {
-                x: window_origin.x,
-                y: window_origin.y,
-                width: window_size.width,
-                height: window_size.height,
-            },
-            style_mask: avatar_window_style_mask(),
-            level: avatar_window_level(app_config),
-            collection_behavior: avatar_window_collection_behavior(),
-            title: avatar_window_title(app_config),
-            excluded_from_windows_menu: !app_config.window_capture_friendly,
-            sharing_read_only: app_config.window_capture_friendly,
-        })?;
+    let style = crate::apple_platform::PanelStyle {
+        frame: crate::apple_platform::LayerFrame {
+            x: window_origin.x,
+            y: window_origin.y,
+            width: window_size.width,
+            height: window_size.height,
+        },
+        style_mask: avatar_window_style_mask(app_config),
+        level: avatar_window_level(app_config),
+        collection_behavior: avatar_window_collection_behavior(),
+        title: avatar_window_title(app_config),
+        excluded_from_windows_menu: !app_config.window_capture_friendly,
+        sharing_read_only: app_config.window_capture_friendly,
+    };
+    let window = if app_config.window_capture_friendly {
+        crate::apple_platform::create_transparent_window(style)?
+    } else {
+        crate::apple_platform::create_transparent_panel(style)?
+    };
 
     println!(
-        "renderer_event=window_configured kind=nonactivating_panel output={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        "renderer_event=window_configured kind={} output={} level={} level_name={} level_key={} x={:.1} y={:.1} width={:.1} height={:.1} style_mask={} collection_behavior={}",
+        avatar_window_kind(app_config),
         output_mode.label(),
         avatar_window_level(app_config),
         avatar_window_level_name(&app_config.window_level),
@@ -635,12 +651,12 @@ unsafe fn create_avatar_window(
         window_origin.y,
         window_size.width,
         window_size.height,
-        avatar_window_style_mask(),
+        avatar_window_style_mask(app_config),
         avatar_window_collection_behavior()
     );
     if app_config.window_capture_friendly {
         println!(
-            "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false",
+            "renderer_event=obs_visible_source_configured title=\"{}\" sharing=read_only activation_policy=regular excluded_from_windows_menu=false chrome=hidden",
             avatar_window_title(app_config)
         );
     }
@@ -648,8 +664,23 @@ unsafe fn create_avatar_window(
     Ok(window)
 }
 
-fn avatar_window_style_mask() -> NSUInteger {
-    NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
+fn avatar_window_kind(app_config: &AppRuntimeConfig) -> &'static str {
+    if app_config.window_capture_friendly {
+        "capture_friendly_window"
+    } else {
+        "nonactivating_panel"
+    }
+}
+
+fn avatar_window_style_mask(app_config: &AppRuntimeConfig) -> NSUInteger {
+    if app_config.window_capture_friendly {
+        NS_TITLED_WINDOW_MASK
+            | NS_CLOSABLE_WINDOW_MASK
+            | NS_MINIATURIZABLE_WINDOW_MASK
+            | NS_RESIZABLE_WINDOW_MASK
+    } else {
+        NS_BORDERLESS_WINDOW_MASK | NS_NONACTIVATING_PANEL_MASK
+    }
 }
 
 fn app_activation_policy(app_config: &AppRuntimeConfig) -> NSInteger {
@@ -893,6 +924,7 @@ struct RuntimeControlState {
     selected_expression_index: Option<usize>,
     window_size_preset: WindowSizePreset,
     renderer_quality_preset: RendererQualityPreset,
+    recording_output_preset: RecordingOutputPreset,
     mouse_preset: InputPreset,
     mouth_preset: InputPreset,
     camera_preset: InputPreset,
@@ -910,6 +942,7 @@ struct SettingsMenu {
     model_entries: Vec<ModelMenuEntry>,
     window_size_items: Vec<Id>,
     renderer_quality_items: Vec<Id>,
+    recording_output_items: Vec<Id>,
     expression_items: Vec<Id>,
     mouse_preset_items: Vec<Id>,
     mouth_preset_items: Vec<Id>,
@@ -991,6 +1024,37 @@ impl WindowSizePreset {
             Self::Normal => 600.0,
             Self::Large => 720.0,
             Self::XLarge => 960.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecordingOutputPreset {
+    DesktopWindow,
+    SystemCamera,
+}
+
+impl RecordingOutputPreset {
+    const ALL: [Self; 2] = [Self::DesktopWindow, Self::SystemCamera];
+
+    fn from_config(config: &AppConfig) -> Self {
+        if config.output.mode() == crate::config::OutputMode::Internal
+            && matches!(
+                config.output.internal.producer(),
+                crate::config::InternalOutputProducer::Iosurface
+            )
+            && config.output.internal.activate_virtual_camera
+        {
+            Self::SystemCamera
+        } else {
+            Self::DesktopWindow
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::DesktopWindow => "Apply Desktop Window Capture Preset...",
+            Self::SystemCamera => "Apply System Camera Source...",
         }
     }
 }
@@ -1388,24 +1452,27 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, &texture_title)?;
     add_separator_menu_item(app_menu)?;
 
-    add_disabled_menu_item(app_menu, "Output Presets (relaunches app)")?;
-    add_action_menu_item(
+    add_disabled_menu_item(app_menu, "OBS / Recording Output")?;
+    let mut recording_output_items = Vec::new();
+    let desktop_window_item = add_action_menu_item(
         app_menu,
-        "Apply Window Capture Preset...",
+        RecordingOutputPreset::DesktopWindow.label(),
         "applyObsWindowCapturePreset:",
         "",
         controller,
     )?;
-    add_action_menu_item(
+    recording_output_items.push(desktop_window_item);
+    let system_camera_item = add_action_menu_item(
         app_menu,
-        "Apply IOSurface Producer Probe...",
-        "applyInternalOutputPreset:",
+        RecordingOutputPreset::SystemCamera.label(),
+        "applySystemCameraOutputPreset:",
         "",
         controller,
     )?;
+    recording_output_items.push(system_camera_item);
     add_disabled_menu_item(
         app_menu,
-        "Probe only: not visible to OBS until Virtual Camera exists",
+        "System camera enables IOSurface producer and extension activation together",
     )?;
     add_separator_menu_item(app_menu)?;
 
@@ -1437,6 +1504,7 @@ unsafe fn install_settings_menu(
         model_entries,
         window_size_items,
         renderer_quality_items,
+        recording_output_items,
         expression_items,
         mouse_preset_items,
         mouth_preset_items,
@@ -1633,11 +1701,11 @@ unsafe fn handle_settings_menu_commands(
         terminate_current_app()?;
     }
 
-    if commands & MENU_APPLY_INTERNAL_OUTPUT_PRESET != 0 {
+    if commands & MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET != 0 {
         write_internal_output_preset_to_active_config(config.app.runtime_profile)?;
         schedule_model_relaunch(model_path)?;
         println!(
-            "renderer_event=settings_changed internal_output_preset=applied apply=relaunch config=\"{}\"",
+            "renderer_event=settings_changed system_camera_output_preset=applied apply=relaunch config=\"{}\"",
             crate::config::active_config_path()
         );
         terminate_current_app()?;
@@ -1706,6 +1774,7 @@ unsafe fn handle_settings_menu_commands(
             selected_expression_index: *selected_expression_index,
             window_size_preset: WindowSizePreset::from_config(&config.app),
             renderer_quality_preset: RendererQualityPreset::from_config(config),
+            recording_output_preset: RecordingOutputPreset::from_config(config),
             mouse_preset: *mouse_preset,
             mouth_preset: *mouth_preset,
             camera_preset: *camera_preset,
@@ -1736,6 +1805,12 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
         set_menu_item_checked(
             *item,
             RendererQualityPreset::ALL[index] == state.renderer_quality_preset,
+        );
+    }
+    for (index, item) in menu.recording_output_items.iter().enumerate() {
+        set_menu_item_checked(
+            *item,
+            RecordingOutputPreset::ALL[index] == state.recording_output_preset,
         );
     }
     for (index, item) in menu.mouse_preset_items.iter().enumerate() {
@@ -2055,6 +2130,13 @@ fn write_obs_window_capture_preset_to_active_config(
             ("mode", toml_string_literal("window")),
             ("internal.width", "1080.0".to_string()),
             ("internal.height", "1080.0".to_string()),
+            ("internal.producer", toml_string_literal("none")),
+            (
+                "internal.manifest_path",
+                toml_string_literal("target/internal-output/iosurface.json"),
+            ),
+            ("internal.obs_preview_window", "false".to_string()),
+            ("internal.activate_virtual_camera", "false".to_string()),
         ],
     );
     updated = set_toml_section_values(
@@ -2122,8 +2204,11 @@ fn write_internal_output_preset_to_active_config(
                 "internal.manifest_path",
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
+            ("internal.obs_preview_window", "true".to_string()),
+            ("internal.activate_virtual_camera", "true".to_string()),
         ],
     );
+    updated = set_toml_section_value(&updated, "app", "window_capture_friendly", "true");
     updated = set_toml_section_value(
         &updated,
         "app",
@@ -2188,6 +2273,48 @@ fn open_privacy_settings(pane: PrivacySettingsPane) {
         eprintln!(
             "Failed to open macOS {} privacy settings: {error}",
             pane.label()
+        );
+    }
+}
+
+fn maybe_submit_configured_virtual_camera_activation(config: &AppConfig) {
+    if config.output.mode() == crate::config::OutputMode::Internal
+        && matches!(
+            config.output.internal.producer(),
+            crate::config::InternalOutputProducer::Iosurface
+        )
+        && config.output.internal.activate_virtual_camera
+    {
+        println!(
+            "renderer_event=system_camera_output_enabled producer=iosurface activate_virtual_camera=true"
+        );
+        submit_virtual_camera_activation_request();
+    }
+}
+
+fn submit_virtual_camera_activation_request() {
+    #[cfg(feature = "system-extension-activation")]
+    {
+        let kind = crate::system_extension_activation::SystemExtensionRequestKind::Activate;
+        match crate::system_extension_activation::submit_camera_extension_request(kind) {
+            Ok(()) => println!(
+                "renderer_event=system_extension_activation_submitted action={} bundle_id={} note=\"{}\"",
+                kind.label(),
+                crate::system_extension_activation::CAMERA_EXTENSION_BUNDLE_ID,
+                crate::system_extension_activation::activation_note()
+            ),
+            Err(error) => eprintln!(
+                "renderer_event=system_extension_activation_failed action={} error={}",
+                kind.label(),
+                error
+            ),
+        }
+    }
+
+    #[cfg(not(feature = "system-extension-activation"))]
+    {
+        eprintln!(
+            "renderer_event=system_extension_activation_unavailable reason=feature_not_enabled"
         );
     }
 }
@@ -2523,8 +2650,8 @@ fn settings_menu_controller_class() -> Result<Class, String> {
                 settings_apply_obs_window_capture_preset,
             ),
             (
-                "applyInternalOutputPreset:",
-                settings_apply_internal_output_preset,
+                "applySystemCameraOutputPreset:",
+                settings_apply_system_camera_output_preset,
             ),
         ],
     )
@@ -2680,12 +2807,12 @@ extern "C-unwind" fn settings_apply_obs_window_capture_preset(
     MENU_COMMANDS.fetch_or(MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET, Ordering::AcqRel);
 }
 
-extern "C-unwind" fn settings_apply_internal_output_preset(
+extern "C-unwind" fn settings_apply_system_camera_output_preset(
     _this: *mut objc2::runtime::AnyObject,
     _selector: objc2::runtime::Sel,
     _sender: *mut objc2::runtime::AnyObject,
 ) {
-    MENU_COMMANDS.fetch_or(MENU_APPLY_INTERNAL_OUTPUT_PRESET, Ordering::AcqRel);
+    MENU_COMMANDS.fetch_or(MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET, Ordering::AcqRel);
 }
 
 struct EventPump {
@@ -3305,7 +3432,7 @@ mod tests {
     use super::{
         EventPump, InputPreset, NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
         NS_APPLICATION_ACTIVATION_POLICY_REGULAR, NS_NONACTIVATING_PANEL_MASK,
-        NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
+        NS_TITLED_WINDOW_MASK, NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_APPLICATIONS,
         NS_WINDOW_COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES,
         NS_WINDOW_COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY,
         NS_WINDOW_COLLECTION_BEHAVIOR_IGNORES_CYCLE, NS_WINDOW_COLLECTION_BEHAVIOR_STATIONARY,
@@ -3375,7 +3502,17 @@ mod tests {
             ..AppRuntimeConfig::default()
         });
 
-        assert!(avatar_window_style_mask() & NS_NONACTIVATING_PANEL_MASK != 0);
+        assert!(
+            avatar_window_style_mask(&AppRuntimeConfig::default()) & NS_NONACTIVATING_PANEL_MASK
+                != 0
+        );
+        assert!(
+            avatar_window_style_mask(&AppRuntimeConfig {
+                window_capture_friendly: true,
+                ..AppRuntimeConfig::default()
+            }) & NS_TITLED_WINDOW_MASK
+                != 0
+        );
         assert_eq!(configured_size.width, 540.0);
         assert_eq!(configured_size.height, 720.0);
         assert_eq!(fallback_size.width, 360.0);

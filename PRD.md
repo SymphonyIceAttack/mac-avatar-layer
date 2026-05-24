@@ -825,23 +825,32 @@ Status: next product milestone.
   Window Capture/macOS Screen Capture.
 - Done: when `window_capture_friendly` is enabled, the app uses a regular
   activation policy, a stable `vtube-studio-rs OBS Source` window title,
+  a normal transparent `NSWindow` instead of the desktop-overlay `NSPanel`,
   read-only WindowServer sharing, and includes the window in app/window
   enumeration so OBS has a visible source to select.
-- Done: expose `VT` menu `Apply Window Capture Preset...`; it writes the same
-  preset to the active dev/build TOML and relaunches the app, so users do not
-  need a terminal-only workflow for OBS window-capture setup.
+- Done: expose `VT` menu `OBS / Recording Output -> Apply Desktop Window
+  Capture Preset...`; it writes the same preset to the active dev/build TOML
+  and relaunches the app, so users do not need a terminal-only workflow for OBS
+  window-capture setup. The menu marks the active mutually exclusive recording
+  output preset with the native macOS menu checkmark.
 - Done: add first-pass `output.mode = "internal"` and `VT` menu
-  `Apply IOSurface Producer Probe...`. Internal mode does not create the avatar
-  `NSWindow`; Metal renders the Live2D frame into an offscreen texture and logs
-  frame summaries. This validates the no-desktop render path, but it is not yet
-  a consumer-visible OBS source. OBS cannot capture this mode until the
-  project-owned macOS virtual camera output exists.
+  `OBS / Recording Output -> Apply System Camera Source...`. This is one
+  relaunching preset, not two separate switches: it enables the IOSurface
+  producer, sets `output.internal.obs_preview_window = true`, and sets
+  `output.internal.activate_virtual_camera = true` so the app submits the
+  embedded CoreMediaIO System Extension activation request after relaunch.
+  Internal mode renders the Live2D frame into an offscreen texture and logs
+  frame summaries. The preview window is still named `vtube-studio-rs OBS
+  Source` so OBS can use Window Capture while the system Virtual Camera output
+  is being approved by macOS. The raw IOSurface itself is still not directly
+  capturable by OBS.
 - Done: add `iosurface-output` feature and first-pass
   `output.internal.producer = "iosurface"`. The internal renderer creates an
   IOSurface-backed Metal texture, logs its IOSurface id, and writes
   `target/internal-output/iosurface.json` as a heartbeat manifest containing
-  the surface id, dimensions, pixel format, frame count, and update timestamp.
-  This gives later consumers a real GPU-shareable frame handoff contract.
+  the surface id, dimensions, pixel format, frame count, update timestamp, and
+  the `1080x1080 60fps BGRA` camera handoff contract. This gives later
+  consumers a real GPU-shareable frame handoff contract.
 - Planned: add a consumer-visible bridge on top of the IOSurface manifest as a
   project-owned macOS virtual camera output. Do not implement this as an OBS
   plugin; OBS should see vtube-studio-rs the same way QuickRecord, Zoom,
@@ -914,15 +923,49 @@ Status: ScreenCaptureKit probe and IOSurface handoff diagnostics in progress.
 
 ### Milestone I: Project-Owned macOS Virtual Camera
 
-Status: planned; preflight report available.
+Status: scaffold in progress; preflight, prototype packaging, app embedding,
+first-pass activation request, provider/device/stream contracts, provider
+service startup, and IOSurface-to-sample-buffer publishing are available.
 
 - Use Apple's modern CoreMediaIO Camera Extension route rather than legacy DAL,
   Syphon, NDI, or an OBS plugin.
+- Use `objc2-core-media-io` and `objc2-core-video` as the Rust binding stack
+  for provider/device/stream and CVPixelBuffer handoff work.
 - Keep the frame producer in the main app: Live2D -> Metal -> IOSurface
   manifest.
+- Use `cargo xtask camera-extension-plan` to generate the local prototype
+  plan, Info.plist template, container app entitlements, and extension
+  entitlements under `target/virtual-camera/`.
+- Use `cargo xtask build-camera-extension` to build the standalone Rust
+  prototype binary and package
+  `target/virtual-camera/VTube Studio RS Camera.systemextension`.
+- Embed the prototype `.systemextension` into the local app wrapper under
+  `Contents/Library/SystemExtensions/` during `cargo xtask build-app`.
+- Submit a first-pass activation request from the app menu through
+  `OSSystemExtensionManager`; real install remains gated by `/Applications`,
+  proper signing, entitlement validation, and macOS user approval.
+- Define the Camera Extension provider/device/stream contract in Rust:
+  provider name/manufacturer, stable device/stream UUIDs, 1080x1080 60fps
+  BGRA stream format, IOSurface manifest input, and start/stop lifecycle state.
+- Done: implement first-pass Rust/ObjC bridge classes for
+  `CMIOExtensionProviderSource`, `CMIOExtensionDeviceSource`, and
+  `CMIOExtensionStreamSource`, including source properties, stream formats, and
+  start/stop request logging.
+- Done: wire the bridge source classes into a
+  `CMIOExtensionProvider -> CMIOExtensionDevice -> CMIOExtensionStream` object
+  graph, with one provider device and one source stream.
+- Done: call `CMIOExtensionProvider::startServiceWithProvider` from the
+  extension binary after the graph is built.
+- Done: add the first IOSurface frame bridge. When a client starts the stream,
+  the extension reads the latest producer manifest, opens the IOSurface id with
+  `IOSurfaceLookup`, wraps it as `CVPixelBuffer`, creates a timestamped
+  `CMSampleBuffer` via `CMIOSampleBufferCreateForImageBuffer`, and sends it
+  through `CMIOExtensionStream::sendSampleBuffer`.
 - Add a project-owned Camera Extension that exposes one system camera named
   `VTube Studio RS Camera`.
-- Feed extension frames from the internal IOSurface handoff.
+- Continue hardening extension frames from the internal IOSurface handoff:
+  stale producer handling, transparent fallback frames, app-group manifest
+  handoff, lifecycle cleanup, and client compatibility testing.
 - Validate first in QuickRecord or another simple camera consumer, then in OBS
   as a normal camera source.
 - Treat signing, extension activation, and install location as first-class

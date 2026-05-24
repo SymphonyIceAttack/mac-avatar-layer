@@ -1044,9 +1044,8 @@ impl MetalRenderer {
         config: &InternalOutputConfig,
     ) -> Result<Texture, String> {
         let producer = config.producer();
-        let [width, height] = self.physical_drawable_size;
-        let width = width.max(1);
-        let height = height.max(1);
+        let width = internal_output_pixel_size(config.width);
+        let height = internal_output_pixel_size(config.height);
 
         #[cfg(feature = "iosurface-output")]
         if matches!(producer, InternalOutputProducer::Iosurface) {
@@ -2786,6 +2785,10 @@ fn create_internal_output_texture(device: &Device, width: u64, height: u64) -> T
     device.new_texture(&descriptor)
 }
 
+fn internal_output_pixel_size(value: f64) -> u64 {
+    value.round().clamp(1.0, 8192.0) as u64
+}
+
 fn create_blend_snapshot_texture(device: &Device, width: u64, height: u64) -> Texture {
     let descriptor = TextureDescriptor::new();
     descriptor.set_texture_type(MTLTextureType::D2);
@@ -4022,10 +4025,10 @@ mod tests {
         Affine2, Bounds, DrawItem, FitTransform, LayoutBounds, MAX_MASK_TEXTURE_SIZE, MaskChannel,
         MaskContext, MaskPlacement, MemoryBudgetSnapshot, MetalRenderer, OffscreenItem,
         assign_high_precision_mask_layouts, assign_mask_layouts, atlas_anisotropy_level,
-        framework_color_blend_mode, fullscreen_quad_vertices, mask_render_texture_count,
-        mask_source_params, offscreen_fallback_diagnostics, offscreen_fragment_params,
-        part_is_descendant_of, stable_mask_texture_size, texture_2d_bytes, texture_mipmapped_bytes,
-        unique_mask_contexts,
+        framework_color_blend_mode, fullscreen_quad_vertices, internal_output_pixel_size,
+        mask_render_texture_count, mask_source_params, offscreen_fallback_diagnostics,
+        offscreen_fragment_params, part_is_descendant_of, stable_mask_texture_size,
+        texture_2d_bytes, texture_mipmapped_bytes, unique_mask_contexts,
     };
     use crate::cubism::CubismPartInfo;
     use crate::{
@@ -4064,6 +4067,14 @@ mod tests {
 
         assert_eq!(renderer.sample_count, 1);
         assert!(!renderer.log_events);
+    }
+
+    #[test]
+    fn internal_output_pixel_size_uses_configured_camera_contract() {
+        assert_eq!(internal_output_pixel_size(1080.0), 1080);
+        assert_eq!(internal_output_pixel_size(1079.6), 1080);
+        assert_eq!(internal_output_pixel_size(0.0), 1);
+        assert_eq!(internal_output_pixel_size(9000.0), 8192);
     }
 
     #[test]

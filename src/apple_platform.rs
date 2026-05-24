@@ -16,7 +16,8 @@ use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
     NSEventMask, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSVariableStatusItemLength, NSView,
-    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
+    NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
@@ -65,6 +66,14 @@ pub struct PanelStyle {
     pub title: &'static str,
     pub excluded_from_windows_menu: bool,
     pub sharing_read_only: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct WindowChromeStyle {
+    pub borderless: bool,
+    pub titlebar_transparent: bool,
+    pub title_hidden: bool,
+    pub standard_buttons_hidden: bool,
 }
 
 #[cfg(any(feature = "camera-tracking", feature = "screen-capture-kit"))]
@@ -144,14 +153,42 @@ pub unsafe fn create_transparent_panel(style: PanelStyle) -> Result<*mut c_void,
     Ok(ObjcRetained::into_raw(panel).cast())
 }
 
+pub unsafe fn create_transparent_window(style: PanelStyle) -> Result<*mut c_void, String> {
+    let mtm = main_thread_marker()?;
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            cg_rect(style.frame),
+            NSWindowStyleMask(style.style_mask as usize),
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    configure_transparent_window(
+        &window,
+        style.level,
+        style.collection_behavior,
+        style.title,
+        style.excluded_from_windows_menu,
+        style.sharing_read_only,
+        WindowChromeStyle {
+            borderless: false,
+            titlebar_transparent: true,
+            title_hidden: true,
+            standard_buttons_hidden: true,
+        },
+    );
+    Ok(ObjcRetained::into_raw(window).cast())
+}
+
 pub unsafe fn set_panel_space_policy(panel: *mut c_void, level: i64, collection_behavior: u64) {
-    let panel = unsafe { borrowed_panel(panel) };
-    panel.setLevel(level as isize);
-    panel.setCollectionBehavior(NSWindowCollectionBehavior(collection_behavior as usize));
+    let window = unsafe { borrowed_window(panel) };
+    window.setLevel(level as isize);
+    window.setCollectionBehavior(NSWindowCollectionBehavior(collection_behavior as usize));
 }
 
 pub unsafe fn window_content_view(window: *mut c_void) -> Result<*mut c_void, String> {
-    let window = unsafe { borrowed_panel(window) };
+    let window = unsafe { borrowed_window(window) };
     let content_view = window
         .contentView()
         .ok_or_else(|| "window contentView returned nil".to_string())?;
@@ -160,7 +197,7 @@ pub unsafe fn window_content_view(window: *mut c_void) -> Result<*mut c_void, St
 
 #[cfg(feature = "metal-renderer")]
 pub unsafe fn window_backing_scale_factor(window: *mut c_void) -> f64 {
-    let window = unsafe { borrowed_panel(window) };
+    let window = unsafe { borrowed_window(window) };
     window.backingScaleFactor()
 }
 
@@ -170,13 +207,13 @@ pub unsafe fn application_is_active(app: *mut c_void) -> bool {
 }
 
 pub unsafe fn panel_is_visible(panel: *mut c_void) -> bool {
-    let panel = unsafe { borrowed_panel(panel) };
-    panel.isVisible()
+    let window = unsafe { borrowed_window(panel) };
+    window.isVisible()
 }
 
 pub unsafe fn panel_occlusion_state(panel: *mut c_void) -> u64 {
-    let panel = unsafe { borrowed_panel(panel) };
-    panel.occlusionState().0 as u64
+    let window = unsafe { borrowed_window(panel) };
+    window.occlusionState().0 as u64
 }
 
 pub unsafe fn panel_window_number(panel: *mut c_void) -> i64 {
@@ -495,6 +532,11 @@ unsafe fn borrowed_panel<'a>(panel: *mut c_void) -> &'a NSPanel {
     unsafe { &*panel.cast::<NSPanel>() }
 }
 
+unsafe fn borrowed_window<'a>(window: *mut c_void) -> &'a NSWindow {
+    assert!(!window.is_null(), "NSWindow pointer must not be null");
+    unsafe { &*window.cast::<NSWindow>() }
+}
+
 unsafe fn borrowed_text_layer<'a>(layer: *mut c_void) -> &'a CATextLayer {
     assert!(!layer.is_null(), "CATextLayer pointer must not be null");
     unsafe { &*layer.cast::<CATextLayer>() }
@@ -608,6 +650,60 @@ fn configure_transparent_panel(
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
 }
 
+fn configure_transparent_window(
+    window: &NSWindow,
+    level: i64,
+    collection_behavior: u64,
+    title: &str,
+    excluded_from_windows_menu: bool,
+    sharing_read_only: bool,
+    chrome: WindowChromeStyle,
+) {
+    window.setOpaque(false);
+    window.setTitle(&NSString::from_str(title));
+    if sharing_read_only {
+        window.setSharingType(NSWindowSharingType::ReadOnly);
+    }
+    window.setMovableByWindowBackground(true);
+    unsafe {
+        window.setReleasedWhenClosed(false);
+    }
+    window.setCanHide(false);
+    window.setExcludedFromWindowsMenu(excluded_from_windows_menu);
+    if chrome.titlebar_transparent {
+        window.setTitlebarAppearsTransparent(true);
+    }
+    if chrome.title_hidden {
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    }
+    if chrome.borderless {
+        window.setStyleMask(NSWindowStyleMask(0));
+    }
+    if chrome.standard_buttons_hidden {
+        hide_standard_window_buttons(window);
+    }
+    unsafe {
+        set_panel_space_policy(
+            (window as *const NSWindow).cast_mut().cast(),
+            level,
+            collection_behavior,
+        );
+    }
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+}
+
+fn hide_standard_window_buttons(window: &NSWindow) {
+    for button in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(view) = window.standardWindowButton(button) {
+            view.setHidden(true);
+        }
+    }
+}
+
 unsafe fn set_text_layer_string(layer: &CATextLayer, text: &str) {
     let text = NSString::from_str(text);
     unsafe {
@@ -700,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "NSPanel pointer must not be null")]
+    #[should_panic(expected = "NSWindow pointer must not be null")]
     fn window_content_view_rejects_null_window_pointer() {
         unsafe {
             let _ = window_content_view(core::ptr::null_mut::<c_void>());

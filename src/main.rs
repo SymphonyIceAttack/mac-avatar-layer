@@ -28,6 +28,10 @@ mod screen_capture_probe;
     not(feature = "metal-renderer")
 ))]
 mod software_renderer;
+#[cfg(all(target_os = "macos", feature = "system-extension-activation"))]
+mod system_extension_activation;
+#[cfg(all(target_os = "macos", feature = "virtual-camera-extension"))]
+mod virtual_camera_extension;
 
 #[cfg(target_os = "macos")]
 fn main() {
