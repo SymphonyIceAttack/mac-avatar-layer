@@ -146,7 +146,6 @@ cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
 cargo xtask configure-obs-recording --build
 cargo xtask configure-obs-recording --build --offscreen
-cargo xtask configure-internal-output --build
 cargo xtask doctor
 cargo xtask fix-wwdr-cert
 cargo xtask list-models
@@ -165,8 +164,13 @@ cargo xtask sample-compatibility-sweep
 cargo xtask select-model --dev public/model/0.model3.json
 cargo xtask select-model --build public/model/0.model3.json
 cargo xtask tune-input --build camera expressive
-cargo xtask virtual-camera-readiness --build
 ```
+
+System Camera Source / virtual camera prototype commands are intentionally not
+listed above as normal workflow commands because they are not currently usable as
+an OBS input source. See the System Camera Source section before running
+`configure-internal-output`, `virtual-camera-readiness`,
+`camera-extension-plan`, or `build-camera-extension`.
 
 `cargo xtask build-app` and `cargo xtask run-metal` automatically look for a
 local Apple codesigning identity in Keychain. Preferred identities are Apple
@@ -290,30 +294,39 @@ window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
 MSAA/mipmaps/8x anisotropy, keeps masks on, and disables the ScreenCaptureKit
 probe because it is diagnostic-only and not an OBS output path. The
 capture-friendly flag gives the avatar window a stable `vtube-studio-rs OBS
-Source` title, creates it as a normal transparent `NSWindow` instead of the
-desktop-overlay `NSPanel`, exposes it through normal app/window enumeration, and
-marks the window as read-only shareable for WindowServer capture. The titlebar
-text and traffic-light buttons are hidden, so it behaves visually like the
-desktop avatar window while still being easier for OBS to list. Use `--dev`
-instead of `--build` if you want the same preset in the development profile.
+Source` title, keeps it as a transparent `NSPanel`, exposes it through normal
+app/window enumeration, marks the window as read-only shareable for WindowServer
+capture, and moves it outside the visible desktop for the offscreen preset. Use
+`--dev` instead of `--build` if you want the same preset in the development
+profile.
 
 ### System Camera Source Preset
 
-Status: this path is blocked unless the Apple ID belongs to a paid Apple
-Developer Program team. Free Apple IDs can create local development
-certificates, but they cannot create/download the provisioning profiles needed
-for the System Extension entitlement. Until those profiles exist, the supported
-OBS path is the Desktop Window Capture preset above.
+Status: **currently unavailable as a usable OBS input source**. The menu item
+`Apply System Camera Source...` and the related xtask commands below are
+prototype/scaffold commands only. They may write config files, build prototype
+bundles, or generate readiness reports, but they do not currently produce a
+reliable `VTube Studio RS Camera` source in OBS, QuickRecord, Zoom, Discord, or
+other camera consumers.
 
-The first no-desktop output path is available from the `VT` menu under
-`OBS / Recording Output` as `Apply System Camera Source...`. This single option
-enables the IOSurface producer and submits the Camera Extension activation
-request on the next launch. It does not create a desktop avatar window. The same
-preset can be written from the terminal:
+This path is blocked unless the Apple ID belongs to a paid Apple Developer
+Program team and the app plus Camera Extension are signed with matching
+provisioning profiles that include the required System Extension entitlement.
+Free Apple IDs can create local development certificates, but they cannot
+create/download the provisioning profiles needed for the System Extension
+entitlement. Until this path is completed, the supported OBS path is the Desktop
+Window Capture or Offscreen Window Capture preset above.
+
+The first no-desktop output prototype is available from the `VT` menu under
+`OBS / Recording Output` as `Apply System Camera Source...`, but it should be
+treated as disabled for end users. This single option enables the IOSurface
+producer and submits the Camera Extension activation request on the next launch.
+It does not create a desktop avatar window. The same prototype preset can be
+written from the terminal:
 
 ```bash
-cargo xtask configure-internal-output --build
-cargo xtask run-metal --release
+cargo xtask configure-internal-output --build   # prototype only; not a working OBS source
+cargo xtask run-metal --release                 # may fail or run without a usable camera source
 ```
 
 It writes:
@@ -345,7 +358,8 @@ plan to ship an OBS plugin. In this preset OBS should consume vtube-studio-rs
 through the system camera source once macOS approves `VTube Studio RS Camera`;
 there is intentionally no desktop window fallback.
 
-Before implementing the Camera Extension itself, check the local prerequisites:
+The related readiness command is also diagnostic only; it does not install or
+enable a usable camera:
 
 ```bash
 cargo xtask virtual-camera-readiness --build
@@ -355,7 +369,8 @@ The command writes `target/virtual-camera/readiness.md`, checking the active
 profile, internal IOSurface manifest, app wrapper, and codesigning state for the
 future project-owned macOS virtual camera path.
 
-Generate the first CoreMediaIO Camera Extension prototype templates with:
+The Camera Extension commands below are prototype/build-scaffold commands, not a
+supported setup flow for OBS:
 
 ```bash
 cargo xtask camera-extension-plan --build
