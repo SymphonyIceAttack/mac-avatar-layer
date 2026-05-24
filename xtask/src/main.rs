@@ -1368,8 +1368,11 @@ fn install_camera_app_wrapper(
         dev_camera_info_plist(executable_name),
     )?;
     let container_entitlements = resources_dir.join("ContainerApp.entitlements");
+    fs::write(
+        &container_entitlements,
+        camera_container_app_entitlements(system_camera_source_enabled),
+    )?;
     if system_camera_source_enabled {
-        fs::write(&container_entitlements, camera_container_app_entitlements())?;
         embed_provisioning_profile_if_available(
             root,
             &contents_dir,
@@ -1378,7 +1381,6 @@ fn install_camera_app_wrapper(
             ProvisioningProfileKind::ContainerApp,
         )?;
     } else {
-        let _ = fs::remove_file(&container_entitlements);
         let _ = fs::remove_file(contents_dir.join("embedded.provisionprofile"));
     }
     let _ = fs::remove_file(&app_executable);
@@ -1397,7 +1399,7 @@ fn install_camera_app_wrapper(
     } else {
         let _ = fs::remove_dir_all(&system_extensions_dir);
     }
-    sign_camera_dev_app(root, &bundle_dir, system_camera_source_enabled)?;
+    sign_camera_dev_app(root, &bundle_dir)?;
     Ok(bundle_dir)
 }
 
@@ -1815,11 +1817,7 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
     )
 }
 
-fn sign_camera_dev_app(
-    root: &Path,
-    bundle_dir: &Path,
-    system_camera_source_enabled: bool,
-) -> Result<()> {
+fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
     let identity = camera_codesign_identity_choice();
     let entitlements = bundle_dir
         .join("Contents/Resources")
@@ -1830,9 +1828,7 @@ fn sign_camera_dev_app(
         .arg("--deep")
         .arg("--options")
         .arg("runtime");
-    if system_camera_source_enabled {
-        command.arg("--entitlements").arg(&entitlements);
-    }
+    command.arg("--entitlements").arg(&entitlements);
     command
         .arg("--sign")
         .arg(&identity.value)
@@ -2634,7 +2630,10 @@ fn camera_extension_plan(args: Vec<String>) -> Result<()> {
 
     fs::write(&readiness_path, &readiness.markdown)?;
     fs::write(&plan_path, camera_extension_plan_markdown(target, &root))?;
-    fs::write(&app_entitlements_path, camera_container_app_entitlements())?;
+    fs::write(
+        &app_entitlements_path,
+        camera_container_app_entitlements(true),
+    )?;
     fs::write(
         &extension_entitlements_path,
         camera_extension_entitlements(),
@@ -3993,22 +3992,35 @@ fn camera_extension_info_plist() -> String {
     )
 }
 
-fn camera_container_app_entitlements() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.developer.system-extension.install</key>
+fn camera_container_app_entitlements(system_camera_source_enabled: bool) -> String {
+    let system_camera_source_entitlements = if system_camera_source_enabled {
+        format!(
+            r#"    <key>com.apple.developer.system-extension.install</key>
     <true/>
     <key>com.apple.security.application-groups</key>
     <array>
         <string>{app_group}</string>
     </array>
-</dict>
+"#,
+            app_group = VIRTUAL_CAMERA_APP_GROUP
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+{system_camera_source_entitlements}</dict>
 </plist>
 "#,
-        app_group = VIRTUAL_CAMERA_APP_GROUP
+        system_camera_source_entitlements = system_camera_source_entitlements
     )
 }
 
@@ -8696,9 +8708,11 @@ atlas_anisotropy = 1
         assert!(info.contains("CMIOExtensionMachServiceName"));
         assert!(info.contains(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID));
 
-        let entitlements = camera_container_app_entitlements();
+        let entitlements = camera_container_app_entitlements(true);
         assert!(entitlements.contains("com.apple.developer.system-extension.install"));
         assert!(entitlements.contains(VIRTUAL_CAMERA_APP_GROUP));
+        assert!(entitlements.contains("com.apple.security.device.camera"));
+        assert!(entitlements.contains("com.apple.security.device.audio-input"));
     }
 
     #[test]

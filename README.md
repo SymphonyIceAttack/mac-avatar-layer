@@ -1,5 +1,7 @@
 # MacAvatarLayer
 
+![MacAvatarLayer logo](logo/mac-avatar-layer-logo.png)
+
 A Rust-first macOS prototype for a macOS-native Live2D avatar host.
 
 The first product goal is reliability on macOS: keep the avatar window and
