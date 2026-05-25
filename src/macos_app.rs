@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::audio_input::MicrophoneInput;
+use crate::audio_input::{MicrophoneInput, MicrophoneStatus};
 use crate::camera_input::{CameraInput, CameraStatus};
 use crate::config::{
     AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, OutputMode,
@@ -249,7 +249,11 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         let mut camera_input = CameraInput::from_config(&config.input.camera);
         let mut camera_enabled = camera_runtime_active(camera_input.status());
         let mut mouse_enabled = config.input.mouse.enabled;
-        let mut microphone_enabled = config.input.microphone.enabled;
+        let microphone_start = MicrophoneInput::start(&config.input.microphone);
+        let mut microphone = microphone_start.input;
+        let mut microphone_status = microphone_start.status;
+        let mut microphone_diagnostic = microphone_start.diagnostic;
+        let mut microphone_enabled = microphone_status == MicrophoneStatus::Running;
         let mut screen_capture_probe = if has_avatar_window {
             crate::screen_capture_probe::ScreenCaptureProbe::start(
                 window,
@@ -277,6 +281,7 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 diagnostics_visible,
                 mouse_enabled,
                 microphone_enabled,
+                microphone_status,
                 camera_enabled,
                 selected_expression_index,
                 window_size_preset: WindowSizePreset::from_config(&config.app),
@@ -296,6 +301,8 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             model.summary(),
             cubism_summary,
             renderer_diagnostics,
+            microphone_debug_summary(microphone_status, microphone_diagnostic.as_deref())
+                .overlay_text,
             camera_debug_summary(
                 camera_input.status(),
                 camera_input.latest_sample(),
@@ -307,7 +314,9 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
         #[cfg(all(feature = "cubism-core", not(feature = "metal-renderer")))]
         let mut software_renderer = SoftwareRenderer::load(&model)?;
         let mut motion_controller = crate::motion::MotionController::new(&model, &config);
-        let mut microphone = MicrophoneInput::from_config(&config.input.microphone);
+        if !microphone_enabled {
+            motion_controller.set_microphone_enabled(false, &config.input.microphone);
+        }
         let mut mouse_preset = InputPreset::Normal;
         let mut mouth_preset = InputPreset::Normal;
         let mut camera_preset = InputPreset::Normal;
@@ -328,6 +337,8 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 &mut diagnostics_visible,
                 &mut mouse_enabled,
                 &mut microphone_enabled,
+                &mut microphone_status,
+                &mut microphone_diagnostic,
                 &mut camera_enabled,
                 &mut selected_expression_index,
                 &mut mouse_preset,
@@ -398,6 +409,10 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
             draw_avatar_frame(avatar_layer, started_at.elapsed().as_secs_f64())?;
             let camera_summary =
                 camera_debug_summary(camera_status, camera_sample, camera_input.diagnostic());
+            diagnostics.set_microphone_summary(
+                microphone_debug_summary(microphone_status, microphone_diagnostic.as_deref())
+                    .overlay_text,
+            );
             diagnostics.set_camera_summary(camera_summary.overlay_text);
             update_camera_menu_status(
                 &settings_menu,
@@ -678,13 +693,10 @@ unsafe fn create_avatar_window(
         );
     }
     maybe_move_capture_window_offscreen(window, app_config, window_size, screen_union);
-    let actual_frame = msg_rect(window, "frame");
+    let actual_frame = crate::apple_platform::window_frame(window);
     println!(
         "renderer_event=window_actual_frame x={:.1} y={:.1} width={:.1} height={:.1}",
-        actual_frame.origin.x,
-        actual_frame.origin.y,
-        actual_frame.size.width,
-        actual_frame.size.height
+        actual_frame.x, actual_frame.y, actual_frame.width, actual_frame.height
     );
 
     Ok(window)
@@ -771,39 +783,37 @@ fn avatar_window_origin(
     }
 }
 
-unsafe fn screen_union_frame() -> Option<ScreenUnionFrame> {
-    let screens = msg_id(class("NSScreen").ok()?, "screens");
-    if screens.is_null() {
-        return None;
+fn screen_union_frame() -> Option<ScreenUnionFrame> {
+    crate::apple_platform::screen_union_frame().map(screen_union_from_layer_frame)
+}
+
+fn screen_union_from_layer_frame(frame: crate::apple_platform::LayerFrame) -> ScreenUnionFrame {
+    ScreenUnionFrame {
+        min_x: frame.x,
+        min_y: frame.y,
+        max_x: frame.x + frame.width,
+        max_y: frame.y + frame.height,
     }
-    let count = msg_usize(screens, "count");
-    if count == 0 {
-        return None;
+}
+
+fn ns_point_from_layer_point(point: crate::apple_platform::LayerPoint) -> NSPoint {
+    NSPoint {
+        x: point.x,
+        y: point.y,
     }
-    let mut union: Option<ScreenUnionFrame> = None;
-    for index in 0..count {
-        let screen = msg_id_usize(screens, "objectAtIndex:", index);
-        if screen.is_null() {
-            continue;
-        }
-        let frame = msg_rect(screen, "frame");
-        let current = ScreenUnionFrame {
-            min_x: frame.origin.x,
-            min_y: frame.origin.y,
-            max_x: frame.origin.x + frame.size.width,
-            max_y: frame.origin.y + frame.size.height,
-        };
-        union = Some(match union {
-            Some(previous) => ScreenUnionFrame {
-                min_x: previous.min_x.min(current.min_x),
-                min_y: previous.min_y.min(current.min_y),
-                max_x: previous.max_x.max(current.max_x),
-                max_y: previous.max_y.max(current.max_y),
-            },
-            None => current,
-        });
+}
+
+fn ns_rect_from_layer_frame(frame: crate::apple_platform::LayerFrame) -> NSRect {
+    NSRect {
+        origin: NSPoint {
+            x: frame.x,
+            y: frame.y,
+        },
+        size: NSSize {
+            width: frame.width,
+            height: frame.height,
+        },
     }
-    union
 }
 
 fn valid_window_dimension(value: f64, fallback: f64) -> f64 {
@@ -973,19 +983,15 @@ fn commit_layer_update() {
 }
 
 unsafe fn normalized_mouse_position(window: Id, config: &MouseConfig) -> Option<[f32; 2]> {
-    let mouse = msg_point(class("NSEvent").ok()?, "mouseLocation");
+    let mouse = ns_point_from_layer_point(crate::apple_platform::global_mouse_location());
     let coordinate_space = config.coordinate_space.trim();
     if coordinate_space.eq_ignore_ascii_case("window") {
-        let frame = msg_rect(window, "frame");
+        let frame = ns_rect_from_layer_frame(crate::apple_platform::window_frame(window));
         return normalized_point_in_rect(mouse, frame);
     }
 
-    let screen = msg_id(class("NSScreen").ok()?, "mainScreen");
-    if screen.is_null() {
-        return None;
-    }
-
-    normalized_point_in_rect(mouse, msg_rect(screen, "frame"))
+    let frame = crate::apple_platform::main_screen_frame()?;
+    normalized_point_in_rect(mouse, ns_rect_from_layer_frame(frame))
 }
 
 fn normalized_point_in_rect(point: NSPoint, frame: NSRect) -> Option<[f32; 2]> {
@@ -1023,6 +1029,7 @@ struct RuntimeControlState {
     diagnostics_visible: bool,
     mouse_enabled: bool,
     microphone_enabled: bool,
+    microphone_status: MicrophoneStatus,
     camera_enabled: bool,
     selected_expression_index: Option<usize>,
     window_size_preset: WindowSizePreset,
@@ -1646,6 +1653,8 @@ unsafe fn handle_settings_menu_commands(
     diagnostics_visible: &mut bool,
     mouse_enabled: &mut bool,
     microphone_enabled: &mut bool,
+    microphone_status: &mut MicrophoneStatus,
+    microphone_diagnostic: &mut Option<String>,
     camera_enabled: &mut bool,
     selected_expression_index: &mut Option<usize>,
     mouse_preset: &mut InputPreset,
@@ -1689,18 +1698,24 @@ unsafe fn handle_settings_menu_commands(
         if next_enabled {
             let microphone_config =
                 runtime_microphone_config(&config.input.microphone, *mouth_preset);
-            let next_input = MicrophoneInput::from_config(&microphone_config);
-            if next_input.is_some() {
-                *microphone = next_input;
+            let start = MicrophoneInput::start(&microphone_config);
+            *microphone_status = start.status;
+            *microphone_diagnostic = start.diagnostic;
+            if start.input.is_some() {
+                *microphone = start.input;
                 motion_controller.set_microphone_enabled(true, &microphone_config);
                 *microphone_enabled = true;
             } else {
+                *microphone = None;
+                motion_controller.set_microphone_enabled(false, &config.input.microphone);
                 *microphone_enabled = false;
             }
         } else {
             *microphone = None;
             motion_controller.set_microphone_enabled(false, &config.input.microphone);
             *microphone_enabled = false;
+            *microphone_status = MicrophoneStatus::Disabled;
+            *microphone_diagnostic = None;
         }
         println!(
             "renderer_event=settings_changed microphone_enabled={}",
@@ -1911,6 +1926,7 @@ unsafe fn handle_settings_menu_commands(
             diagnostics_visible: *diagnostics_visible,
             mouse_enabled: *mouse_enabled,
             microphone_enabled: *microphone_enabled,
+            microphone_status: *microphone_status,
             camera_enabled: *camera_enabled,
             selected_expression_index: *selected_expression_index,
             window_size_preset: WindowSizePreset::from_config(&config.app),
@@ -1928,6 +1944,8 @@ unsafe fn update_settings_menu_state(menu: &SettingsMenu, state: RuntimeControlS
     set_menu_item_checked(menu.diagnostics_item, state.diagnostics_visible);
     set_menu_item_checked(menu.mouse_item, state.mouse_enabled);
     set_menu_item_checked(menu.microphone_item, state.microphone_enabled);
+    let microphone_title = microphone_debug_summary(state.microphone_status, None).menu_text;
+    crate::apple_platform::set_menu_item_title(menu.microphone_item, &microphone_title);
     set_menu_item_checked(menu.camera_item, state.camera_enabled);
     for (item_index, item) in menu.expression_items.iter().enumerate() {
         let checked = match state.selected_expression_index {
@@ -3057,6 +3075,7 @@ struct Diagnostics {
     model_summary: String,
     cubism_summary: String,
     renderer_summary: String,
+    microphone_summary: String,
     camera_summary: String,
     screen_capture_summary: String,
     total_frames: u64,
@@ -3072,6 +3091,46 @@ struct Diagnostics {
 struct CameraDebugSummary {
     overlay_text: String,
     menu_text: String,
+}
+
+struct MicrophoneDebugSummary {
+    overlay_text: String,
+    menu_text: String,
+}
+
+fn microphone_debug_summary(
+    status: MicrophoneStatus,
+    diagnostic: Option<&str>,
+) -> MicrophoneDebugSummary {
+    let status_label = status.label();
+    let detail = match status {
+        MicrophoneStatus::Disabled | MicrophoneStatus::Running => None,
+        MicrophoneStatus::Failed => diagnostic
+            .and_then(first_non_empty_line)
+            .map(str::to_string)
+            .or_else(|| {
+                Some(
+                    "Open Microphone privacy settings or disable [input.microphone].enabled."
+                        .to_string(),
+                )
+            }),
+    };
+    let overlay_text = match detail.as_deref() {
+        Some(detail) => format!("Microphone: {status_label}\nMicrophone detail: {detail}"),
+        None => format!("Microphone: {status_label}"),
+    };
+    let menu_text = match status {
+        MicrophoneStatus::Disabled => "Microphone Mouth Input: disabled".to_string(),
+        MicrophoneStatus::Running => "Microphone Mouth Input: running".to_string(),
+        MicrophoneStatus::Failed => {
+            "Microphone Mouth Input: failed | open Microphone privacy".to_string()
+        }
+    };
+
+    MicrophoneDebugSummary {
+        overlay_text,
+        menu_text,
+    }
 }
 
 fn camera_debug_summary(
@@ -3356,6 +3415,7 @@ impl Diagnostics {
         model_summary: String,
         cubism_summary: String,
         renderer_diagnostics: RendererDiagnostics,
+        microphone_summary: String,
         camera_summary: String,
         screen_capture_summary: String,
     ) -> Self {
@@ -3365,6 +3425,7 @@ impl Diagnostics {
             model_summary: diagnostics_model_summary(&model_summary),
             cubism_summary: diagnostics_cubism_summary(&cubism_summary),
             renderer_summary: diagnostics_renderer_summary(&renderer_diagnostics.summary()),
+            microphone_summary,
             camera_summary,
             screen_capture_summary,
             total_frames: 0,
@@ -3380,6 +3441,10 @@ impl Diagnostics {
 
     fn set_camera_summary(&mut self, camera_summary: String) {
         self.camera_summary = camera_summary;
+    }
+
+    fn set_microphone_summary(&mut self, microphone_summary: String) {
+        self.microphone_summary = microphone_summary;
     }
 
     fn set_screen_capture_summary(&mut self, screen_capture_summary: String) {
@@ -3431,10 +3496,11 @@ impl Diagnostics {
             self.interval_sum_since_report / self.intervals_since_report as u32
         };
         let text = format!(
-            "Model: {}\n{}\n{}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
+            "Model: {}\n{}\n{}\n{}\n{}\n{}\nFPS: {:>5.1} / {:.0}\nFrame delta: avg {:>5.1} ms, max {:>5.1} ms\nBudget: {:>5.1} ms\nSlow frames: {}\nFrames: {}\nUptime: {:>6.1}s\nApp Nap guard: active",
             self.model_summary,
             self.cubism_summary,
             self.renderer_summary,
+            self.microphone_summary,
             self.camera_summary,
             self.screen_capture_summary,
             fps,
@@ -3573,36 +3639,17 @@ unsafe fn ns_color(red: f64, green: f64, blue: f64, alpha: f64) -> Result<Id, St
     ))
 }
 
+// TODO(apple-platform): keep these legacy objc_msgSend shims limited to app
+// bootstrap, App Nap, fallback bitmap drawing, NSColor/NSString construction,
+// and termination until those owners move behind typed objc2 helpers.
 unsafe fn msg_id(receiver: Id, selector_name: &str) -> Id {
     let function: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name))
 }
 
-unsafe fn msg_id_usize(receiver: Id, selector_name: &str, value: usize) -> Id {
-    let function: extern "C" fn(Id, Sel, usize) -> Id =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name), value)
-}
-
 unsafe fn msg_void_id<T>(receiver: Id, selector_name: &str, value: T) {
     let function: extern "C" fn(Id, Sel, T) = std::mem::transmute(objc_msgSend as *const ());
     function(receiver, selector(selector_name), value);
-}
-
-unsafe fn msg_usize(receiver: Id, selector_name: &str) -> usize {
-    let function: extern "C" fn(Id, Sel) -> usize = std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
-}
-
-unsafe fn msg_point(receiver: Id, selector_name: &str) -> NSPoint {
-    let function: extern "C" fn(Id, Sel) -> NSPoint =
-        std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
-}
-
-unsafe fn msg_rect(receiver: Id, selector_name: &str) -> NSRect {
-    let function: extern "C" fn(Id, Sel) -> NSRect = std::mem::transmute(objc_msgSend as *const ());
-    function(receiver, selector(selector_name))
 }
 
 unsafe fn msg_id_cstr(receiver: Id, selector_name: &str, value: *const c_char) -> Id {
@@ -3656,14 +3703,16 @@ mod tests {
         avatar_frame_for_bounds, avatar_window_collection_behavior, avatar_window_level_key,
         avatar_window_level_name, avatar_window_origin, avatar_window_size,
         avatar_window_style_mask, avatar_window_title, camera_debug_summary, camera_runtime_active,
-        capture_friendly_window_bypasses_present_suspension, is_model3_path, model_menu_title,
-        model_paths_match, model_title, mouse_coordinate_space_label, normalized_point_in_rect,
-        offscreen_capture_window, relaunch_command_args, remove_toml_section,
-        runtime_camera_config, runtime_microphone_config, runtime_mouse_config,
-        selected_expression_index, set_toml_section_value, set_toml_section_values,
-        toml_string_literal, window_occlusion_visible,
+        capture_friendly_window_bypasses_present_suspension, is_model3_path,
+        microphone_debug_summary, model_menu_title, model_paths_match, model_title,
+        mouse_coordinate_space_label, normalized_point_in_rect, offscreen_capture_window,
+        relaunch_command_args, remove_toml_section, runtime_camera_config,
+        runtime_microphone_config, runtime_mouse_config, selected_expression_index,
+        set_toml_section_value, set_toml_section_values, toml_string_literal,
+        window_occlusion_visible,
     };
     use crate::apple_platform::LayerFrame;
+    use crate::audio_input::MicrophoneStatus;
     use crate::camera_input::CameraStatus;
     use crate::config::{
         AppConfig, AppRuntimeConfig, CameraConfig, MicrophoneConfig, MouseConfig, OutputMode,
@@ -4190,6 +4239,23 @@ mod tests {
                 .menu_text
                 .contains("Camera Tracking: no face | adjust framing")
         );
+    }
+
+    #[test]
+    fn microphone_debug_summary_surfaces_failed_status_to_overlay_and_menu() {
+        let summary = microphone_debug_summary(
+            MicrophoneStatus::Failed,
+            Some("Microphone permission denied\nsecond line"),
+        );
+
+        assert!(summary.overlay_text.contains("Microphone: failed"));
+        assert!(
+            summary
+                .overlay_text
+                .contains("Microphone permission denied")
+        );
+        assert!(summary.menu_text.contains("Microphone Mouth Input: failed"));
+        assert!(summary.menu_text.contains("open Microphone privacy"));
     }
 
     #[test]

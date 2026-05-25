@@ -398,6 +398,7 @@ impl RendererConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MotionConfig {
+    pub idle: Option<String>,
     pub expression: Option<String>,
     pub blink_interval: f32,
     pub blink_duration: f32,
@@ -406,6 +407,7 @@ pub struct MotionConfig {
 impl Default for MotionConfig {
     fn default() -> Self {
         Self {
+            idle: None,
             expression: None,
             blink_interval: 3.8,
             blink_duration: 0.18,
@@ -610,6 +612,7 @@ highlight_drawables = ["ArtMeshProbe"]
 highlight_parts = ["PartProbe"]
 
 [motion]
+idle = "0"
 expression = "smile"
 blink_interval = 4.2
 
@@ -702,6 +705,7 @@ mouth_open = 0.7
         assert_eq!(config.renderer.only_parts, ["PartFocus"]);
         assert_eq!(config.renderer.highlight_drawables, ["ArtMeshProbe"]);
         assert_eq!(config.renderer.highlight_parts, ["PartProbe"]);
+        assert_eq!(config.motion.idle.as_deref(), Some("0"));
         assert_eq!(config.motion.expression.as_deref(), Some("smile"));
         assert_eq!(config.motion.blink_interval, 4.2);
         assert_eq!(config.motion.blink_duration, 0.18);

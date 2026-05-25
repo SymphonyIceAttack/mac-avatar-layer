@@ -170,8 +170,9 @@ files:
 - High precision masks currently fall back to shared masks when Cubism offscreen
   drawables are present; diagnostics show this as `mask shared(offscreen)`.
 - Microphone startup failures now print actionable terminal guidance with the
-  macOS permission path and active profile config names; native in-window
-  prompting is still open.
+  macOS permission path and active profile config names, and the `MA` menu plus
+  diagnostics overlay surface a failed microphone state with a privacy-settings
+  hint.
 - Packaging, app signing, auto-start, and menu bar controls are not implemented.
 - Long-running Space/display sleep-wake reliability still needs more real-world
   reports beyond the first baseline.
@@ -193,8 +194,9 @@ Priority 1: Model And Runtime Usability
   model manifests, window size settings, renderer, motion, mouse,
   microphone, and camera input settings, and Cubism Core SDK paths before
   launching.
-- Validate the selected `.model3.json` before opening the avatar window and
-  print the active config path plus repair commands when it is missing.
+- Done: validate the selected `.model3.json` before opening the avatar window
+  and print the active config path plus repair commands when it is missing,
+  including custom `--config` files.
 - Continue growing the first-pass status bar settings menu into a small
   settings UI. Local model selection, window size presets, renderer quality
   presets, diagnostics, expression selection, and input toggles are already
@@ -215,8 +217,8 @@ Priority 2: Tracking And Input
   dev/build TOML after trying runtime presets.
 - Calibrate microphone gain/noise gate/response-curve/attack/release defaults
   on more machines using the runtime mouth preset menu as a first pass.
-- Implement the selected camera-tracking v1 path: built-in/default webcam
-  capture through AVFoundation plus Vision face landmarks.
+- Continue calibrating the implemented camera-tracking v1 path: built-in/default
+  webcam capture through AVFoundation plus Vision face landmarks.
 - Add permission and setup messaging for camera/microphone paths.
 
 Priority 3: Rendering Parity And Quality
@@ -302,7 +304,9 @@ Remaining work:
 - Add broader compatibility tests against more official SDK sample models.
 - Keep the official SDK sample compatibility sweep available as the first pass
   before adding new visual regression fixtures.
-- Add better diagnostics for unsupported motion segment data.
+- Done: add better diagnostics for unsupported motion segment data. Invalid
+  `.motion3.json` curves now log target/id plus the segment offset and reason
+  before being skipped.
 - Add expression fade-in/fade-out if needed by later UI controls.
 
 ### 2. Parameter Drivers And Input
@@ -455,9 +459,10 @@ Implementation plan:
   `target/dev-app/MacAvatarLayer Dev.app`, launches through LaunchServices with
   `--config`, and uses the stable `io.github.symphonyiceattack.mac-avatar-layer` identity for camera
   permissions.
-- Done: keep the `.app` path stable and code sign it after each build using
-  `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` or a detected local development identity when
-  available, with ad-hoc signing as a fallback.
+- Done: keep the `.app` path stable and sign it after each build using
+  `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` or a detected local identity when
+  available, with ad-hoc signing as the normal fallback for local desktop-window
+  use.
 - Done: add the first Vision request call site inside the sample buffer
   delegate. Frames are throttled by `[input.camera].target_fps`, processed with
   `VNDetectFaceLandmarksRequest`, and summarized as face/no-face/failure
@@ -613,6 +618,12 @@ Migration order:
    process spawning to typed `NSWorkspace` wrappers. Privacy pane links,
    active-model reveal, and local models folder opening now live in the
    platform layer through `objc2-app-kit` plus `objc2-foundation` URL helpers.
+9. Done: migrate remaining `NSScreen` / `NSEvent` geometry reads used by
+   multi-display placement and mouse tracking into typed `objc2-app-kit`
+   helpers in the platform layer. The remaining raw `objc_msgSend` helpers in
+   `src/macos_app.rs` now have an explicit `apple-platform` TODO and are
+   limited to app bootstrap, App Nap, fallback bitmap drawing,
+   `NSColor`/`NSString` construction, and termination.
 
 Acceptance criteria:
 
@@ -811,6 +822,9 @@ Status: next product milestone.
   `cargo xtask list-models`.
 - Reuse the local model selection path currently exposed by
   `cargo xtask select-model [--dev|--build] MODEL_PATH`.
+- Done: validate the selected `.model3.json` before opening the avatar window
+  and print the active config path plus repair commands when it is missing,
+  including custom `--config` files.
 - Done: expose a first-pass `MA` menu local model list. It scans `public/`,
   writes the selected `.model3.json` to the active profile TOML, relaunches the
   local `.app` with that selected model, and avoids stale command-line model
@@ -877,7 +891,8 @@ Status: next product milestone.
 - Done: add `cargo xtask virtual-camera-readiness [--dev|--build]`. It writes
   `target/virtual-camera/readiness.md` and checks the selected profile,
   internal IOSurface producer config, IOSurface heartbeat manifest, app wrapper,
-  and codesigning identity before the Camera Extension prototype begins.
+  and System Camera Source signing/provisioning state before the Camera
+  Extension prototype begins.
 - Done: expose first-pass `MA` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -890,10 +905,19 @@ Status: next product milestone.
 - Done: add first-pass `MA` menu shortcuts for Camera and Microphone privacy
   settings so users can repair macOS permission issues without searching
   terminal logs.
+- Done: surface microphone startup failures in the `MA` menu and diagnostics
+  overlay, so permission/setup failures are visible after launch instead of
+  only appearing in stderr.
+- Done: add `[motion].idle` so models with multiple `Idle` motions can choose
+  a default by index, file name, file stem, or full path while preserving the
+  first motion as the fallback default.
+- Done: extend `cargo xtask doctor` to validate `[motion].idle` against the
+  selected model's `Idle` motion files, so invalid idle selections are caught
+  before launch.
 - Continue improving user-facing permission and missing-file messages beyond
   the current startup terminal diagnostics.
-- Prototype the selected AVFoundation + Vision camera-tracking path and expose
-  it through `[input.camera]` plus the `MA` status bar menu.
+- Continue calibrating the AVFoundation + Vision camera-tracking path exposed
+  through `[input.camera]` and the `MA` status bar menu.
 - Done: add `cargo xtask build-app [--release]` as the first packaging/signing
   entry point. It builds the Metal + camera app wrapper, signs it with the same
   stable local bundle identity as `run-metal`, prints the active profile config,
@@ -908,6 +932,9 @@ Status: next product milestone.
 - Done: extend `cargo xtask doctor` to validate common `[renderer]` and
   `[motion]` mistakes, including `debug_texture_mode`, atlas anisotropy, blink
   interval/duration, and empty expression overrides.
+- Done: extend `cargo xtask doctor` to verify the built local app wrapper's
+  camera/audio-input privacy entitlements when the wrapper exists, so camera
+  permission failures caused by entitlement drift are surfaced before launch.
 - Done: keep `cargo xtask doctor` focused on active window, model, renderer,
   motion, input, and Cubism Core SDK checks. Legacy `[output]` settings are no
   longer validated because Syphon output has been removed.
@@ -1062,6 +1089,8 @@ highlight_drawables = []
 highlight_parts = []
 
 [motion]
+# Select by Idle motion index, file name, file stem, or full path.
+# idle = "0"
 # expression = "smile"
 blink_interval = 3.8
 blink_duration = 0.18
@@ -1126,8 +1155,6 @@ blink_open_threshold = 0.38
 
 ## Open Questions
 
-- Which motion should be treated as the default idle motion when multiple
-  `Idle` motions exist?
 - Should microphone permission failures get an in-window prompt now that
   terminal diagnostics are in place?
 - After AVFoundation + Vision camera tracking v1 lands, should ARKit/iPhone or

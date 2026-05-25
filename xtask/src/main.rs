@@ -110,6 +110,7 @@ fn run() -> Result<()> {
         Some("run-space-test") => run_space_test(args.collect()),
         Some("sample-compatibility-sweep") => sample_compatibility_sweep(args.collect()),
         Some("select-model") => select_model(args.collect()),
+        Some("start") => start(args.collect()),
         Some("tune-input") => tune_input(args.collect()),
         Some("virtual-camera-readiness") => virtual_camera_readiness(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
@@ -154,6 +155,7 @@ Usage:
   cargo xtask run-space-test [MODEL_PATH]
   cargo xtask sample-compatibility-sweep [SAMPLES_ROOT]
   cargo xtask select-model [--dev|--build] MODEL_PATH
+  cargo xtask start [MODEL_PATH]
   cargo xtask tune-input [--dev|--build] <mouse|mouth|camera> <soft|normal|expressive>
   cargo xtask virtual-camera-readiness [--dev|--build]
 
@@ -201,6 +203,7 @@ Commands:
   sample-compatibility-sweep
                      Generate target/render-regression/compatibility-sweep.md.
   select-model      Write [model].path in the dev/build local config.
+  start             Start the optimized local app; alias for run-metal --release.
   tune-input        Write persistent mouse, mouth, or camera calibration preset values.
   virtual-camera-readiness
                      Write target/virtual-camera/readiness.md for the future in-project macOS virtual camera path.
@@ -456,6 +459,7 @@ fn doctor(args: Vec<String>) -> Result<()> {
     let build_check = check_local_config(&root, SelectModelTarget::Build)?;
     issues += development_check.issues + build_check.issues;
     issues += check_cubism_core_sdk(&root);
+    issues += check_camera_privacy_entitlements(&root);
 
     println!();
     if issues == 0 {
@@ -1261,6 +1265,10 @@ fn build_camera_extension(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn start(args: Vec<String>) -> Result<()> {
+    run_metal(start_args_for_run_metal(args)?)
+}
+
 fn build_camera_extension_executable(root: &Path, release: bool) -> Result<PathBuf> {
     let mut command = Command::new("cargo");
     command
@@ -1339,12 +1347,19 @@ fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     run_status(&mut command).map_err(|error| {
-        format!(
-            "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
-Install an Apple Development or Developer ID Application certificate in Keychain, \
-or set MAC_AVATAR_LAYER_CODESIGN_IDENTITY to a valid local codesigning identity.",
-            identity.value
-        )
+        if identity.value == "-" {
+            format!(
+                "failed to ad-hoc codesign Camera Extension prototype: {error}. \
+Ad-hoc signing is enough to build the prototype bundle, but macOS still requires \
+Apple Developer Program provisioning before it can activate as a system camera."
+            )
+        } else {
+            format!(
+                "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
+Unset MAC_AVATAR_LAYER_CODESIGN_IDENTITY to use the ad-hoc local build path, or set it to a valid local codesigning identity for System Camera Source work.",
+                identity.value
+            )
+        }
     })?;
     Ok(())
 }
@@ -1840,12 +1855,18 @@ fn sign_camera_dev_app(root: &Path, bundle_dir: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     run_status(&mut command).map_err(|error| {
-        format!(
-            "failed to codesign camera dev app with identity `{}`: {error}. \
-Install an Apple Development or Developer ID Application certificate in Keychain, \
-or set MAC_AVATAR_LAYER_CODESIGN_IDENTITY to a valid local codesigning identity.",
-            identity.value
-        )
+        if identity.value == "-" {
+            format!(
+                "failed to ad-hoc codesign local app wrapper: {error}. \
+No Apple developer certificate is required for the desktop-window workflow; make sure Xcode Command Line Tools provide `codesign`."
+            )
+        } else {
+            format!(
+                "failed to codesign local app wrapper with identity `{}`: {error}. \
+For normal local desktop-window use, unset MAC_AVATAR_LAYER_CODESIGN_IDENTITY so xtask can fall back to ad-hoc signing.",
+                identity.value
+            )
+        }
     })?;
 
     Ok(())
@@ -2012,6 +2033,16 @@ fn parse_run_metal_args(args: Vec<String>) -> Result<RunMetalOptions> {
         release,
         model_path,
     })
+}
+
+fn start_args_for_run_metal(args: Vec<String>) -> Result<Vec<String>> {
+    if args.len() > 1 || args.iter().any(|arg| arg.starts_with('-')) {
+        return Err("usage: cargo xtask start [MODEL_PATH]".into());
+    }
+
+    let mut run_args = vec!["--release".to_string()];
+    run_args.extend(args);
+    Ok(run_args)
 }
 
 fn run_space_test(args: Vec<String>) -> Result<()> {
@@ -2903,7 +2934,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
         }
     };
 
-    let issues = check_doctor_app_config(target, &config.app)
+    let mut issues = check_doctor_app_config(target, &config.app)
         + check_doctor_capture_config(target, &config.capture)
         + check_doctor_renderer_config(target, &config.renderer)
         + check_doctor_motion_config(target, &config.motion)
@@ -2946,6 +2977,7 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
 
     match ModelManifestSummary::load(&full_model_path) {
         Ok(summary) => {
+            issues += check_doctor_idle_motion_selection(target, &config.motion, &summary);
             println!(
                 "[x] {} config: {} -> {} (textures {}, motions {}, expressions {}, physics {}, display {})",
                 target.label(),
@@ -2968,6 +3000,66 @@ fn check_local_config(root: &Path, target: SelectModelTarget) -> Result<DoctorLo
             Ok(DoctorLocalCheck { issues: issues + 1 })
         }
     }
+}
+
+fn check_doctor_idle_motion_selection(
+    target: SelectModelTarget,
+    motion: &DoctorMotionConfig,
+    summary: &ModelManifestSummary,
+) -> usize {
+    let Some(idle) = motion
+        .idle
+        .as_deref()
+        .map(str::trim)
+        .filter(|idle| !idle.is_empty())
+    else {
+        return 0;
+    };
+
+    if summary.idle_motion_files.is_empty() {
+        println!(
+            "[!] {} motion.idle is set to {:?}, but the selected model has no Idle motion group",
+            target.label(),
+            idle
+        );
+        return 1;
+    }
+
+    if idle_motion_selector_matches(&summary.idle_motion_files, idle) {
+        println!("[x] {} motion.idle selects {}", target.label(), idle);
+        return 0;
+    }
+
+    println!(
+        "[!] {} motion.idle {:?} does not match the selected model's Idle motions",
+        target.label(),
+        idle
+    );
+    println!(
+        "    Available Idle motions: {}",
+        summary.idle_motion_files.join(", ")
+    );
+    println!("    Use a zero-based index, file name, file stem, or full path.");
+    1
+}
+
+fn idle_motion_selector_matches(files: &[String], selector: &str) -> bool {
+    if let Ok(index) = selector.parse::<usize>() {
+        return index < files.len();
+    }
+
+    files.iter().any(|file| {
+        let path = Path::new(file);
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let file_stem = file_name.and_then(idle_motion_file_stem);
+        file == selector || file_name == Some(selector) || file_stem == Some(selector)
+    })
+}
+
+fn idle_motion_file_stem(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_suffix(".motion3.json")
+        .or_else(|| file_name.strip_suffix(".json"))
 }
 
 fn check_doctor_app_config(target: SelectModelTarget, app: &DoctorAppConfig) -> usize {
@@ -3115,6 +3207,17 @@ fn check_doctor_motion_config(target: SelectModelTarget, motion: &DoctorMotionCo
         5.0,
     );
     if motion
+        .idle
+        .as_deref()
+        .is_some_and(|idle| idle.trim().is_empty())
+    {
+        println!(
+            "[!] {} motion.idle is empty; remove it or set an Idle motion index/file name",
+            target.label()
+        );
+        issues += 1;
+    }
+    if motion
         .expression
         .as_deref()
         .is_some_and(|expression| expression.trim().is_empty())
@@ -3126,8 +3229,13 @@ fn check_doctor_motion_config(target: SelectModelTarget, motion: &DoctorMotionCo
         issues += 1;
     }
     println!(
-        "[x] {} motion config: blink_interval {} | blink_duration {}",
+        "[x] {} motion config: idle {} | blink_interval {} | blink_duration {}",
         target.label(),
+        motion
+            .idle
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("default"),
         motion
             .blink_interval
             .map(|value| value.to_string())
@@ -3491,6 +3599,43 @@ fn check_cubism_core_sdk(root: &Path) -> usize {
     }
 }
 
+fn check_camera_privacy_entitlements(root: &Path) -> usize {
+    let bundle_path = root.join("target/dev-app").join(DEV_APP_BUNDLE_NAME);
+    if !bundle_path.exists() {
+        println!(
+            "[x] App wrapper privacy entitlements: not built yet; run `cargo xtask build-app --release` to verify camera/microphone entitlements"
+        );
+        return 0;
+    }
+
+    let Some(entitlements) = signed_entitlements_text(&bundle_path) else {
+        println!(
+            "[!] App wrapper privacy entitlements could not be read: {}",
+            relative_display(root, &bundle_path)
+        );
+        println!("    Rebuild it with: cargo xtask build-app --release");
+        return 1;
+    };
+
+    if signed_entitlements_have_camera_privacy(&entitlements) {
+        println!("[x] App wrapper privacy entitlements: camera + audio-input");
+        return 0;
+    }
+
+    println!("[!] App wrapper is missing camera/audio-input entitlements");
+    println!("    Bundle: {}", relative_display(root, &bundle_path));
+    println!(
+        "    Rebuild it with `cargo xtask build-app --release`, then reset cached camera denial if needed:"
+    );
+    println!("    tccutil reset Camera {DEV_CAMERA_BUNDLE_ID}");
+    1
+}
+
+fn signed_entitlements_have_camera_privacy(text: &str) -> bool {
+    text.contains("com.apple.security.device.camera")
+        && text.contains("com.apple.security.device.audio-input")
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorConfig {
@@ -3707,7 +3852,7 @@ Status: **{status}**\n\n\
 | Container provisioning profile | {container_profile_status} | `{container_profile}` |\n\
 | Extension provisioning profile | {extension_profile_status} | `{extension_profile}` |\n\
 | System Extension active | {system_extension_active_status} | `{system_extension_active}` |\n\
-| Codesign identity | {codesign_status} | `{codesign}` |\n\n\
+| System Camera signing identity | {codesign_status} | `{codesign}` |\n\n\
 ## Next Implementation Slice\n\n\
 1. Keep the existing internal IOSurface producer as the frame source.\n\
 2. Build and embed the macOS Camera Extension target owned by this project.\n\
@@ -3724,7 +3869,7 @@ cargo xtask camera-extension-plan --{target_flag}\n\
 cargo xtask build-camera-extension --{target_flag}\n\
 cargo xtask build-app{run_release_flag}\n\
 ```\n\n\
-If `Codesign identity` is `warn`, set `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` to an Apple Development or Developer ID Application identity before building a real Camera Extension.\n",
+`System Camera signing identity` is only relevant to the System Camera Source prototype. The normal desktop-window workflow builds and runs with ad-hoc signing when no Apple developer certificate is installed.\n",
         target_label = target.label(),
         status = status,
         platform_status = readiness_status(platform_ok),
@@ -3826,7 +3971,7 @@ fn virtual_camera_next_action(
         return "run cargo xtask build-app --release to embed the Camera Extension into the app wrapper.".to_string();
     }
     if !has_real_codesign_identity {
-        return "install an Apple Development or Developer ID Application certificate in Xcode/Keychain, then run cargo xtask build-app --release; xtask will auto-detect it.".to_string();
+        return "System Camera Source activation needs Apple Developer Program signing and provisioning. For normal local use, keep using the desktop-window or offscreen-window output path; no developer certificate is required.".to_string();
     }
     if !installed_app_exists {
         return "run cargo xtask build-app --release so the signed app wrapper is copied to /Applications for System Extension activation.".to_string();
@@ -3920,7 +4065,7 @@ Generated for `{target}` profile.\n\n\
 - `{prototype_dir}/CameraExtension.Info.plist`\n\
 - `{prototype_dir}/CameraExtension.entitlements`\n\
 - `{prototype_dir}/ContainerApp.entitlements`\n\n\
-These files are templates for the next implementation slice. The current app wrapper embeds the prototype `.systemextension` and exposes a first-pass `OSSystemExtensionManager` activation menu item. The extension now starts the CMIO provider service and contains a first-pass IOSurface -> CVPixelBuffer -> CMSampleBuffer sender, but a finished virtual camera still needs validation from `/Applications` with a real signing identity plus consumer testing.\n\n\
+These files are templates for the next implementation slice. The current app wrapper embeds the prototype `.systemextension` and exposes a first-pass `OSSystemExtensionManager` activation menu item. The extension now starts the CMIO provider service and contains a first-pass IOSurface -> CVPixelBuffer -> CMSampleBuffer sender, but a finished virtual camera still needs validation from `/Applications` with Apple Developer Program signing/provisioning plus consumer testing.\n\n\
 ## Implementation Checklist\n\n\
 - [x] Add a Rust Camera Extension target or bundle step that builds a system extension binary.\n\
 - [x] Define provider/device/stream contracts, stable UUIDs, BGRA 1080x1080 format, IOSurface manifest input, and stream lifecycle state.\n\
@@ -4138,6 +4283,7 @@ struct DoctorRendererConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorMotionConfig {
+    idle: Option<String>,
     expression: Option<String>,
     blink_interval: Option<f64>,
     blink_duration: Option<f64>,
@@ -5493,6 +5639,7 @@ struct ModelManifestSummary {
     name: String,
     texture_count: usize,
     motion_count: usize,
+    idle_motion_files: Vec<String>,
     expression_count: usize,
     has_physics: bool,
     has_display_info: bool,
@@ -5508,12 +5655,24 @@ impl ModelManifestSummary {
             .values()
             .map(std::vec::Vec::len)
             .sum::<usize>();
+        let idle_motion_files = references
+            .motions
+            .get("Idle")
+            .or_else(|| references.motions.get("idle"))
+            .map(|motions| {
+                motions
+                    .iter()
+                    .filter_map(|motion| motion.file.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             path: path.to_path_buf(),
             name: model_name_from_path(&path.to_string_lossy()),
             texture_count: references.textures.len(),
             motion_count,
+            idle_motion_files,
             expression_count: references.expressions.len(),
             has_physics: references.physics.is_some(),
             has_display_info: references.display_info.is_some(),
@@ -5535,9 +5694,15 @@ struct FileReferencesLite {
     physics: Option<String>,
     display_info: Option<String>,
     #[serde(default)]
-    motions: HashMap<String, Vec<serde_json::Value>>,
+    motions: HashMap<String, Vec<ModelMotionLite>>,
     #[serde(default)]
     expressions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ModelMotionLite {
+    file: Option<String>,
 }
 
 fn collect_model3_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -8917,6 +9082,30 @@ activate_virtual_camera = true
     }
 
     #[test]
+    fn start_args_map_to_release_run_metal() {
+        assert_eq!(
+            start_args_for_run_metal(Vec::new()).expect("start should parse"),
+            vec!["--release".to_string()]
+        );
+        assert_eq!(
+            start_args_for_run_metal(vec!["public/model/0.model3.json".to_string()])
+                .expect("start with model path should parse"),
+            vec![
+                "--release".to_string(),
+                "public/model/0.model3.json".to_string()
+            ]
+        );
+        assert!(start_args_for_run_metal(vec!["--dev".to_string()]).is_err());
+        assert!(
+            start_args_for_run_metal(vec![
+                "one.model3.json".to_string(),
+                "two.model3.json".to_string()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn build_app_args_support_dev_and_release_profiles() {
         let options = parse_build_app_args(Vec::new()).expect("default build-app should parse");
         assert!(!options.release);
@@ -9031,6 +9220,7 @@ atlas_anisotropy = 8
 debug_texture_mode = "uv"
 
 [motion]
+idle = "0"
 blink_interval = 3.8
 blink_duration = 0.18
 
@@ -9041,6 +9231,7 @@ path = "public/model/0.model3.json"
         .expect("doctor config should parse");
 
         assert_eq!(config.app.window_width, Some(540.0));
+        assert_eq!(config.motion.idle.as_deref(), Some("0"));
         assert_eq!(config.input.mouse.enabled, Some(true));
         assert_eq!(
             config.input.camera.pose_mode.as_deref(),
@@ -9106,6 +9297,28 @@ path = "public/model/0.model3.json"
     }
 
     #[test]
+    fn signed_entitlements_camera_privacy_check_requires_camera_and_audio_input() {
+        let valid = r#"
+<dict>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+"#;
+        let missing_audio = r#"
+<dict>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+</dict>
+"#;
+
+        assert!(signed_entitlements_have_camera_privacy(valid));
+        assert!(!signed_entitlements_have_camera_privacy(missing_audio));
+        assert!(!signed_entitlements_have_camera_privacy(""));
+    }
+
+    #[test]
     fn toml_string_literal_escapes_quotes_and_backslashes() {
         assert_eq!(
             toml_string_literal(r#"public/model/"avatar"\0.model3.json"#),
@@ -9158,11 +9371,54 @@ path = "public/model/0.model3.json"
         assert_eq!(summary.name, "Avatar");
         assert_eq!(summary.texture_count, 2);
         assert_eq!(summary.motion_count, 3);
+        assert_eq!(summary.idle_motion_files, ["idle_00.motion3.json"]);
         assert_eq!(summary.expression_count, 1);
         assert!(summary.has_physics);
         assert!(summary.has_display_info);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn doctor_idle_motion_selection_matches_index_file_name_stem_and_path() {
+        let summary = ModelManifestSummary {
+            path: PathBuf::from("Avatar.model3.json"),
+            name: "Avatar".to_string(),
+            texture_count: 0,
+            motion_count: 2,
+            idle_motion_files: vec![
+                "motions/idle_00.motion3.json".to_string(),
+                "motions/idle_01.motion3.json".to_string(),
+            ],
+            expression_count: 0,
+            has_physics: false,
+            has_display_info: false,
+        };
+
+        assert!(idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "1"
+        ));
+        assert!(idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "idle_01.motion3.json"
+        ));
+        assert!(idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "idle_00"
+        ));
+        assert!(idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "motions/idle_00.motion3.json"
+        ));
+        assert!(!idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "2"
+        ));
+        assert!(!idle_motion_selector_matches(
+            &summary.idle_motion_files,
+            "missing"
+        ));
     }
 
     #[test]

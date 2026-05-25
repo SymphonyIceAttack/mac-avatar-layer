@@ -44,7 +44,7 @@ pub fn submit_camera_extension_request(kind: SystemExtensionRequestKind) -> Resu
 }
 
 pub fn activation_note() -> &'static str {
-    "System Extension activation requires the app bundle to live in /Applications and use a real signing identity."
+    "System Extension activation requires the app bundle to live in /Applications with Apple Developer Program signing/provisioning."
 }
 
 #[cfg(test)]

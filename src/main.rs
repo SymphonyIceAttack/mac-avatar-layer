@@ -71,7 +71,9 @@ fn main() {
     };
     let cli_model_path = cli.model_path.as_deref();
     let model_path = config.resolved_model_path(cli_model_path);
-    if let Err(error) = validate_model_manifest_path(&model_path, cli_model_path.is_some()) {
+    if let Err(error) =
+        validate_model_manifest_path(&model_path, cli_model_path, cli.config_path.as_deref())
+    {
         eprintln!("MacAvatarLayer failed to start: {error}");
         std::process::exit(1);
     }
@@ -167,10 +169,18 @@ fn set_working_directory_from_config(config_path: Option<&str>) -> Result<(), St
 }
 
 #[cfg(target_os = "macos")]
-fn validate_model_manifest_path(model_path: &str, from_cli: bool) -> Result<(), String> {
+fn validate_model_manifest_path(
+    model_path: &str,
+    cli_model_path: Option<&str>,
+    config_path: Option<&str>,
+) -> Result<(), String> {
     let path = std::path::Path::new(model_path);
     if !path.is_file() {
-        return Err(missing_model_manifest_message(model_path, from_cli));
+        return Err(missing_model_manifest_message(
+            model_path,
+            cli_model_path,
+            config_path,
+        ));
     }
     if !is_model3_path(path) {
         return Err(format!(
@@ -181,16 +191,27 @@ fn validate_model_manifest_path(model_path: &str, from_cli: bool) -> Result<(), 
 }
 
 #[cfg(target_os = "macos")]
-fn missing_model_manifest_message(model_path: &str, from_cli: bool) -> String {
-    if from_cli {
+fn missing_model_manifest_message(
+    model_path: &str,
+    cli_model_path: Option<&str>,
+    config_path: Option<&str>,
+) -> String {
+    if cli_model_path.is_some() {
         format!(
             "model manifest was not found: {model_path}\n\nThe path came from the command line. Run `cargo xtask list-models` to list local models, then retry with a listed .model3.json path."
         )
     } else {
-        let config_path = config::active_config_path();
+        let config_path = config_path
+            .map(str::to_string)
+            .unwrap_or_else(|| config::active_config_path().to_string());
         let select_flag = config::active_select_model_flag();
+        let select_model_command = if config_path == config::active_config_path() {
+            format!("cargo xtask select-model {select_flag} MODEL_PATH")
+        } else {
+            format!("edit `{config_path}` `[model].path`, or launch with a command-line MODEL_PATH")
+        };
         format!(
-            "model manifest was not found: {model_path}\n\nThe path came from `{config_path}` `[model].path`, or from the default `public/model/0.model3.json` when that key is unset.\n\nRun `cargo xtask list-models` to list local models, then run `cargo xtask select-model {select_flag} MODEL_PATH` to update `{config_path}`."
+            "model manifest was not found: {model_path}\n\nThe path came from `{config_path}` `[model].path`, or from the default `public/model/0.model3.json` when that key is unset.\n\nRun `cargo xtask list-models` to list local models, then {select_model_command}."
         )
     }
 }
@@ -1078,7 +1099,7 @@ mod tests {
 
     #[test]
     fn missing_config_model_message_points_to_selection_commands() {
-        let message = missing_model_manifest_message("public/missing.model3.json", false);
+        let message = missing_model_manifest_message("public/missing.model3.json", None, None);
 
         assert!(message.contains("cargo xtask list-models"));
         assert!(message.contains("cargo xtask select-model"));
@@ -1086,8 +1107,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_custom_config_model_message_names_custom_config() {
+        let message = missing_model_manifest_message(
+            "public/missing.model3.json",
+            None,
+            Some("/tmp/avatar/custom.toml"),
+        );
+
+        assert!(message.contains("/tmp/avatar/custom.toml"));
+        assert!(message.contains("edit `/tmp/avatar/custom.toml` `[model].path`"));
+        assert!(message.contains("command-line MODEL_PATH"));
+    }
+
+    #[test]
     fn missing_cli_model_message_names_command_line_source() {
-        let message = missing_model_manifest_message("public/missing.model3.json", true);
+        let message =
+            missing_model_manifest_message("public/missing.model3.json", Some("missing"), None);
 
         assert!(message.contains("command line"));
         assert!(message.contains("cargo xtask list-models"));

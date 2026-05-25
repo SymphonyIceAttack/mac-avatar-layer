@@ -11,17 +11,53 @@ pub struct MicrophoneInput {
     _stream: Stream,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MicrophoneStatus {
+    Disabled,
+    Running,
+    Failed,
+}
+
+impl MicrophoneStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Running => "running",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+pub struct MicrophoneStart {
+    pub input: Option<MicrophoneInput>,
+    pub status: MicrophoneStatus,
+    pub diagnostic: Option<String>,
+}
+
 impl MicrophoneInput {
-    pub fn from_config(config: &MicrophoneConfig) -> Option<Self> {
+    pub fn start(config: &MicrophoneConfig) -> MicrophoneStart {
         if !config.enabled {
-            return None;
+            return MicrophoneStart {
+                input: None,
+                status: MicrophoneStatus::Disabled,
+                diagnostic: None,
+            };
         }
 
         match Self::new() {
-            Ok(input) => Some(input),
+            Ok(input) => MicrophoneStart {
+                input: Some(input),
+                status: MicrophoneStatus::Running,
+                diagnostic: None,
+            },
             Err(error) => {
-                eprintln!("{}", microphone_startup_failure_message(&error));
-                None
+                let diagnostic = microphone_startup_failure_message(&error);
+                eprintln!("{diagnostic}");
+                MicrophoneStart {
+                    input: None,
+                    status: MicrophoneStatus::Failed,
+                    diagnostic: Some(diagnostic),
+                }
             }
         }
     }
@@ -146,5 +182,14 @@ mod tests {
         assert!(message.contains("device removed"));
         assert!(message.contains("macOS Microphone permission"));
         assert!(message.contains("[input.microphone]"));
+    }
+
+    #[test]
+    fn disabled_config_returns_disabled_start_status() {
+        let start = MicrophoneInput::start(&MicrophoneConfig::default());
+
+        assert!(start.input.is_none());
+        assert_eq!(start.status, MicrophoneStatus::Disabled);
+        assert_eq!(start.diagnostic, None);
     }
 }

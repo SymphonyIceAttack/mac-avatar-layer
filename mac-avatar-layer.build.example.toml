@@ -47,6 +47,7 @@ highlight_drawables = []
 highlight_parts = []
 
 [motion]
+# idle = "0"
 # expression = "smile"
 blink_interval = 3.8
 blink_duration = 0.18

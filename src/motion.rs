@@ -67,7 +67,7 @@ impl MotionController {
                     None
                 }
             });
-        let idle_motion = load_idle_motion(model);
+        let idle_motion = load_idle_motion(model, config.motion.idle.as_deref());
         let expression = load_expression(model, config.motion.expression.as_deref());
         let mouse_driver = MouseDriver::from_config(&config.input.mouse);
         let camera_driver = CameraDriver::from_config(&config.input.camera);
@@ -226,15 +226,25 @@ impl MotionController {
     }
 }
 
-fn load_idle_motion(model: &Live2dModel) -> Option<MotionPlayer> {
-    let motion = model
-        .motions
-        .get("Idle")
-        .or_else(|| model.motions.get("idle"))
-        .and_then(|motions| motions.first())?;
+fn load_idle_motion(model: &Live2dModel, requested: Option<&str>) -> Option<MotionPlayer> {
+    let (group, motions) = idle_motion_group(model)?;
+    let motion = select_idle_motion(motions, requested).or_else(|| {
+        if let Some(requested) = requested {
+            eprintln!(
+                "Idle motion '{requested}' was not found in {group}; using the first idle motion"
+            );
+        }
+        motions.first()
+    })?;
 
     match MotionClip::load(&motion.file) {
         Ok(clip) => {
+            if requested.is_none() && motions.len() > 1 {
+                println!(
+                    "Multiple idle motions found in {group}; using {}. Set [motion].idle to an index or file name to choose another.",
+                    motion.file.display()
+                );
+            }
             println!(
                 "Loaded idle motion: {} duration {:.3}s curves {}",
                 motion.file.display(),
@@ -255,6 +265,47 @@ fn load_idle_motion(model: &Live2dModel) -> Option<MotionPlayer> {
             None
         }
     }
+}
+
+fn idle_motion_group(model: &Live2dModel) -> Option<(&str, &[crate::live2d_model::ModelMotion])> {
+    model
+        .motions
+        .get("Idle")
+        .map(|motions| ("Idle", motions.as_slice()))
+        .or_else(|| {
+            model
+                .motions
+                .get("idle")
+                .map(|motions| ("idle", motions.as_slice()))
+        })
+}
+
+fn select_idle_motion<'a>(
+    motions: &'a [crate::live2d_model::ModelMotion],
+    requested: Option<&str>,
+) -> Option<&'a crate::live2d_model::ModelMotion> {
+    let requested = requested?.trim();
+    if requested.is_empty() {
+        return None;
+    }
+
+    if let Ok(index) = requested.parse::<usize>() {
+        return motions.get(index);
+    }
+
+    motions.iter().find(|motion| {
+        let file_name = motion.file.file_name().and_then(|name| name.to_str());
+        let file_stem = file_name.and_then(idle_motion_file_stem);
+        file_name == Some(requested)
+            || file_stem == Some(requested)
+            || motion.file.to_string_lossy() == requested
+    })
+}
+
+fn idle_motion_file_stem(file_name: &str) -> Option<&str> {
+    file_name
+        .strip_suffix(".motion3.json")
+        .or_else(|| file_name.strip_suffix(".json"))
 }
 
 fn load_expression(model: &Live2dModel, requested: Option<&str>) -> Option<ExpressionRuntime> {
@@ -825,9 +876,13 @@ fn positive_or(value: f32, fallback: f32) -> f32 {
 mod tests {
     use super::{
         CameraCalibration, CameraDriver, CameraMotionSample, MouthCombineMode, PoseInputMode,
-        apply_dead_zone, camera_pose_target, positive_or,
+        apply_dead_zone, camera_pose_target, idle_motion_group, parse_motion_segment_type,
+        parse_motion_segments, positive_or, select_idle_motion,
     };
     use crate::config::CameraConfig;
+    use crate::live2d_model::{Live2dModel, ModelMotion};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn dead_zone_zeroes_center_and_rescales_remaining_range() {
@@ -845,6 +900,97 @@ mod tests {
         assert_eq!(positive_or(12.0, 18.0), 12.0);
         assert_eq!(positive_or(0.0, 18.0), 18.0);
         assert_eq!(positive_or(-1.0, 18.0), 18.0);
+    }
+
+    #[test]
+    fn motion_segment_parser_reports_unsupported_and_truncated_data() {
+        let unsupported = parse_motion_segments(&[0.0, 1.0, 9.0])
+            .expect_err("unsupported type should report an error");
+        assert!(unsupported.contains("unsupported segment type 9"));
+        assert!(unsupported.contains("offset 2"));
+
+        let truncated = parse_motion_segments(&[0.0, 1.0, 0.0, 0.5])
+            .expect_err("truncated segment should report an error");
+        assert!(truncated.contains("linear end value"));
+        assert!(truncated.contains("total values 4"));
+
+        let non_integer = parse_motion_segment_type(1.5, 4)
+            .expect_err("fractional segment type should report an error");
+        assert!(non_integer.contains("must be an integer"));
+        assert!(non_integer.contains("offset 4"));
+    }
+
+    #[test]
+    fn idle_motion_selection_accepts_index_file_name_and_stem() {
+        let motions = vec![
+            ModelMotion {
+                file: PathBuf::from("motions/idle_00.motion3.json"),
+                fade_in_time: None,
+                fade_out_time: None,
+            },
+            ModelMotion {
+                file: PathBuf::from("motions/idle_01.motion3.json"),
+                fade_in_time: None,
+                fade_out_time: None,
+            },
+        ];
+
+        assert_eq!(
+            select_idle_motion(&motions, Some("1"))
+                .expect("index should select motion")
+                .file,
+            PathBuf::from("motions/idle_01.motion3.json")
+        );
+        assert_eq!(
+            select_idle_motion(&motions, Some("idle_01.motion3.json"))
+                .expect("file name should select motion")
+                .file,
+            PathBuf::from("motions/idle_01.motion3.json")
+        );
+        assert_eq!(
+            select_idle_motion(&motions, Some("idle_00"))
+                .expect("file stem should select motion")
+                .file,
+            PathBuf::from("motions/idle_00.motion3.json")
+        );
+        assert!(select_idle_motion(&motions, Some("missing")).is_none());
+    }
+
+    #[test]
+    fn idle_motion_group_prefers_pascal_case_idle_group() {
+        let mut motions = HashMap::new();
+        motions.insert(
+            "idle".to_string(),
+            vec![ModelMotion {
+                file: PathBuf::from("lower.motion3.json"),
+                fade_in_time: None,
+                fade_out_time: None,
+            }],
+        );
+        motions.insert(
+            "Idle".to_string(),
+            vec![ModelMotion {
+                file: PathBuf::from("pascal.motion3.json"),
+                fade_in_time: None,
+                fade_out_time: None,
+            }],
+        );
+        let model = Live2dModel {
+            manifest_path: PathBuf::from("model.model3.json"),
+            root_dir: PathBuf::from("."),
+            version: 3,
+            moc: PathBuf::from("model.moc3"),
+            textures: vec![PathBuf::from("texture.png")],
+            physics: None,
+            display_info: None,
+            motions,
+            expressions: Vec::new(),
+            groups: Vec::new(),
+        };
+
+        let (group, motions) = idle_motion_group(&model).expect("idle group should exist");
+        assert_eq!(group, "Idle");
+        assert_eq!(motions[0].file, PathBuf::from("pascal.motion3.json"));
     }
 
     #[test]
@@ -1128,10 +1274,21 @@ struct MotionCurve {
 
 impl MotionCurve {
     fn from_manifest(manifest: MotionCurveManifest) -> Option<Self> {
+        let segments = match parse_motion_segments(&manifest.segments) {
+            Ok(segments) => segments,
+            Err(error) => {
+                eprintln!(
+                    "Skipping motion curve target={} id={}: {error}",
+                    manifest.target, manifest.id
+                );
+                return None;
+            }
+        };
+
         Some(Self {
             target: manifest.target,
             id: manifest.id,
-            segments: parse_motion_segments(&manifest.segments)?,
+            segments,
         })
     }
 
@@ -1153,6 +1310,7 @@ impl MotionCurve {
     }
 }
 
+#[derive(Debug)]
 enum MotionSegment {
     Linear {
         start_time: f32,
@@ -1235,10 +1393,15 @@ impl MotionSegment {
     }
 }
 
-fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
+fn parse_motion_segments(values: &[f32]) -> Result<Vec<MotionSegment>, String> {
     if values.len() < 2 {
-        return None;
+        return Err(format!(
+            "motion segment data needs an initial time/value pair, got {} value(s)",
+            values.len()
+        ));
     }
+    ensure_finite_motion_value(values[0], 0, "initial time")?;
+    ensure_finite_motion_value(values[1], 1, "initial value")?;
 
     let mut segments = Vec::new();
     let mut index = 2;
@@ -1246,12 +1409,13 @@ fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
     let mut start_value = values[1];
 
     while index < values.len() {
-        let segment_type = values[index] as i32;
+        let segment_offset = index;
+        let segment_type = parse_motion_segment_type(values[index], segment_offset)?;
         index += 1;
         match segment_type {
             0 => {
-                let end_time = *values.get(index)?;
-                let end_value = *values.get(index + 1)?;
+                let end_time = motion_segment_value(values, index, "linear end time")?;
+                let end_value = motion_segment_value(values, index + 1, "linear end value")?;
                 index += 2;
                 segments.push(MotionSegment::Linear {
                     start_time,
@@ -1263,12 +1427,15 @@ fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
                 start_value = end_value;
             }
             1 => {
-                let control1_time = *values.get(index)?;
-                let control1_value = *values.get(index + 1)?;
-                let control2_time = *values.get(index + 2)?;
-                let control2_value = *values.get(index + 3)?;
-                let end_time = *values.get(index + 4)?;
-                let end_value = *values.get(index + 5)?;
+                let control1_time = motion_segment_value(values, index, "bezier control1 time")?;
+                let control1_value =
+                    motion_segment_value(values, index + 1, "bezier control1 value")?;
+                let control2_time =
+                    motion_segment_value(values, index + 2, "bezier control2 time")?;
+                let control2_value =
+                    motion_segment_value(values, index + 3, "bezier control2 value")?;
+                let end_time = motion_segment_value(values, index + 4, "bezier end time")?;
+                let end_value = motion_segment_value(values, index + 5, "bezier end value")?;
                 index += 6;
                 segments.push(MotionSegment::Bezier {
                     start_time,
@@ -1284,8 +1451,8 @@ fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
                 start_value = end_value;
             }
             2 => {
-                let end_time = *values.get(index)?;
-                let end_value = *values.get(index + 1)?;
+                let end_time = motion_segment_value(values, index, "stepped end time")?;
+                let end_value = motion_segment_value(values, index + 1, "stepped end value")?;
                 index += 2;
                 segments.push(MotionSegment::Stepped {
                     start_value,
@@ -1296,8 +1463,9 @@ fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
                 start_value = end_value;
             }
             3 => {
-                let end_time = *values.get(index)?;
-                let end_value = *values.get(index + 1)?;
+                let end_time = motion_segment_value(values, index, "inverse stepped end time")?;
+                let end_value =
+                    motion_segment_value(values, index + 1, "inverse stepped end value")?;
                 index += 2;
                 segments.push(MotionSegment::InverseStepped {
                     end_time,
@@ -1306,11 +1474,44 @@ fn parse_motion_segments(values: &[f32]) -> Option<Vec<MotionSegment>> {
                 start_time = end_time;
                 start_value = end_value;
             }
-            _ => return None,
+            _ => {
+                return Err(format!(
+                    "unsupported segment type {segment_type} at offset {segment_offset}; supported types are 0 linear, 1 bezier, 2 stepped, 3 inverse stepped"
+                ));
+            }
         }
     }
 
-    Some(segments)
+    Ok(segments)
+}
+
+fn parse_motion_segment_type(value: f32, offset: usize) -> Result<i32, String> {
+    ensure_finite_motion_value(value, offset, "segment type")?;
+    if value.fract().abs() > f32::EPSILON {
+        return Err(format!(
+            "segment type at offset {offset} must be an integer, got {value}"
+        ));
+    }
+    Ok(value as i32)
+}
+
+fn motion_segment_value(values: &[f32], offset: usize, label: &str) -> Result<f32, String> {
+    let value = *values.get(offset).ok_or_else(|| {
+        format!(
+            "truncated segment data while reading {label} at offset {offset}; total values {}",
+            values.len()
+        )
+    })?;
+    ensure_finite_motion_value(value, offset, label)?;
+    Ok(value)
+}
+
+fn ensure_finite_motion_value(value: f32, offset: usize, label: &str) -> Result<(), String> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(format!("{label} at offset {offset} is not finite: {value}"))
+    }
 }
 
 fn normalized_time(time: f32, start: f32, end: f32) -> f32 {

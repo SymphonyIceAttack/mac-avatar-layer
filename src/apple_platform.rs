@@ -15,8 +15,9 @@ use objc2::{ClassType, MainThreadMarker, MainThreadOnly, msg_send};
 use objc2_app_kit::NSImage;
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn,
-    NSEventMask, NSMenu, NSMenuItem, NSPanel, NSStatusBar, NSVariableStatusItemLength, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
+    NSEvent, NSEventMask, NSMenu, NSMenuItem, NSPanel, NSScreen, NSStatusBar,
+    NSVariableStatusItemLength, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGWindowLevelForKey, CGWindowLevelKey};
@@ -35,6 +36,12 @@ pub struct LayerFrame {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+#[derive(Clone, Copy)]
+pub struct LayerPoint {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +189,11 @@ pub unsafe fn panel_occlusion_state(panel: *mut c_void) -> u64 {
 pub unsafe fn panel_window_number(panel: *mut c_void) -> i64 {
     let panel = unsafe { borrowed_panel(panel) };
     panel.windowNumber() as i64
+}
+
+pub unsafe fn window_frame(window: *mut c_void) -> LayerFrame {
+    let window = unsafe { borrowed_window(window) };
+    layer_frame(window.frame())
 }
 
 pub unsafe fn order_panel_front_regardless(panel: *mut c_void) {
@@ -448,6 +460,38 @@ pub fn open_path_in_workspace(path: &Path, is_directory: bool) -> Result<(), Str
     open_workspace_url_object(&url, path.display())
 }
 
+pub fn screen_union_frame() -> Option<LayerFrame> {
+    let mtm = MainThreadMarker::new()?;
+    let screens = NSScreen::screens(mtm);
+    let count = screens.count();
+    if count == 0 {
+        return None;
+    }
+
+    let mut union = None;
+    for index in 0..count {
+        let frame = layer_frame(screens.objectAtIndex(index).frame());
+        union = Some(match union {
+            Some(previous) => union_layer_frames(previous, frame),
+            None => frame,
+        });
+    }
+    union
+}
+
+pub fn main_screen_frame() -> Option<LayerFrame> {
+    let mtm = MainThreadMarker::new()?;
+    NSScreen::mainScreen(mtm).map(|screen| layer_frame(screen.frame()))
+}
+
+pub fn global_mouse_location() -> LayerPoint {
+    let point = NSEvent::mouseLocation();
+    LayerPoint {
+        x: point.x,
+        y: point.y,
+    }
+}
+
 #[cfg(feature = "camera-tracking")]
 pub fn local_only_camera_message(detail: &str) -> String {
     format!(
@@ -567,7 +611,6 @@ fn cg_rect(frame: LayerFrame) -> CGRect {
     }
 }
 
-#[cfg(feature = "metal-renderer")]
 fn layer_frame(rect: CGRect) -> LayerFrame {
     LayerFrame {
         x: rect.origin.x,
@@ -616,6 +659,19 @@ fn configure_transparent_panel(
         );
     }
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
+}
+
+fn union_layer_frames(a: LayerFrame, b: LayerFrame) -> LayerFrame {
+    let min_x = a.x.min(b.x);
+    let min_y = a.y.min(b.y);
+    let max_x = (a.x + a.width).max(b.x + b.width);
+    let max_y = (a.y + a.height).max(b.y + b.height);
+    LayerFrame {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
 }
 
 unsafe fn set_text_layer_string(layer: &CATextLayer, text: &str) {
