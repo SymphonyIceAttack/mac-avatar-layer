@@ -16,8 +16,17 @@ For architecture notes, advanced commands, OBS/capture details, configuration re
 xcode-select --install
 ```
 
-- Live2D Cubism Native SDK installed locally. The project does not commit or automatically download the SDK.
+- Live2D Cubism SDK for Native installed locally. Download it from
+  [Live2D Cubism SDK](https://www.live2d.com/en/sdk/about/) by choosing
+  `Cubism SDK for Native`. The project does not commit or automatically
+  download the SDK.
 - A local Live2D model, usually selected as `public/model/0.model3.json`.
+
+Note: Live2D's official SDK page lists the official `Cubism SDK for Native`
+sample renderer support matrix. It does not provide a macOS Metal sample
+renderer there. MacAvatarLayer still runs on macOS with Metal because this
+project uses Cubism Core for model evaluation and implements its own Rust/Metal
+renderer instead of using Live2D's sample renderer.
 
 ## Local Asset Layout
 
@@ -61,7 +70,9 @@ CUBISM_CORE_INCLUDE_DIR=/path/to/Core/include
 CUBISM_CORE_LIB_DIR=/path/to/Core/lib/macos/arm64
 ```
 
-No project command downloads the Live2D SDK. `cargo xtask start`, `cargo xtask run-metal`, and `cargo xtask doctor` only detect local SDK paths and print repair instructions when files are missing.
+No project command downloads the Live2D SDK. `cargo xtask start`,
+`cargo xtask run-metal`, and `cargo xtask doctor` only detect local SDK paths
+and print repair instructions when files are missing.
 
 ## Quick Start
 
@@ -135,7 +146,9 @@ cargo xtask build-app --release
 
 ## Troubleshooting
 
-If `doctor` or `start` reports missing `Live2DCubismCore.h`, install the Live2D Cubism Native SDK locally or set `LIVE2D_CUBISM_SDK_NATIVE_DIR` / `CUBISM_CORE_INCLUDE_DIR`.
+If `doctor` or `start` reports missing `Live2DCubismCore.h`, install
+[Live2D Cubism SDK for Native](https://www.live2d.com/en/sdk/about/) locally or
+set `LIVE2D_CUBISM_SDK_NATIVE_DIR` / `CUBISM_CORE_INCLUDE_DIR`.
 
 If it reports missing `libLive2DCubismCore.a`, check `CUBISM_CORE_LIB_DIR` or make sure the SDK has the matching macOS library for your architecture.
 

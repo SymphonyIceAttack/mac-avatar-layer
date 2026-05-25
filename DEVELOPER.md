@@ -13,6 +13,11 @@ focus changes. The app now loads local Live2D Cubism assets, evaluates `.moc3`
 through Cubism Core, renders meshes with Metal, and drives parameters from idle
 motion, expressions, physics, mouse input, and microphone volume.
 
+Live2D's official `Cubism SDK for Native` support matrix documents the sample
+renderer implementations shipped by Live2D. It does not ship a macOS Metal
+sample renderer, but this project does not depend on that sample renderer. It
+uses Cubism Core for model evaluation and owns a Rust/Metal renderer for macOS.
+
 ## Current Prototype
 
 - Creates a native AppKit borderless floating window from Rust.
@@ -120,10 +125,11 @@ The project still needs local assets that cannot be committed to the repository:
 - Live2D Cubism Native SDK under `public/CubismSdkForNative`, or the
   `LIVE2D_CUBISM_SDK_NATIVE_DIR`, `CUBISM_CORE_INCLUDE_DIR`, and
   `CUBISM_CORE_LIB_DIR` environment variables. `cargo xtask start` does not
-  download the SDK automatically; download it from Live2D's official site and
-  install it locally first. No project command downloads the Live2D SDK; xtask
-  commands only detect the local SDK path and print repair instructions when it
-  is missing.
+  download the SDK automatically; download
+  [Live2D Cubism SDK for Native](https://www.live2d.com/en/sdk/about/) from
+  Live2D's official SDK page and install it locally first. No project command
+  downloads the Live2D SDK; xtask commands only detect the local SDK path and
+  print repair instructions when it is missing.
 - A selected `.model3.json`, usually `public/model/0.model3.json`.
 
 To choose a different model before starting:
