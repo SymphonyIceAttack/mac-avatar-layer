@@ -196,13 +196,12 @@ cargo xtask capture-offscreen-matrix
 cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
-cargo xtask configure-obs-recording --build
-cargo xtask configure-obs-recording --build --offscreen
+cargo xtask configure-obs-virtual-camera --build
+cargo xtask configure-obs-virtual-camera --build --offscreen
 cargo xtask doctor
 cargo xtask fix-wwdr-cert
 cargo xtask list-models
 cargo xtask mao-mask-audit
-cargo xtask provision-camera-profiles
 cargo xtask probe-risk-models public/model
 cargo xtask quality-visual-diff
 cargo xtask ren-visual-diff
@@ -219,20 +218,13 @@ cargo xtask start
 cargo xtask tune-input --build camera expressive
 ```
 
-System Camera Source / virtual camera prototype commands are intentionally not
-listed above as normal workflow commands because they are not currently usable as
-an OBS input source. See the System Camera Source section before running
-`configure-internal-output`, `virtual-camera-readiness`,
-`camera-extension-plan`, or `build-camera-extension`.
-
 `cargo xtask build-app` and `cargo xtask run-metal` do not require an Apple
 developer certificate for the normal desktop-window workflow. If a local Apple
 codesigning identity exists in Keychain, xtask uses it; otherwise the app is
 signed ad-hoc, which is enough for local launching, camera permission prompts,
 and OBS/window-capture use.
 
-The signing notes below are only for the System Camera Source prototype or for
-contributors who intentionally force `MAC_AVATAR_LAYER_CODESIGN_IDENTITY`. If
+If contributors intentionally force `MAC_AVATAR_LAYER_CODESIGN_IDENTITY` and
 Xcode shows an Apple Development certificate but `security` still reports no
 valid codesigning identity, first check the local identity list:
 
@@ -252,12 +244,12 @@ identity:
 cargo xtask fix-wwdr-cert
 ```
 
-The expected result is one valid Apple Development identity for System Camera
-Source work. If the identity is still not trusted, open Keychain Access, search
-for `Apple Worldwide Developer Relations Certification Authority`, remove the
-expired 2023 WWDR intermediate certificate, keep the G3 certificate that expires
-in 2030, and leave its trust setting at `Use System Defaults`. The repair
-command stores the downloaded certificate under
+The expected result is one valid Apple Development identity. If the identity is
+still not trusted, open Keychain Access, search for `Apple Worldwide Developer
+Relations Certification Authority`, remove the expired 2023 WWDR intermediate
+certificate, keep the G3 certificate that expires in 2030, and leave its trust
+setting at `Use System Defaults`. The repair command stores the downloaded
+certificate under
 `target/codesign/AppleWWDRCAG3.cer`, so it remains a generated local artifact
 and is not committed.
 
@@ -312,11 +304,22 @@ window run path. App stdout/stderr are written under
 
 ### OBS Window Capture Preset
 
-The current OBS path is the normal transparent macOS window. To configure a
-local profile for OBS Window Capture or macOS Screen Capture:
+The supported camera-output path is OBS, not an in-project virtual camera
+driver:
+
+```text
+MacAvatarLayer -> OBS Window Capture -> OBS Virtual Camera -> Zoom/Discord/Meet
+```
+
+This keeps virtual-camera implementation, signing, and camera-app compatibility
+inside OBS Studio. MacAvatarLayer only needs to expose a stable transparent
+window for OBS to capture. OBS's own
+[Virtual Camera Guide](https://obsproject.com/kb/virtual-camera-guide) covers
+the `Start Virtual Camera` side of the workflow. To configure a local profile
+for OBS Virtual Camera:
 
 ```bash
-cargo xtask configure-obs-recording --build
+cargo xtask configure-obs-virtual-camera --build
 cargo xtask run-metal --release
 ```
 
@@ -324,7 +327,7 @@ To keep the avatar off the visible desktop while still exposing a normal OBS
 Window Capture source, use the offscreen variant:
 
 ```bash
-cargo xtask configure-obs-recording --build --offscreen
+cargo xtask configure-obs-virtual-camera --build --offscreen
 cargo xtask run-metal --release
 ```
 
@@ -335,19 +338,20 @@ desktop. Use `--desktop` to move the same capture-friendly window back to the
 visible desktop.
 
 The same preset is available in the running app from the `MA` menu under
-`OBS / Recording Output` as `Apply Desktop Window Capture Preset...` and
-`Apply Offscreen Window Capture Preset...`. The menu action writes the active
-dev/build TOML profile and relaunches the app. The active recording output
+`OBS / Virtual Camera Output` as `Apply OBS Virtual Camera Desktop Preset...`
+and `Apply OBS Virtual Camera Offscreen Preset...`. The menu action writes the
+active dev/build TOML profile and relaunches the app. The active OBS output
 preset uses the same native macOS menu checkmark as the other selectable menu
-options; desktop window capture, offscreen window capture, and system camera
-source are mutually exclusive.
+options; desktop window capture and offscreen window capture are mutually
+exclusive.
 
-The offscreen preset is a pragmatic OBS internal-recording path, not a real
-system camera source. It still renders a normal WindowServer window for OBS to
-capture, but moves that window outside the visible desktop instead of hiding or
-destroying it. A true no-window output still requires a project-owned frame
-output path such as an offscreen Metal render target plus IOSurface and a macOS
-virtual camera output.
+The offscreen preset is a pragmatic OBS recording path, not a real system camera
+source. It still renders a normal WindowServer window for OBS to capture, but
+moves that window outside the visible desktop instead of hiding or destroying
+it. Recent local stutter testing shows that far-offscreen transparent-window
+capture can be less reliable than desktop-visible capture on some OBS/macOS
+setups, so treat offscreen as a convenience preset and keep desktop capture as
+the stable baseline.
 
 The preset writes the build profile to a transparent `screen_saver` level
 window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
@@ -359,193 +363,6 @@ app/window enumeration, marks the window as read-only shareable for WindowServer
 capture, and moves it outside the visible desktop for the offscreen preset. Use
 `--dev` instead of `--build` if you want the same preset in the development
 profile.
-
-### System Camera Source Preset
-
-Status: **currently unavailable as a usable OBS input source**. The menu item
-`Apply System Camera Source...` and the related xtask commands below are
-prototype/scaffold commands only. They may write config files, build prototype
-bundles, or generate readiness reports, but they do not currently produce a
-reliable `MacAvatarLayer Camera` source in OBS, QuickRecord, Zoom, Discord, or
-other camera consumers.
-
-This path is blocked unless the Apple ID belongs to a paid Apple Developer
-Program team and the app plus Camera Extension are signed with matching
-provisioning profiles that include the required System Extension entitlement.
-Free Apple IDs can create local development certificates, but they cannot
-create/download the provisioning profiles needed for the System Extension
-entitlement. Until this path is completed, the supported OBS path is the Desktop
-Window Capture or Offscreen Window Capture preset above.
-
-The first no-desktop output prototype is available from the `MA` menu under
-`OBS / Recording Output` as `Apply System Camera Source...`, but it should be
-treated as disabled for end users. This single option enables the IOSurface
-producer and submits the Camera Extension activation request on the next launch.
-It does not create a desktop avatar window. The same prototype preset can be
-written from the terminal:
-
-```bash
-cargo xtask configure-internal-output --build   # prototype only; not a working OBS source
-cargo xtask run-metal --release                 # may fail or run without a usable camera source
-```
-
-It writes:
-
-```toml
-[output]
-mode = "internal"
-
-[output.internal]
-width = 1080.0
-height = 1080.0
-producer = "iosurface"
-manifest_path = "target/internal-output/iosurface.json"
-obs_preview_window = false
-activate_virtual_camera = true
-```
-
-After relaunch, the Metal renderer writes every frame into an offscreen
-IOSurface texture without displaying Live2D on the desktop. The renderer logs
-`renderer_event=internal_output_frame_summary`. When built with
-`iosurface-output`, the internal preset creates an IOSurface-backed Metal
-texture and logs `renderer_event=iosurface_output_created` with its IOSurface
-id. It also writes a small heartbeat manifest to
-`target/internal-output/iosurface.json` with the current IOSurface id, texture
-size, pixel format, frame count, update timestamp, and the camera handoff
-contract: `1080x1080`, `BGRA8Unorm`, `60fps`. This is the GPU sharing
-foundation for the project-owned virtual camera output. The project does not
-plan to ship an OBS plugin. In this preset OBS should consume MacAvatarLayer
-through the system camera source once macOS approves `MacAvatarLayer Camera`;
-there is intentionally no desktop window fallback.
-
-The related readiness command is also diagnostic only; it does not install or
-enable a usable camera:
-
-```bash
-cargo xtask virtual-camera-readiness --build
-```
-
-The command writes `target/virtual-camera/readiness.md`, checking the active
-profile, internal IOSurface manifest, app wrapper, and codesigning state for the
-future project-owned macOS virtual camera path.
-
-The Camera Extension commands below are prototype/build-scaffold commands, not a
-supported setup flow for OBS:
-
-```bash
-cargo xtask camera-extension-plan --build
-cargo xtask build-camera-extension --build
-cargo test --features "virtual-camera-extension"
-```
-
-This writes `target/virtual-camera/camera-extension-plan.md` plus
-`CameraExtension.Info.plist`, `CameraExtension.entitlements`, and
-`ContainerApp.entitlements` templates under
-`target/virtual-camera/camera-extension-prototype/`. The Rust binding stack for
-this path is `objc2-core-media-io` plus `objc2-core-video`, matching the rest of
-the project's `objc2-*` Apple-framework bridge approach. The target camera name
-is `MacAvatarLayer Camera`.
-
-`cargo xtask build-camera-extension --build` also builds the standalone
-prototype binary and packages it as
-`target/virtual-camera/MacAvatarLayer Camera.systemextension`. This bundle is
-still a scaffold: it links the CoreMediaIO/CoreVideo bindings, carries the
-right identifiers, and declares the provider/device/stream contract for a
-1080x1080 60fps BGRA camera stream fed by the IOSurface manifest. It also
-defines first-pass Rust/ObjC bridge classes for
-`CMIOExtensionProviderSource`, `CMIOExtensionDeviceSource`, and
-`CMIOExtensionStreamSource`, then wires them into a
-`CMIOExtensionProvider -> CMIOExtensionDevice -> CMIOExtensionStream` object
-graph. The extension now calls `CMIOExtensionProvider::startServiceWithProvider`
-and, after a camera client starts the stream, attempts to open the latest
-IOSurface id from `target/internal-output/iosurface.json`, wrap it as a
-`CVPixelBuffer`, build a timestamped `CMSampleBuffer`, and send it through the
-CMIO stream. This is still a prototype and needs real System Extension
-installation/signing validation before it appears as a reliable camera in all
-consumer apps.
-
-`cargo xtask build-app --release` now embeds that prototype bundle under the
-local app wrapper at
-`target/dev-app/MacAvatarLayer Dev.app/Contents/Library/SystemExtensions/`.
-When the build profile is configured for `Apply System Camera Source...`, the
-command also copies the signed app wrapper to
-`/Applications/MacAvatarLayer Dev.app`, because macOS System Extension
-activation is only accepted from an app bundle in `/Applications`.
-
-The generated files are not a finished installed camera yet. A real macOS
-virtual camera still needs Apple Developer Program signing/provisioning and
-validation from `/Applications`. When `activate_virtual_camera = true`, the app
-submits Apple's `OSSystemExtensionManager` activation request for the embedded
-prototype extension at launch when built with the default xtask feature set. On
-an ad-hoc signed local bundle this is expected to fail or require system
-approval; the menu preset is the activation prototype, not a finished
-distributable camera. The planned frame path remains:
-
-Important: a visible OBS camera source requires the Camera Extension to be
-listed by `systemextensionsctl list` as `io.github.symphonyiceattack.mac-avatar-layer.CameraExtension`
-with `[activated enabled]`. The app and extension must be signed with the
-required System Extension entitlement and valid embedded provisioning profiles
-from an Apple Developer Program team. A local Apple Development certificate can
-sign the bundles, but without matching provisioning profiles macOS may reject or
-kill the app before it can register the camera, and OBS will not show
-`MacAvatarLayer Camera`. If Apple Developer shows `This resource is only for
-developers enrolled in a developer program or members of an organization’s team
-in a developer program`, this feature cannot be completed with the current
-Apple ID. Check the current state with:
-
-```bash
-cargo xtask virtual-camera-readiness --build
-systemextensionsctl list
-```
-
-Put local provisioning profiles in `public/provisioning/` so they stay out of
-Git:
-
-```text
-public/provisioning/
-  ContainerApp.provisionprofile
-  CameraExtension.provisionprofile
-```
-
-This directory can be created automatically, but the profiles themselves must
-be issued by Apple Developer Program/Xcode. To avoid hand-copying files, run:
-
-```bash
-cargo xtask provision-camera-profiles
-```
-
-The command scans Xcode's normal profile cache at
-`~/Library/MobileDevice/Provisioning Profiles` and Xcode's newer
-`~/Library/Developer/Xcode/UserData/Provisioning Profiles` cache. It validates
-the bundle id, app group, and System Extension entitlement, then copies the
-matching profiles into `public/provisioning/`. If you downloaded the profiles
-into another folder:
-
-```bash
-cargo xtask provision-camera-profiles --from ~/Downloads
-```
-
-Use `--force` to replace already-copied valid profiles.
-
-Or point xtask at profiles stored elsewhere:
-
-```bash
-MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE=/path/to/ContainerApp.provisionprofile \
-MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE=/path/to/CameraExtension.provisionprofile \
-  cargo xtask build-app --release
-```
-
-`cargo xtask build-app --release` embeds those files as
-`Contents/embedded.provisionprofile` before signing the app and the
-`.systemextension`, validates their bundle id/app group/System Extension
-entitlement contract, then copies the app to `/Applications` when the System
-Camera Source preset is active. If a profile is for the wrong bundle id or does
-not include the required entitlement, xtask stops before signing so the failure
-is visible at build time.
-
-```text
-Live2D -> Metal -> IOSurface -> CVPixelBuffer/CMSampleBuffer -> CoreMediaIO Camera Extension
-```
 
 ### ScreenCaptureKit Probe
 

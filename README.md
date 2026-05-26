@@ -131,6 +131,26 @@ cargo xtask start
 
 Microphone permission is only needed when microphone input is enabled. If startup reports a microphone failure, allow the launching terminal/app under macOS System Settings > Privacy & Security > Microphone, or disable microphone input in the active config.
 
+## OBS Virtual Camera
+
+For Zoom, Discord, Meet, and similar apps, use OBS as the virtual camera layer:
+
+```text
+MacAvatarLayer -> OBS Window Capture -> OBS Virtual Camera -> video app
+```
+
+In OBS, add a Window Capture source for `MacAvatarLayer OBS Source`, then click
+`Start Virtual Camera` as described in the
+[OBS Virtual Camera Guide](https://obsproject.com/kb/virtual-camera-guide).
+MacAvatarLayer does not need Apple Developer Program signing for this workflow.
+
+Configure the local build profile for this workflow:
+
+```bash
+cargo xtask configure-obs-virtual-camera --build
+cargo xtask start
+```
+
 ## Useful Commands
 
 ```bash
@@ -139,6 +159,7 @@ cargo xtask start
 cargo xtask start public/model/0.model3.json
 cargo xtask list-models
 cargo xtask select-model --build public/model/0.model3.json
+cargo xtask configure-obs-virtual-camera --build
 cargo xtask run-metal        # development profile
 cargo xtask run-metal --release
 cargo xtask build-app --release
@@ -160,4 +181,4 @@ cargo xtask select-model --build MODEL_PATH
 cargo xtask start
 ```
 
-The normal desktop-window workflow does not require an Apple Developer Program account or developer signing certificate. The System Camera Source / Camera Extension prototype is separate and still requires Apple Developer Program provisioning; see [DEVELOPER.md](DEVELOPER.md).
+The OBS workflow does not require an Apple Developer Program account, developer signing certificate, or project-owned virtual-camera driver.

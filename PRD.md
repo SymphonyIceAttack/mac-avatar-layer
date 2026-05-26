@@ -240,21 +240,25 @@ Priority 4: Modern macOS Output And Capture
 - Treat OBS integration as standard window capture for now: users should use
   OBS Window Capture or macOS Screen Capture against the transparent avatar
   window.
+- Treat OBS Virtual Camera as the recommended camera-app bridge: MacAvatarLayer
+  outputs a transparent window, OBS captures it, and OBS exposes the final scene
+  to Zoom, Discord, Meet, and similar apps as `OBS Virtual Camera`.
 - Support an offscreen-window OBS preset as the current practical
   "desktop-hidden but OBS-capturable" path. It keeps a real transparent
   capture-friendly macOS window alive, moves it outside the visible desktop,
-  and avoids System Extension or Apple Developer Program requirements.
-- Keep the System Camera Source path documented as a blocked prototype unless
-  the developer has access to a paid Apple Developer Program team with
-  provisioning profiles for the container app and Camera Extension. Free Apple
-  IDs can still build and run the transparent-window product path.
+  and avoids System Extension or Apple Developer Program requirements. Local
+  stutter monitoring shows far-offscreen capture can be less reliable than
+  visible desktop capture on some OBS/macOS setups, so keep desktop capture as
+  the stability baseline and treat offscreen as a convenience mode.
+- Keep project-owned virtual-camera driver work out of the product path. OBS
+  owns the virtual-camera implementation for the recommended workflow.
 - Prototype ScreenCaptureKit capture of the current avatar window as the next
   capture research task. Validate Screen Recording permission behavior, window
   selection, transparent-background results, and Space-switch/display-sleep
   behavior.
-- Use IOSurface + Metal texture sharing as the internal handoff foundation for
-  the future in-project macOS virtual camera output. Bare IOSurface remains a
-  diagnostic/developer artifact, not a user-visible feature.
+- Keep IOSurface + Metal texture sharing as internal research infrastructure.
+  Bare IOSurface remains a diagnostic/developer artifact, not a user-visible
+  feature or required OBS workflow.
 
 Priority 5: macOS Productization
 
@@ -274,14 +278,15 @@ Priority 5: macOS Productization
   Metal renderer unless a separate renderer rewrite is planned.
 - Do not restore Syphon output as a product path.
 - Do not add NDI or an OBS plugin in this phase.
-- Do not split product output into an OBS-specific plugin. Future no-desktop
-  capture should stay inside this project as a macOS virtual camera or another
-  system-level output that OBS, QuickRecord, and video apps can consume
-  normally.
+- Do not require MacAvatarLayer users to install or activate a project-owned
+  virtual-camera driver for normal Zoom/Discord/Meet usage. OBS Virtual Camera
+  is the supported virtual-camera layer for the next phase.
+- Do not split product output into an OBS-specific plugin. MacAvatarLayer should
+  remain a normal transparent-window source that OBS can capture.
 - Do not expose bare IOSurface sharing as a user-facing feature before a
   concrete downstream consumer exists.
-- Do not treat the System Camera Source preset as a supported user-facing OBS
-  path while Apple Developer Program provisioning profiles are unavailable.
+- Do not reintroduce project-owned virtual-camera signing, provisioning, or
+  activation as a prerequisite for normal local use.
 
 ## Requirements
 
@@ -840,41 +845,37 @@ Status: next product milestone.
   dev/build TOML and relaunches the local `.app`.
 - Removed: Syphon is no longer a product path. The app now focuses on normal
   transparent macOS window output for OBS Window Capture and macOS Screen
-  Capture. Future high-performance frame sharing should evaluate
-  ScreenCaptureKit, Metal, or IOSurface instead of restoring Syphon.
-- Done: add `cargo xtask configure-obs-recording [--dev|--build]` as the
-  supported OBS Window Capture preset. It keeps the normal transparent window
-  path, sets `[app].window_capture_friendly = true`, disables diagnostics and
-  the ScreenCaptureKit probe, and enables higher renderer quality settings for
-  Window Capture/macOS Screen Capture.
-- Done: `cargo xtask configure-obs-recording [--dev|--build] --offscreen`
+  Capture. For camera-app usage, OBS Virtual Camera is the recommended bridge
+  from the captured OBS scene to Zoom, Discord, Meet, and similar apps. Future
+  high-performance frame sharing should evaluate ScreenCaptureKit, Metal, or
+  IOSurface as research paths instead of restoring Syphon.
+- Done: add `cargo xtask configure-obs-virtual-camera [--dev|--build]` as the
+  supported OBS Virtual Camera setup command. It writes the normal transparent
+  OBS Window Capture profile, sets `[app].window_capture_friendly = true`,
+  disables diagnostics and the ScreenCaptureKit probe, enables higher renderer
+  quality settings, and prints the OBS `Start Virtual Camera` handoff steps.
+- Done: `cargo xtask configure-obs-virtual-camera [--dev|--build] --offscreen`
   writes the same capture-friendly window path but sets `[app].window_x` to a
   far negative coordinate, so OBS can still select `MacAvatarLayer OBS Source`
-  while the avatar stays outside the visible desktop.
+  while the avatar stays outside the visible desktop. This remains a convenience
+  preset rather than the stability baseline because local monitor reports show
+  OBS/macOS behavior can differ between desktop-visible and far-offscreen
+  transparent windows.
 - Done: when `window_capture_friendly` is enabled, the app uses a regular
   activation policy, a stable `MacAvatarLayer OBS Source` window title,
   a normal transparent `NSWindow` instead of the desktop-overlay `NSPanel`,
   read-only WindowServer sharing, and includes the window in app/window
   enumeration so OBS has a visible source to select.
-- Done: expose `MA` menu `OBS / Recording Output -> Apply Desktop Window
-  Capture Preset...`; it writes the same preset to the active dev/build TOML
-  and relaunches the app, so users do not need a terminal-only workflow for OBS
-  window-capture setup. The menu marks the active mutually exclusive recording
+- Done: expose `MA` menu `OBS / Virtual Camera Output -> Apply OBS Virtual
+  Camera Desktop Preset...`; it writes the same preset to the active dev/build
+  TOML and relaunches the app, so users do not need a terminal-only workflow
+  for OBS window-capture setup. The menu marks the active mutually exclusive
   output preset with the native macOS menu checkmark.
-- Done: expose `Apply Offscreen Window Capture Preset...`; it is mutually
-  exclusive with desktop window capture and System Camera Source, and uses the
-  same OBS-capturable transparent window moved off desktop.
-- Done: add first-pass `output.mode = "internal"` and `MA` menu
-  `OBS / Recording Output -> Apply System Camera Source...`. This is one
-  relaunching preset, not two separate switches: it enables the IOSurface
-  producer, sets `output.internal.obs_preview_window = false`, and sets
-  `output.internal.activate_virtual_camera = true` so the app submits the
-  embedded CoreMediaIO System Extension activation request after relaunch.
-  Internal mode renders the Live2D frame into an offscreen texture and logs
-  frame summaries. It intentionally does not create a desktop avatar or OBS
-  preview window; OBS should use `MacAvatarLayer Camera` once the system Camera
-  Extension is approved by macOS. The raw IOSurface itself is still not directly
-  capturable by OBS.
+- Done: expose `Apply OBS Virtual Camera Offscreen Preset...`; it is mutually
+  exclusive with desktop window capture and uses the same OBS-capturable
+  transparent window moved off desktop.
+- Removed: the project-owned virtual-camera prototype and activation preset.
+  The supported user workflow is OBS Window Capture plus OBS Virtual Camera.
 - Done: add `iosurface-output` feature and first-pass
   `output.internal.producer = "iosurface"`. The internal renderer creates an
   IOSurface-backed Metal texture, logs its IOSurface id, and writes
@@ -882,17 +883,10 @@ Status: next product milestone.
   the surface id, dimensions, pixel format, frame count, update timestamp, and
   the `1080x1080 60fps BGRA` camera handoff contract. This gives later
   consumers a real GPU-shareable frame handoff contract.
-- Planned: add a consumer-visible bridge on top of the IOSurface manifest as a
-  project-owned macOS virtual camera output. Do not implement this as an OBS
-  plugin; OBS should see MacAvatarLayer the same way QuickRecord, Zoom,
-  Discord, and other apps would see it: as a normal system camera source.
-  Hiding the current window alone would make normal OBS Window Capture/macOS
-  Screen Capture lose the avatar instead of recording it.
-- Done: add `cargo xtask virtual-camera-readiness [--dev|--build]`. It writes
-  `target/virtual-camera/readiness.md` and checks the selected profile,
-  internal IOSurface producer config, IOSurface heartbeat manifest, app wrapper,
-  and System Camera Source signing/provisioning state before the Camera
-  Extension prototype begins.
+- Planned: harden the OBS Window Capture workflow and document OBS Virtual
+  Camera setup as the supported camera-output path. Keep IOSurface work as
+  optional diagnostics/research infrastructure, not as a required product
+  milestone.
 - Done: expose first-pass `MA` menu Renderer Quality presets. Selecting
   Performance, Balanced, or High Quality writes `[renderer]` quality fields to
   the active dev/build TOML and relaunches the local `.app`; full in-process
@@ -947,108 +941,39 @@ Status: next product milestone.
 
 ### Milestone H: Capture And Frame Sharing Research
 
-Status: ScreenCaptureKit probe and IOSurface handoff diagnostics in progress.
+Status: OBS Window Capture plus OBS Virtual Camera is the supported user path;
+ScreenCaptureKit probe and IOSurface handoff remain diagnostics/research.
 
 - Keep transparent window output as the supported OBS capture path.
+- Document OBS Virtual Camera as the recommended way to expose the composed OBS
+  scene to Zoom, Discord, Meet, and other camera consumers.
+- Compare desktop-visible, offscreen, and future parking/near-screen capture
+  presets with manual OBS checks before changing the default OBS preset.
 - Add a ScreenCaptureKit runtime sampling probe for the avatar window. It
   counts frame metadata, logs stall/recovery events, and surfaces status in the
   diagnostics overlay and `MA` menu without reading or storing frame pixels.
 - Document Screen Recording permission behavior, development/build defaults,
   Space-switch behavior, and display sleep/wake observations from generated
   Space reports.
-- Evaluate IOSurface + Metal texture sharing as the foundation for a future
-  in-project macOS virtual camera output. The first producer manifest may be
-  used by a prototype consumer, but it is not itself a user-facing recording
-  mode. OBS plugin work is explicitly out of scope.
-- Use `cargo xtask virtual-camera-readiness` as the standard preflight report
-  before starting the Camera Extension target.
+- Evaluate IOSurface + Metal texture sharing only as developer research. The
+  first producer manifest may be used by a prototype consumer, but it is not
+  itself a user-facing recording mode. OBS plugin work remains out of scope.
 - Keep wgpu migration out of this milestone; the current renderer remains
   native Metal.
 
-### Milestone I: Project-Owned macOS Virtual Camera
+### Milestone I: Virtual Camera Boundary
 
-Status: scaffold in progress; preflight, prototype packaging, app embedding,
-first-pass activation request, provider/device/stream contracts, provider
-service startup, and IOSurface-to-sample-buffer publishing are available.
-Productization is blocked for free Apple IDs because CoreMediaIO Camera
-Extension activation requires Apple Developer Program provisioning profiles.
+Status: project-owned virtual-camera driver work has been removed. OBS Virtual
+Camera is the supported virtual camera layer for users.
 
-- Use Apple's modern CoreMediaIO Camera Extension route rather than legacy DAL,
-  Syphon, NDI, or an OBS plugin.
-- Use `objc2-core-media-io` and `objc2-core-video` as the Rust binding stack
-  for provider/device/stream and CVPixelBuffer handoff work.
-- Keep the frame producer in the main app: Live2D -> Metal -> IOSurface
-  manifest.
-- Use `cargo xtask camera-extension-plan` to generate the local prototype
-  plan, Info.plist template, container app entitlements, and extension
-  entitlements under `target/virtual-camera/`.
-- Use `cargo xtask build-camera-extension` to build the standalone Rust
-  prototype binary and package
-  `target/virtual-camera/MacAvatarLayer Camera.systemextension`.
-- Embed the prototype `.systemextension` into the local app wrapper under
-  `Contents/Library/SystemExtensions/` during `cargo xtask build-app`.
-- Submit a first-pass activation request from the app menu through
-  `OSSystemExtensionManager`; real install remains gated by `/Applications`,
-  proper signing, entitlement validation, and macOS user approval.
-- Done: `cargo xtask build-app --release` signs the app and extension with
-  their entitlements and copies the app wrapper to `/Applications` when the
-  System Camera Source preset is active. Readiness now checks the
-  `/Applications` copy, the system-extension install entitlement, embedded
-  provisioning profiles, and `systemextensionsctl` active state instead of only
-  checking that the local bundle exists.
-- Done: xtask embeds provisioning profiles before signing when they exist at
-  `public/provisioning/ContainerApp.provisionprofile` and
-  `public/provisioning/CameraExtension.provisionprofile`, or when
-  `MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE` /
-  `MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE` point to profile files.
-- Done: provisioning profiles are decoded and validated before embedding:
-  bundle id must match the container app or Camera Extension, the shared app
-  group must be present, and the container app profile must include
-  `com.apple.developer.system-extension.install`. Readiness reports distinguish
-  missing profiles from present-but-invalid profiles.
-- Done: `cargo xtask provision-camera-profiles` creates
-  `public/provisioning`, scans Xcode's local provisioning profile cache or a
-  user-provided `--from` directory, validates matching profiles, and copies them
-  into the paths consumed by `build-app`. The default scan covers both the old
-  `~/Library/MobileDevice/Provisioning Profiles` cache, the newer
-  `~/Library/Developer/Xcode/UserData/Provisioning Profiles` cache. Download
-  directories can be passed explicitly with `--from DIR`. Profile issuance still
-  requires Apple Developer Program/Xcode; xtask automates local discovery and
-  setup only.
-- Blocker: OBS will not see `MacAvatarLayer Camera` until macOS reports
-  `io.github.symphonyiceattack.mac-avatar-layer.CameraExtension` as `[activated enabled]`. A local Apple
-  Development certificate alone can sign the prototype, but a real Camera
-  Extension path still needs Apple Developer Program provisioning profiles that
-  authorize the System Extension entitlement. If the Apple Developer portal
-  says the resource is only for enrolled developers or organization team
-  members, the account cannot create the required profiles and this milestone
-  must remain blocked.
-- Define the Camera Extension provider/device/stream contract in Rust:
-  provider name/manufacturer, stable device/stream UUIDs, 1080x1080 60fps
-  BGRA stream format, IOSurface manifest input, and start/stop lifecycle state.
-- Done: implement first-pass Rust/ObjC bridge classes for
-  `CMIOExtensionProviderSource`, `CMIOExtensionDeviceSource`, and
-  `CMIOExtensionStreamSource`, including source properties, stream formats, and
-  start/stop request logging.
-- Done: wire the bridge source classes into a
-  `CMIOExtensionProvider -> CMIOExtensionDevice -> CMIOExtensionStream` object
-  graph, with one provider device and one source stream.
-- Done: call `CMIOExtensionProvider::startServiceWithProvider` from the
-  extension binary after the graph is built.
-- Done: add the first IOSurface frame bridge. When a client starts the stream,
-  the extension reads the latest producer manifest, opens the IOSurface id with
-  `IOSurfaceLookup`, wraps it as `CVPixelBuffer`, creates a timestamped
-  `CMSampleBuffer` via `CMIOSampleBufferCreateForImageBuffer`, and sends it
-  through `CMIOExtensionStream::sendSampleBuffer`.
-- Add a project-owned Camera Extension that exposes one system camera named
-  `MacAvatarLayer Camera`.
-- Continue hardening extension frames from the internal IOSurface handoff:
-  stale producer handling, transparent fallback frames, app-group manifest
-  handoff, lifecycle cleanup, and client compatibility testing.
-- Validate first in QuickRecord or another simple camera consumer, then in OBS
-  as a normal camera source.
-- Treat signing, extension activation, and install location as first-class
-  productization tasks, not optional developer details.
+- Keep `MacAvatarLayer -> OBS Window Capture -> OBS Virtual Camera` as the
+  practical macOS output architecture.
+- Do not require Apple Developer Program provisioning, System Extension
+  activation, notarization, or project-owned virtual-camera lifecycle work for
+  normal local use.
+- If project-owned virtual camera work is reopened later, treat it as a separate
+  long-term productization track with explicit signing/provisioning ownership,
+  not as a prerequisite for OBS or video-app usage.
 
 ## Debug Controls
 

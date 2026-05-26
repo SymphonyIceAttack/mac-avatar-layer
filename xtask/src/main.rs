@@ -28,49 +28,9 @@ const DEVELOPMENT_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.dev.example.toml
 const BUILD_CONFIG_PATH: &str = "mac-avatar-layer.build.toml";
 const BUILD_EXAMPLE_CONFIG_PATH: &str = "mac-avatar-layer.build.example.toml";
 const DEV_CAMERA_BUNDLE_ID: &str = "io.github.symphonyiceattack.mac-avatar-layer";
-const VIRTUAL_CAMERA_NAME: &str = "MacAvatarLayer Camera";
-const VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID: &str =
-    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
-const VIRTUAL_CAMERA_MACH_SERVICE: &str =
-    "io.github.symphonyiceattack.mac-avatar-layer.CameraExtension";
-const VIRTUAL_CAMERA_APP_GROUP: &str = "group.io.github.symphonyiceattack.mac-avatar-layer";
-const VIRTUAL_CAMERA_BUNDLE_NAME: &str = "MacAvatarLayer Camera.systemextension";
 const DEV_APP_BUNDLE_NAME: &str = "MacAvatarLayer Dev.app";
-const CONTAINER_PROVISION_PROFILE_ENV: &str = "MAC_AVATAR_LAYER_CONTAINER_PROVISION_PROFILE";
-const CAMERA_EXTENSION_PROVISION_PROFILE_ENV: &str =
-    "MAC_AVATAR_LAYER_CAMERA_EXTENSION_PROVISION_PROFILE";
-const DEFAULT_CONTAINER_PROVISION_PROFILE: &str =
-    "public/provisioning/ContainerApp.provisionprofile";
-const DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE: &str =
-    "public/provisioning/CameraExtension.provisionprofile";
 const APPLE_WWDR_G3_URL: &str = "https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer";
 const APPLE_WWDR_G3_SHA1: &str = "06EC06599F4ED0027CC58956B4D3AC1255114F35";
-
-#[derive(Debug, Clone, Copy)]
-enum ProvisioningProfileKind {
-    ContainerApp,
-    CameraExtension,
-}
-
-impl ProvisioningProfileKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ContainerApp => "container app",
-            Self::CameraExtension => "Camera Extension",
-        }
-    }
-
-    fn expected_bundle_id(self) -> &'static str {
-        match self {
-            Self::ContainerApp => DEV_CAMERA_BUNDLE_ID,
-            Self::CameraExtension => VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
-        }
-    }
-
-    fn requires_system_extension_install(self) -> bool {
-        matches!(self, Self::ContainerApp)
-    }
-}
 
 fn main() {
     if let Err(error) = run() {
@@ -83,23 +43,19 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("build-app") => build_app(args.collect()),
-        Some("build-camera-extension") => build_camera_extension(args.collect()),
         Some("clean") => clean(args.collect()),
         Some("capture-mask-matrix") => capture_mask_matrix(args.collect()),
         Some("capture-offscreen-matrix") => capture_offscreen_matrix(args.collect()),
         Some("capture-full-matrix") => capture_full_matrix(args.collect()),
         Some("capture-metal") => capture_metal(args.collect()),
-        Some("camera-extension-plan") => camera_extension_plan(args.collect()),
         Some("capture-quality-matrix") => capture_quality_matrix(args.collect()),
         Some("capture-risk-models") => capture_risk_models(args.collect()),
         Some("capture-rice-stress") => capture_rice_stress(args.collect()),
-        Some("configure-internal-output") => configure_internal_output(args.collect()),
-        Some("configure-obs-recording") => configure_obs_recording(args.collect()),
+        Some("configure-obs-virtual-camera") => configure_obs_virtual_camera(args.collect()),
         Some("doctor") => doctor(args.collect()),
         Some("fix-wwdr-cert") => fix_wwdr_cert(args.collect()),
         Some("list-models") => list_models(args.collect()),
         Some("mao-mask-audit") => mao_mask_audit(args.collect()),
-        Some("provision-camera-profiles") => provision_camera_profiles(args.collect()),
         Some("probe-risk-models") => probe_risk_models(args.collect()),
         Some("quality-visual-diff") => quality_visual_diff(args.collect()),
         Some("ren-visual-diff") => ren_visual_diff(args.collect()),
@@ -112,7 +68,6 @@ fn run() -> Result<()> {
         Some("select-model") => select_model(args.collect()),
         Some("start") => start(args.collect()),
         Some("tune-input") => tune_input(args.collect()),
-        Some("virtual-camera-readiness") => virtual_camera_readiness(args.collect()),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             Ok(())
@@ -128,9 +83,7 @@ mac-avatar-layer xtask
 
 Usage:
   cargo xtask build-app [--release]
-  cargo xtask build-camera-extension [--dev|--build]
   cargo xtask clean [--generated|--all]
-  cargo xtask camera-extension-plan [--dev|--build]
   cargo xtask capture-full-matrix
   cargo xtask capture-metal [MODEL_PATH]
   cargo xtask capture-mask-matrix [MODEL_PATH]
@@ -138,13 +91,11 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
-  cargo xtask configure-internal-output [--dev|--build]
-  cargo xtask configure-obs-recording [--dev|--build] [--desktop|--offscreen]
+  cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen]
   cargo xtask doctor
   cargo xtask fix-wwdr-cert
   cargo xtask list-models [MODEL_OR_DIR ...]
   cargo xtask mao-mask-audit [MODEL_PATH]
-  cargo xtask provision-camera-profiles [--from DIR] [--force]
   cargo xtask probe-risk-models [MODEL_OR_DIR ...]
   cargo xtask quality-visual-diff
   cargo xtask ren-visual-diff
@@ -157,15 +108,10 @@ Usage:
   cargo xtask select-model [--dev|--build] MODEL_PATH
   cargo xtask start [MODEL_PATH]
   cargo xtask tune-input [--dev|--build] <mouse|mouth|camera> <soft|normal|expressive>
-  cargo xtask virtual-camera-readiness [--dev|--build]
 
 Commands:
   build-app          Build and sign the local macOS .app wrapper without launching it.
-  build-camera-extension
-                     Build the CoreMediaIO Camera Extension prototype bundle.
   clean              Remove generated target artifacts; --all also runs cargo clean.
-  camera-extension-plan
-                     Write CoreMediaIO Camera Extension prototype templates and plan.
   capture-full-matrix
                      Run the complete render regression capture and report matrix.
   capture-metal     Capture the Metal renderer window to target/render-regression.
@@ -179,16 +125,12 @@ Commands:
                      Capture baseline screenshots for default, Mao, and Ren.
   capture-rice-stress
                      Capture shared/high-precision/no-mask screenshots for Rice.
-  configure-obs-recording
-                     Write a transparent-window OBS Window Capture preset to dev/build config.
-  configure-internal-output
-                     Write the system camera source preset with IOSurface, preview, and activation enabled.
+  configure-obs-virtual-camera
+                     Configure MacAvatarLayer as an OBS Window Capture source for OBS Virtual Camera.
   doctor            Check local configs, selected models, settings, and Cubism Core SDK paths.
   fix-wwdr-cert     Install Apple's current WWDR G3 intermediate and re-check codesigning.
   list-models       List local .model3.json files and resource counts.
   mao-mask-audit     Generate target/render-regression/mao-mask-audit.md.
-  provision-camera-profiles
-                     Copy matching Apple provisioning profiles into public/provisioning.
   probe-risk-models  Generate target/render-regression/probe.txt through the Rust model probe.
   quality-visual-diff
                      Generate target/render-regression/quality-visual-diff.md.
@@ -205,8 +147,6 @@ Commands:
   select-model      Write [model].path in the dev/build local config.
   start             Start the optimized local app; alias for run-metal --release.
   tune-input        Write persistent mouse, mouth, or camera calibration preset values.
-  virtual-camera-readiness
-                     Write target/virtual-camera/readiness.md for the future in-project macOS virtual camera path.
 "
     );
 }
@@ -228,7 +168,6 @@ fn clean(args: Vec<String>) -> Result<()> {
     remove_path(target.join("space-test-live.pid"))?;
     remove_path(target.join("space-test-smoke.out"))?;
     remove_path(target.join("camera-test"))?;
-    remove_path(target.join("virtual-camera"))?;
     remove_path(target.join("codesign"))?;
     remove_path(target.join("dev-app"))?;
     remove_path(target.join("mac-avatar-layer.pid"))?;
@@ -530,12 +469,6 @@ security find-identity -v -p codesigning:\n{codesign_output}"
     .into())
 }
 
-#[derive(Debug, Clone)]
-struct ProvisionCameraProfilesOptions {
-    source_dirs: Vec<PathBuf>,
-    force: bool,
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ObsWindowPlacement {
     Desktop,
@@ -556,186 +489,6 @@ impl ObsWindowPlacement {
             Self::Offscreen => "transparent offscreen window",
         }
     }
-}
-
-fn provision_camera_profiles(args: Vec<String>) -> Result<()> {
-    if env::consts::OS != "macos" {
-        return Err("cargo xtask provision-camera-profiles is only available on macOS.".into());
-    }
-    let options = parse_provision_camera_profiles_args(args)?;
-    let root = project_root()?;
-    let target_dir = root.join("public/provisioning");
-    fs::create_dir_all(&target_dir)?;
-
-    println!("Scanning provisioning profiles in:");
-    for source_dir in &options.source_dirs {
-        println!("  - {}", source_dir.display());
-    }
-    let container_dest = root.join(DEFAULT_CONTAINER_PROVISION_PROFILE);
-    let extension_dest = root.join(DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE);
-
-    let container = ensure_camera_profile(
-        &root,
-        &options.source_dirs,
-        &container_dest,
-        ProvisioningProfileKind::ContainerApp,
-        options.force,
-    )?;
-    let extension = ensure_camera_profile(
-        &root,
-        &options.source_dirs,
-        &extension_dest,
-        ProvisioningProfileKind::CameraExtension,
-        options.force,
-    )?;
-
-    println!();
-    println!("Provisioning profile setup complete.");
-    println!("Container app: {}", relative_display(&root, &container));
-    println!("Camera Extension: {}", relative_display(&root, &extension));
-    println!("Next: cargo xtask build-app --release");
-    Ok(())
-}
-
-fn parse_provision_camera_profiles_args(
-    args: Vec<String>,
-) -> Result<ProvisionCameraProfilesOptions> {
-    let mut source_dirs = Vec::new();
-    let mut force = false;
-    let mut index = 0usize;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--from" => {
-                index += 1;
-                let Some(value) = args.get(index) else {
-                    return Err(
-                        "usage: cargo xtask provision-camera-profiles [--from DIR] [--force]"
-                            .into(),
-                    );
-                };
-                source_dirs.push(PathBuf::from(value));
-            }
-            "--force" => {
-                force = true;
-            }
-            value => {
-                return Err(format!(
-                    "unknown provision-camera-profiles option: {value}\nusage: cargo xtask provision-camera-profiles [--from DIR] [--force]"
-                )
-                .into());
-            }
-        }
-        index += 1;
-    }
-    if source_dirs.is_empty() {
-        source_dirs = default_provisioning_profile_source_dirs();
-    }
-    Ok(ProvisionCameraProfilesOptions { source_dirs, force })
-}
-
-fn default_provisioning_profile_source_dirs() -> Vec<PathBuf> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("~"));
-    vec![
-        home.join("Library/MobileDevice/Provisioning Profiles"),
-        home.join("Library/Developer/Xcode/UserData/Provisioning Profiles"),
-    ]
-}
-
-fn ensure_camera_profile(
-    root: &Path,
-    source_dirs: &[PathBuf],
-    destination: &Path,
-    kind: ProvisioningProfileKind,
-    force: bool,
-) -> Result<PathBuf> {
-    if destination.is_file() && !force && validate_provisioning_profile(destination, kind).is_ok() {
-        println!(
-            "{} profile already exists and is valid: {}",
-            kind.label(),
-            relative_display(root, destination)
-        );
-        return Ok(destination.to_path_buf());
-    }
-
-    let candidate = find_matching_provisioning_profile(source_dirs, kind)?.ok_or_else(|| {
-        let sources = source_dirs
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "no matching {} provisioning profile found in [{}].\n\
-Create/download profiles for `{}` in Apple Developer/Xcode, or pass the download folder with `--from DIR`.",
-            kind.label(),
-            sources,
-            kind.expected_bundle_id()
-        )
-    })?;
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&candidate, destination).map_err(|error| {
-        format!(
-            "failed to copy {} profile from {} to {}: {error}",
-            kind.label(),
-            candidate.display(),
-            destination.display()
-        )
-    })?;
-    let summary = validate_provisioning_profile(destination, kind)?;
-    println!(
-        "Copied {} profile: {} -> {}",
-        kind.label(),
-        candidate.display(),
-        relative_display(root, destination)
-    );
-    println!(
-        "Validated {} profile: name={} app_id={} team={}",
-        kind.label(),
-        summary.name.as_deref().unwrap_or("unknown"),
-        summary.application_identifier,
-        summary.team_identifier.as_deref().unwrap_or("unknown")
-    );
-    Ok(destination.to_path_buf())
-}
-
-fn find_matching_provisioning_profile(
-    source_dirs: &[PathBuf],
-    kind: ProvisioningProfileKind,
-) -> Result<Option<PathBuf>> {
-    let mut candidates = Vec::new();
-    for source_dir in source_dirs {
-        if source_dir.is_dir() {
-            collect_provisioning_profile_paths(source_dir, &mut candidates)?;
-        }
-    }
-    candidates.sort();
-    for candidate in candidates {
-        if validate_provisioning_profile(&candidate, kind).is_ok() {
-            return Ok(Some(candidate));
-        }
-    }
-    Ok(None)
-}
-
-fn collect_provisioning_profile_paths(dir: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_provisioning_profile_paths(&path, output)?;
-            continue;
-        }
-        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if matches!(extension, "provisionprofile" | "mobileprovision") {
-            output.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn add_certificate_to_login_keychain(cert_path: &Path) -> Result<()> {
@@ -1094,27 +847,10 @@ fn build_app(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
-    let system_camera_source_requested = config_requests_system_camera_source(&config_path);
-    if system_camera_source_requested && !camera_provisioning_profiles_available(&root) {
-        return Err(system_camera_source_unavailable_message().into());
-    }
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(
-        &root,
-        &executable,
-        options.release,
-        system_camera_source_requested,
-    )?;
-    let launch_bundle_dir = if system_camera_source_requested {
-        Some(install_app_bundle_to_applications(&root, &bundle_dir)?)
-    } else {
-        None
-    };
+    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
 
     println!("App wrapper: {}", bundle_dir.display());
-    if let Some(launch_bundle_dir) = &launch_bundle_dir {
-        println!("Installed app wrapper: {}", launch_bundle_dir.display());
-    }
     println!(
         "Profile: {}",
         if options.release {
@@ -1125,19 +861,6 @@ fn build_app(args: Vec<String>) -> Result<()> {
     );
     println!("Config: {}", relative_display(&root, &config_path));
     println!("Bundle id: {DEV_CAMERA_BUNDLE_ID}");
-    println!(
-        "Embedded Camera Extension: {}",
-        if system_camera_source_requested {
-            relative_display(
-                &root,
-                &bundle_dir
-                    .join("Contents/Library/SystemExtensions")
-                    .join(VIRTUAL_CAMERA_BUNDLE_NAME),
-            )
-        } else {
-            "disabled for desktop window output".to_string()
-        }
-    );
     println!(
         "Run it with: cargo xtask run-metal{}",
         if options.release { " --release" } else { "" }
@@ -1155,10 +878,6 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     } else {
         root.join(DEVELOPMENT_CONFIG_PATH)
     };
-    let system_camera_source_requested = config_requests_system_camera_source(&config_path);
-    if system_camera_source_requested && !camera_provisioning_profiles_available(&root) {
-        return Err(system_camera_source_unavailable_message().into());
-    }
 
     if env::var("RUN_METAL_KILL_OLD").unwrap_or_else(|_| "1".to_string()) != "0" {
         terminate_app_processes(&root);
@@ -1166,20 +885,9 @@ fn run_metal(args: Vec<String>) -> Result<()> {
     }
 
     let executable = build_metal_executable(&root, options.release, &include_dir, &lib_dir)?;
-    let bundle_dir = install_camera_app_wrapper(
-        &root,
-        &executable,
-        options.release,
-        system_camera_source_requested,
-    )?;
+    let bundle_dir = install_camera_app_wrapper(&root, &executable)?;
     println!("App wrapper: {}", bundle_dir.display());
-    let launch_bundle_dir = if system_camera_source_requested {
-        let installed = install_app_bundle_to_applications(&root, &bundle_dir)?;
-        println!("Installed app wrapper: {}", installed.display());
-        installed
-    } else {
-        bundle_dir
-    };
+    let launch_bundle_dir = bundle_dir;
 
     let log_stem = if options.release {
         "run-metal-release"
@@ -1209,7 +917,7 @@ fn build_metal_executable(
         release,
         include_dir,
         lib_dir,
-        "metal-renderer camera-tracking screen-capture-kit iosurface-output system-extension-activation",
+        "metal-renderer camera-tracking screen-capture-kit iosurface-output",
     )
 }
 
@@ -1246,130 +954,11 @@ fn build_metal_executable_with_features(
         .join("mac-avatar-layer"))
 }
 
-fn build_camera_extension(args: Vec<String>) -> Result<()> {
-    let target = parse_camera_extension_plan_args(args)?;
-    let root = project_root()?;
-    let release = matches!(target, SelectModelTarget::Build);
-    let executable = build_camera_extension_executable(&root, release)?;
-    let bundle_dir = install_camera_extension_bundle(&root, &executable)?;
-    println!("Camera Extension prototype bundle built.");
-    println!("Target: {}", target.label());
-    println!("Bundle: {}", relative_display(&root, &bundle_dir));
-    println!("Camera name: {VIRTUAL_CAMERA_NAME}");
-    println!("Bundle id: {VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID}");
-    println!("Mach service: {VIRTUAL_CAMERA_MACH_SERVICE}");
-    println!(
-        "Next: run `cargo xtask build-app --release`, move the app to /Applications, then use the MA menu activation prototype."
-    );
-    println!("Embed with: cargo xtask build-app --release");
-    Ok(())
-}
-
 fn start(args: Vec<String>) -> Result<()> {
     run_metal(start_args_for_run_metal(args)?)
 }
 
-fn build_camera_extension_executable(root: &Path, release: bool) -> Result<PathBuf> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .arg("-p")
-        .arg("mac-avatar-layer-camera-extension");
-    if release {
-        command.arg("--release");
-    }
-    command.current_dir(root).stdin(Stdio::null());
-    run_status(&mut command)?;
-    let profile_dir = if release { "release" } else { "debug" };
-    Ok(root
-        .join("target")
-        .join(profile_dir)
-        .join("CameraExtension"))
-}
-
-fn install_camera_extension_bundle(root: &Path, executable: &Path) -> Result<PathBuf> {
-    let bundle_dir = root
-        .join("target/virtual-camera")
-        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
-    let contents_dir = bundle_dir.join("Contents");
-    let macos_dir = contents_dir.join("MacOS");
-    let resources_dir = contents_dir.join("Resources");
-    let executable_path = macos_dir.join("CameraExtension");
-    fs::create_dir_all(&macos_dir)?;
-    fs::create_dir_all(&resources_dir)?;
-    fs::write(
-        contents_dir.join("Info.plist"),
-        camera_extension_info_plist(),
-    )?;
-    fs::write(
-        resources_dir.join("CameraExtension.entitlements"),
-        camera_extension_entitlements(),
-    )?;
-    embed_provisioning_profile_if_available(
-        root,
-        &contents_dir,
-        CAMERA_EXTENSION_PROVISION_PROFILE_ENV,
-        DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE,
-        ProvisioningProfileKind::CameraExtension,
-    )?;
-    let _ = fs::remove_file(&executable_path);
-    fs::copy(executable, &executable_path)?;
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&executable_path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable_path, permissions)?;
-    }
-    sign_camera_extension_bundle(root, &bundle_dir)?;
-    Ok(bundle_dir)
-}
-
-fn sign_camera_extension_bundle(root: &Path, bundle_dir: &Path) -> Result<()> {
-    let identity = camera_codesign_identity_choice();
-    let entitlements = bundle_dir
-        .join("Contents/Resources")
-        .join("CameraExtension.entitlements");
-    let mut command = Command::new("codesign");
-    command
-        .arg("--force")
-        .arg("--deep")
-        .arg("--options")
-        .arg("runtime")
-        .arg("--entitlements")
-        .arg(&entitlements)
-        .arg("--sign")
-        .arg(&identity.value)
-        .arg("--identifier")
-        .arg(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID)
-        .arg(bundle_dir)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    run_status(&mut command).map_err(|error| {
-        if identity.value == "-" {
-            format!(
-                "failed to ad-hoc codesign Camera Extension prototype: {error}. \
-Ad-hoc signing is enough to build the prototype bundle, but macOS still requires \
-Apple Developer Program provisioning before it can activate as a system camera."
-            )
-        } else {
-            format!(
-                "failed to codesign Camera Extension prototype with identity `{}`: {error}. \
-Unset MAC_AVATAR_LAYER_CODESIGN_IDENTITY to use the ad-hoc local build path, or set it to a valid local codesigning identity for System Camera Source work.",
-                identity.value
-            )
-        }
-    })?;
-    Ok(())
-}
-
-fn install_camera_app_wrapper(
-    root: &Path,
-    executable: &Path,
-    release: bool,
-    system_camera_source_enabled: bool,
-) -> Result<PathBuf> {
+fn install_camera_app_wrapper(root: &Path, executable: &Path) -> Result<PathBuf> {
     let executable_name = "mac-avatar-layer";
     let bundle_dir = root.join("target/dev-app").join(DEV_APP_BUNDLE_NAME);
     let contents_dir = bundle_dir.join("Contents");
@@ -1383,21 +972,8 @@ fn install_camera_app_wrapper(
         dev_camera_info_plist(executable_name),
     )?;
     let container_entitlements = resources_dir.join("ContainerApp.entitlements");
-    fs::write(
-        &container_entitlements,
-        camera_container_app_entitlements(system_camera_source_enabled),
-    )?;
-    if system_camera_source_enabled {
-        embed_provisioning_profile_if_available(
-            root,
-            &contents_dir,
-            CONTAINER_PROVISION_PROFILE_ENV,
-            DEFAULT_CONTAINER_PROVISION_PROFILE,
-            ProvisioningProfileKind::ContainerApp,
-        )?;
-    } else {
-        let _ = fs::remove_file(contents_dir.join("embedded.provisionprofile"));
-    }
+    fs::write(&container_entitlements, camera_container_app_entitlements())?;
+    let _ = fs::remove_file(contents_dir.join("embedded.provisionprofile"));
     let _ = fs::remove_file(&app_executable);
     fs::copy(executable, &app_executable)?;
     #[cfg(unix)]
@@ -1406,339 +982,9 @@ fn install_camera_app_wrapper(
         permissions.set_mode(0o755);
         fs::set_permissions(&app_executable, permissions)?;
     }
-    let system_extensions_dir = contents_dir.join("Library/SystemExtensions");
-    if system_camera_source_enabled {
-        let extension_executable = build_camera_extension_executable(root, release)?;
-        let extension_bundle = install_camera_extension_bundle(root, &extension_executable)?;
-        embed_camera_extension_bundle(&contents_dir, &extension_bundle)?;
-    } else {
-        let _ = fs::remove_dir_all(&system_extensions_dir);
-    }
+    let _ = fs::remove_dir_all(contents_dir.join("Library"));
     sign_camera_dev_app(root, &bundle_dir)?;
     Ok(bundle_dir)
-}
-
-fn embed_camera_extension_bundle(contents_dir: &Path, extension_bundle: &Path) -> Result<PathBuf> {
-    let system_extensions_dir = contents_dir.join("Library/SystemExtensions");
-    fs::create_dir_all(&system_extensions_dir)?;
-    let embedded_bundle = system_extensions_dir.join(VIRTUAL_CAMERA_BUNDLE_NAME);
-    copy_dir_replace(extension_bundle, &embedded_bundle)?;
-    Ok(embedded_bundle)
-}
-
-fn install_app_bundle_to_applications(root: &Path, bundle_dir: &Path) -> Result<PathBuf> {
-    let installed_bundle = PathBuf::from("/Applications").join(DEV_APP_BUNDLE_NAME);
-    copy_dir_replace(bundle_dir, &installed_bundle).map_err(|error| {
-        format!(
-            "failed to install app wrapper to {}: {error}. \
-System Extension activation requires the app bundle to live in /Applications.",
-            installed_bundle.display()
-        )
-    })?;
-    println!(
-        "Installed app wrapper for System Extension activation: {}",
-        installed_bundle.display()
-    );
-    println!("Source app wrapper: {}", relative_display(root, bundle_dir));
-    Ok(installed_bundle)
-}
-
-fn embed_provisioning_profile_if_available(
-    root: &Path,
-    contents_dir: &Path,
-    env_name: &str,
-    default_relative_path: &str,
-    kind: ProvisioningProfileKind,
-) -> Result<Option<PathBuf>> {
-    let label = kind.label();
-    let profile_path = match env::var_os(env_name) {
-        Some(value) if !value.is_empty() => {
-            let path = PathBuf::from(value);
-            if !path.is_file() {
-                return Err(format!(
-                    "{env_name} points to {}, but that file does not exist.",
-                    path.display()
-                )
-                .into());
-            }
-            path
-        }
-        _ => {
-            let path = root.join(default_relative_path);
-            if !path.is_file() {
-                println!(
-                    "No {label} provisioning profile embedded. Set {env_name} or place one at {default_relative_path}."
-                );
-                return Ok(None);
-            }
-            path
-        }
-    };
-
-    let summary = validate_provisioning_profile(&profile_path, kind).map_err(|error| {
-        format!(
-            "{label} provisioning profile {} is not usable for `{}`: {error}",
-            profile_path.display(),
-            kind.expected_bundle_id()
-        )
-    })?;
-    let embedded_path = contents_dir.join("embedded.provisionprofile");
-    fs::copy(&profile_path, &embedded_path).map_err(|error| {
-        format!(
-            "failed to embed {label} provisioning profile {} into {}: {error}",
-            profile_path.display(),
-            embedded_path.display()
-        )
-    })?;
-    println!(
-        "Embedded {label} provisioning profile: {} -> {}",
-        relative_display(root, &profile_path),
-        relative_display(root, &embedded_path)
-    );
-    println!(
-        "Provisioning profile validated: name={} app_id={} team={}",
-        summary.name.as_deref().unwrap_or("unknown"),
-        summary.application_identifier,
-        summary.team_identifier.as_deref().unwrap_or("unknown")
-    );
-    Ok(Some(embedded_path))
-}
-
-#[derive(Debug, Clone)]
-struct ProvisioningProfileSummary {
-    name: Option<String>,
-    application_identifier: String,
-    team_identifier: Option<String>,
-    app_groups: Vec<String>,
-    system_extension_install: bool,
-}
-
-fn validate_provisioning_profile(
-    profile_path: &Path,
-    kind: ProvisioningProfileKind,
-) -> Result<ProvisioningProfileSummary> {
-    let value = decode_provisioning_profile_json(profile_path)?;
-    let summary = provisioning_profile_summary_from_json(&value)?;
-    validate_provisioning_profile_summary(&summary, kind)?;
-    Ok(summary)
-}
-
-fn decode_provisioning_profile_json(profile_path: &Path) -> Result<serde_json::Value> {
-    let security_output = Command::new("security")
-        .arg("cms")
-        .arg("-D")
-        .arg("-i")
-        .arg(profile_path)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to run `security cms -D -i {}`: {error}",
-                profile_path.display()
-            )
-        })?;
-    if !security_output.status.success() {
-        return Err(format!(
-            "`security cms -D -i {}` failed with status {}\nstderr:\n{}",
-            profile_path.display(),
-            security_output.status,
-            String::from_utf8_lossy(&security_output.stderr)
-        )
-        .into());
-    }
-
-    let mut plutil = Command::new("plutil")
-        .arg("-convert")
-        .arg("json")
-        .arg("-o")
-        .arg("-")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start `plutil`: {error}"))?;
-    {
-        let stdin = plutil.stdin.as_mut().ok_or("failed to open plutil stdin")?;
-        stdin.write_all(&security_output.stdout)?;
-    }
-    let plutil_output = plutil.wait_with_output()?;
-    if !plutil_output.status.success() {
-        return Err(format!(
-            "`plutil -convert json` failed with status {}\nstderr:\n{}",
-            plutil_output.status,
-            String::from_utf8_lossy(&plutil_output.stderr)
-        )
-        .into());
-    }
-
-    serde_json::from_slice(&plutil_output.stdout)
-        .map_err(|error| format!("failed to parse provisioning profile JSON: {error}").into())
-}
-
-fn provisioning_profile_summary_from_json(
-    value: &serde_json::Value,
-) -> Result<ProvisioningProfileSummary> {
-    let entitlements = value
-        .get("Entitlements")
-        .and_then(serde_json::Value::as_object)
-        .ok_or("provisioning profile has no Entitlements dictionary")?;
-    let application_identifier = entitlements
-        .get("application-identifier")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("provisioning profile has no Entitlements.application-identifier")?
-        .to_string();
-    let team_identifier = value
-        .get("TeamIdentifier")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|values| values.iter().find_map(serde_json::Value::as_str))
-        .or_else(|| {
-            value
-                .get("ApplicationIdentifierPrefix")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|values| values.iter().find_map(serde_json::Value::as_str))
-        })
-        .map(str::to_string);
-    let app_groups = entitlements
-        .get("com.apple.security.application-groups")
-        .and_then(serde_json::Value::as_array)
-        .map(|groups| {
-            groups
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let system_extension_install = entitlements
-        .get("com.apple.developer.system-extension.install")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-
-    Ok(ProvisioningProfileSummary {
-        name: value
-            .get("Name")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        application_identifier,
-        team_identifier,
-        app_groups,
-        system_extension_install,
-    })
-}
-
-fn validate_provisioning_profile_summary(
-    summary: &ProvisioningProfileSummary,
-    kind: ProvisioningProfileKind,
-) -> Result<()> {
-    if !summary
-        .application_identifier
-        .ends_with(kind.expected_bundle_id())
-    {
-        return Err(format!(
-            "application-identifier `{}` does not match expected bundle id `{}`",
-            summary.application_identifier,
-            kind.expected_bundle_id()
-        )
-        .into());
-    }
-    if !summary
-        .app_groups
-        .iter()
-        .any(|group| group == VIRTUAL_CAMERA_APP_GROUP)
-    {
-        return Err(format!(
-            "profile does not include required app group `{}`",
-            VIRTUAL_CAMERA_APP_GROUP
-        )
-        .into());
-    }
-    if kind.requires_system_extension_install() && !summary.system_extension_install {
-        return Err(
-            "container app profile does not include com.apple.developer.system-extension.install"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-fn embedded_provisioning_profile_summary(
-    bundle_path: &Path,
-    kind: ProvisioningProfileKind,
-) -> Option<ProvisioningProfileSummary> {
-    let profile_path = bundle_path.join("Contents/embedded.provisionprofile");
-    if !profile_path.is_file() {
-        return None;
-    }
-    validate_provisioning_profile(&profile_path, kind).ok()
-}
-
-fn camera_provisioning_profiles_available(root: &Path) -> bool {
-    configured_provisioning_profile_valid(
-        root,
-        CONTAINER_PROVISION_PROFILE_ENV,
-        DEFAULT_CONTAINER_PROVISION_PROFILE,
-        ProvisioningProfileKind::ContainerApp,
-    ) && configured_provisioning_profile_valid(
-        root,
-        CAMERA_EXTENSION_PROVISION_PROFILE_ENV,
-        DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE,
-        ProvisioningProfileKind::CameraExtension,
-    )
-}
-
-fn configured_provisioning_profile_valid(
-    root: &Path,
-    env_name: &str,
-    default_relative_path: &str,
-    kind: ProvisioningProfileKind,
-) -> bool {
-    let path = env::var_os(env_name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(default_relative_path));
-    path.is_file() && validate_provisioning_profile(&path, kind).is_ok()
-}
-
-fn system_camera_source_unavailable_message() -> String {
-    format!(
-        "System Camera Source is selected, but the required Apple Developer Program provisioning profiles are missing or invalid.\n\
-This Apple ID cannot currently complete the no-desktop virtual camera path.\n\n\
-Use the supported OBS desktop window path instead:\n\
-  cargo xtask configure-obs-recording --build\n\
-  cargo xtask run-metal --release\n\n\
-If you later get Apple Developer Program profiles, place them at `{DEFAULT_CONTAINER_PROVISION_PROFILE}` and `{DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE}`, then run:\n\
-  cargo xtask build-app --release"
-    )
-}
-
-fn config_requests_system_camera_source(config_path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(config_path) else {
-        return false;
-    };
-    let Ok(config) = toml::from_str::<toml::Value>(&content) else {
-        return false;
-    };
-    let Some(output) = config.get("output") else {
-        return false;
-    };
-    let mode = output
-        .get("mode")
-        .and_then(toml::Value::as_str)
-        .unwrap_or("window")
-        .trim()
-        .to_ascii_lowercase();
-    let internal = output.get("internal");
-    let producer = internal
-        .and_then(|value| value.get("producer"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("none")
-        .trim()
-        .to_ascii_lowercase();
-    let activate_virtual_camera = internal
-        .and_then(|value| value.get("activate_virtual_camera"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
-    mode == "internal" && producer == "iosurface" && activate_virtual_camera
 }
 
 fn launch_camera_app_wrapper(
@@ -1822,8 +1068,6 @@ fn dev_camera_info_plist(executable_name: &str) -> String {
   <string>MacAvatarLayer uses the local camera to estimate face landmarks and drive the avatar. Frames are not stored, written to disk, or logged.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>MacAvatarLayer can use the local microphone level to drive avatar mouth movement when microphone input is enabled.</string>
-  <key>NSSystemExtensionUsageDescription</key>
-  <string>MacAvatarLayer can install its Camera Extension to publish avatar frames as a system camera source.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>
@@ -1870,10 +1114,6 @@ For normal local desktop-window use, unset MAC_AVATAR_LAYER_CODESIGN_IDENTITY so
     })?;
 
     Ok(())
-}
-
-fn camera_codesign_identity() -> String {
-    camera_codesign_identity_choice().value
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2469,8 +1709,17 @@ fn select_model(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn configure_obs_recording(args: Vec<String>) -> Result<()> {
-    let (target, placement) = parse_obs_recording_args(args)?;
+fn configure_obs_virtual_camera(args: Vec<String>) -> Result<()> {
+    let (target, placement) = parse_obs_virtual_camera_args(args)?;
+    write_obs_window_capture_config(target, placement)?;
+    print_obs_virtual_camera_next_steps(target, placement);
+    Ok(())
+}
+
+fn write_obs_window_capture_config(
+    target: SelectModelTarget,
+    placement: ObsWindowPlacement,
+) -> Result<()> {
     let root = project_root()?;
     let config_path = root.join(target.config_path());
     let example_config_path = root.join(target.example_config_path());
@@ -2501,7 +1750,6 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
             ("internal.obs_preview_window", "false".to_string()),
-            ("internal.activate_virtual_camera", "false".to_string()),
         ],
     );
     content = set_toml_section_values(
@@ -2559,153 +1807,28 @@ fn configure_obs_recording(args: Vec<String>) -> Result<()> {
     );
     println!("Renderer: MSAA on | mipmaps on | anisotropy 8 | masks enabled");
     println!("ScreenCaptureKit probe: off (not an OBS output path)");
+    Ok(())
+}
+
+fn print_obs_virtual_camera_next_steps(target: SelectModelTarget, placement: ObsWindowPlacement) {
+    println!();
+    println!("OBS Virtual Camera workflow:");
     println!(
-        "Run with: cargo xtask run-metal{}",
+        "1. Start MacAvatarLayer: cargo xtask run-metal{}",
         if matches!(target, SelectModelTarget::Build) {
             " --release"
         } else {
             ""
         }
     );
-    Ok(())
-}
-
-fn configure_internal_output(args: Vec<String>) -> Result<()> {
-    let target = parse_internal_output_args(args)?;
-    let root = project_root()?;
-    let config_path = root.join(target.config_path());
-    let example_config_path = root.join(target.example_config_path());
-    let mut content = if config_path.is_file() {
-        fs::read_to_string(&config_path)?
-    } else if example_config_path.is_file() {
-        fs::read_to_string(&example_config_path)?
-    } else {
-        String::new()
-    };
-    content = remove_toml_section(&content, "output");
-
-    let runtime_profile = match target {
-        SelectModelTarget::Development => "development",
-        SelectModelTarget::Build => "release",
-    };
-    content = set_toml_section_values(
-        &content,
-        "output",
-        &[
-            ("mode", toml_string_literal("internal")),
-            ("internal.width", "1080.0".to_string()),
-            ("internal.height", "1080.0".to_string()),
-            ("internal.producer", toml_string_literal("iosurface")),
-            (
-                "internal.manifest_path",
-                toml_string_literal("target/internal-output/iosurface.json"),
-            ),
-            ("internal.obs_preview_window", "false".to_string()),
-            ("internal.activate_virtual_camera", "true".to_string()),
-        ],
-    );
-    content = set_toml_section_values(
-        &content,
-        "app",
-        &[
-            ("runtime_profile", toml_string_literal(runtime_profile)),
-            ("window_capture_friendly", "false".to_string()),
-        ],
-    );
-    content = set_toml_section_value(&content, "diagnostics", "show", "false");
-    content = set_toml_section_values(
-        &content,
-        "capture.screen_capture_kit",
-        &[
-            ("enabled", "false".to_string()),
-            ("target_fps", "10".to_string()),
-            ("log_interval_seconds", "2.0".to_string()),
-            ("stalled_after_seconds", "2.0".to_string()),
-        ],
-    );
-    fs::write(&config_path, content)?;
-
-    println!("System camera output preset updated.");
-    println!("Target: {}", target.label());
-    println!("Config: {}", relative_display(&root, &config_path));
-    println!(
-        "Output: Metal renders into IOSurface without a desktop avatar window and auto-requests Camera Extension activation"
-    );
-    println!("Manifest: target/internal-output/iosurface.json");
-    println!("OBS: use `MacAvatarLayer Camera` after macOS approves the Camera Extension.");
-    println!(
-        "Run with: cargo xtask run-metal{}",
-        if matches!(target, SelectModelTarget::Build) {
-            " --release"
-        } else {
-            ""
-        }
-    );
-    Ok(())
-}
-
-fn camera_extension_plan(args: Vec<String>) -> Result<()> {
-    let target = parse_camera_extension_plan_args(args)?;
-    let root = project_root()?;
-    let config_path = root.join(target.config_path());
-    let output_dir = root.join("target/virtual-camera");
-    let template_dir = output_dir.join("camera-extension-prototype");
-    fs::create_dir_all(&template_dir)?;
-
-    let readiness = build_virtual_camera_readiness_report(&root, target, &config_path)?;
-    let readiness_path = output_dir.join("readiness.md");
-    let plan_path = output_dir.join("camera-extension-plan.md");
-    let app_entitlements_path = template_dir.join("ContainerApp.entitlements");
-    let extension_entitlements_path = template_dir.join("CameraExtension.entitlements");
-    let info_plist_path = template_dir.join("CameraExtension.Info.plist");
-
-    fs::write(&readiness_path, &readiness.markdown)?;
-    fs::write(&plan_path, camera_extension_plan_markdown(target, &root))?;
-    fs::write(
-        &app_entitlements_path,
-        camera_container_app_entitlements(true),
-    )?;
-    fs::write(
-        &extension_entitlements_path,
-        camera_extension_entitlements(),
-    )?;
-    fs::write(&info_plist_path, camera_extension_info_plist())?;
-
-    println!("Camera Extension prototype plan written.");
-    println!("Target: {}", target.label());
-    println!("Plan: {}", relative_display(&root, &plan_path));
-    println!(
-        "Info.plist template: {}",
-        relative_display(&root, &info_plist_path)
-    );
-    println!(
-        "Entitlements: {}, {}",
-        relative_display(&root, &app_entitlements_path),
-        relative_display(&root, &extension_entitlements_path)
-    );
-    println!("Camera name: {VIRTUAL_CAMERA_NAME}");
-    println!("Bundle id: {VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID}");
-    println!("Readiness: {}", readiness.status_label());
-    Ok(())
-}
-
-fn virtual_camera_readiness(args: Vec<String>) -> Result<()> {
-    let target = parse_virtual_camera_readiness_args(args)?;
-    let root = project_root()?;
-    let config_path = root.join(target.config_path());
-    let report_dir = root.join("target/virtual-camera");
-    let report_path = report_dir.join("readiness.md");
-    fs::create_dir_all(&report_dir)?;
-
-    let report = build_virtual_camera_readiness_report(&root, target, &config_path)?;
-    fs::write(&report_path, &report.markdown)?;
-
-    println!("Virtual camera readiness report written.");
-    println!("Target: {}", target.label());
-    println!("Report: {}", relative_display(&root, &report_path));
-    println!("Status: {}", report.status_label());
-    println!("Next: {}", report.next_action);
-    Ok(())
+    println!("2. In OBS, add a Window Capture source named `MacAvatarLayer OBS Source`.");
+    println!("3. In OBS Controls, click `Start Virtual Camera`.");
+    println!("4. In Zoom, Discord, Meet, or another app, select `OBS Virtual Camera`.");
+    if matches!(placement, ObsWindowPlacement::Offscreen) {
+        println!(
+            "Note: offscreen capture depends on OBS/macOS WindowServer behavior; use --desktop if OBS updates are not smooth."
+        );
+    }
 }
 
 fn tune_input(args: Vec<String>) -> Result<()> {
@@ -3636,6 +2759,23 @@ fn signed_entitlements_have_camera_privacy(text: &str) -> bool {
         && text.contains("com.apple.security.device.audio-input")
 }
 
+fn signed_entitlements_text(bundle_path: &Path) -> Option<String> {
+    if !bundle_path.exists() {
+        return None;
+    }
+    let output = Command::new("codesign")
+        .arg("-d")
+        .arg("--entitlements")
+        .arg(":-")
+        .arg(bundle_path)
+        .output()
+        .ok()?;
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some(text)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct DoctorConfig {
@@ -3670,489 +2810,7 @@ struct DoctorScreenCaptureKitConfig {
     stalled_after_seconds: Option<f64>,
 }
 
-struct VirtualCameraReadinessReport {
-    markdown: String,
-    ready_for_extension_prototype: bool,
-    next_action: String,
-}
-
-impl VirtualCameraReadinessReport {
-    fn status_label(&self) -> &'static str {
-        if self.ready_for_extension_prototype {
-            "ready for extension prototype"
-        } else {
-            "setup incomplete"
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct InternalOutputReadiness {
-    mode: String,
-    producer: String,
-    activate_virtual_camera: bool,
-    manifest_path: String,
-    manifest_exists: bool,
-    manifest_frames: Option<u64>,
-    manifest_surface_id: Option<u64>,
-    manifest_size: Option<(u64, u64)>,
-    manifest_pixel_format: Option<String>,
-    manifest_frame_rate: Option<u64>,
-    manifest_updated_unix_ms: Option<u64>,
-}
-
-fn build_virtual_camera_readiness_report(
-    root: &Path,
-    target: SelectModelTarget,
-    config_path: &Path,
-) -> Result<VirtualCameraReadinessReport> {
-    let output = inspect_internal_output_readiness(root, config_path)?;
-    let platform_ok = env::consts::OS == "macos";
-    let app_bundle_path = root.join("target/dev-app/MacAvatarLayer Dev.app");
-    let app_bundle_exists = app_bundle_path.is_dir();
-    let embedded_extension_path = app_bundle_path
-        .join("Contents/Library/SystemExtensions")
-        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
-    let embedded_extension_exists = embedded_extension_path.is_dir();
-    let installed_app_path = PathBuf::from("/Applications").join(DEV_APP_BUNDLE_NAME);
-    let installed_app_exists = installed_app_path.is_dir();
-    let installed_extension_path = installed_app_path
-        .join("Contents/Library/SystemExtensions")
-        .join(VIRTUAL_CAMERA_BUNDLE_NAME);
-    let installed_extension_exists = installed_extension_path.is_dir();
-    let installed_app_display = installed_app_path.display().to_string();
-    let codesign_identity = camera_codesign_identity();
-    let has_real_codesign_identity = codesign_identity != "-";
-    let installed_app_entitlements = signed_entitlements_text(&installed_app_path);
-    let app_has_system_extension_entitlement = installed_app_entitlements
-        .as_deref()
-        .is_some_and(|text| text.contains("com.apple.developer.system-extension.install"));
-    let installed_app_profile_exists = installed_app_path
-        .join("Contents/embedded.provisionprofile")
-        .is_file();
-    let installed_extension_profile_exists = installed_extension_path
-        .join("Contents/embedded.provisionprofile")
-        .is_file();
-    let installed_app_profile_summary = embedded_provisioning_profile_summary(
-        &installed_app_path,
-        ProvisioningProfileKind::ContainerApp,
-    );
-    let installed_extension_profile_summary = embedded_provisioning_profile_summary(
-        &installed_extension_path,
-        ProvisioningProfileKind::CameraExtension,
-    );
-    let installed_app_profile_valid = installed_app_profile_summary.is_some();
-    let installed_extension_profile_valid = installed_extension_profile_summary.is_some();
-    let system_extension_active = camera_system_extension_active();
-    let manifest_contract_ok = output.manifest_size == Some((1080, 1080))
-        && output.manifest_pixel_format.as_deref() == Some("BGRA8Unorm")
-        && output.manifest_frame_rate == Some(60);
-    let internal_ready = output.mode == "internal"
-        && output.producer == "iosurface"
-        && output.activate_virtual_camera
-        && output.manifest_exists
-        && output.manifest_frames.unwrap_or(0) > 0
-        && manifest_contract_ok;
-    let ready_for_extension_prototype = platform_ok
-        && internal_ready
-        && embedded_extension_exists
-        && installed_app_exists
-        && installed_extension_exists
-        && app_has_system_extension_entitlement
-        && installed_app_profile_valid
-        && installed_extension_profile_valid
-        && has_real_codesign_identity
-        && system_extension_active;
-    let manifest_size = output
-        .manifest_size
-        .map(|(width, height)| format!("{width}x{height}"))
-        .unwrap_or_else(|| "unknown".to_string());
-    let manifest_frames = output
-        .manifest_frames
-        .map(|frames| frames.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let manifest_surface_id = output
-        .manifest_surface_id
-        .map(|surface_id| surface_id.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let manifest_pixel_format = output
-        .manifest_pixel_format
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let manifest_frame_rate = output
-        .manifest_frame_rate
-        .map(|frame_rate| format!("{frame_rate} fps"))
-        .unwrap_or_else(|| "unknown".to_string());
-    let manifest_updated = output
-        .manifest_updated_unix_ms
-        .map(|updated| updated.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let config_display = relative_display(root, config_path);
-    let app_bundle_display = relative_display(root, &app_bundle_path);
-    let embedded_extension_display = relative_display(root, &embedded_extension_path);
-    let manifest_full_path = absolute_path(root, &output.manifest_path);
-    let manifest_display = relative_display(root, &manifest_full_path);
-    let status = if ready_for_extension_prototype {
-        "ready for extension prototype"
-    } else {
-        "setup incomplete"
-    };
-    let next_action = virtual_camera_next_action(
-        &output,
-        platform_ok,
-        app_bundle_exists,
-        embedded_extension_exists,
-        has_real_codesign_identity,
-        installed_app_exists,
-        app_has_system_extension_entitlement,
-        installed_app_profile_exists,
-        installed_extension_profile_exists,
-        installed_app_profile_valid,
-        installed_extension_profile_valid,
-        system_extension_active,
-    );
-    let container_profile_detail = profile_readiness_detail(
-        installed_app_profile_exists,
-        installed_app_profile_summary.as_ref(),
-    );
-    let extension_profile_detail = profile_readiness_detail(
-        installed_extension_profile_exists,
-        installed_extension_profile_summary.as_ref(),
-    );
-    let markdown = format!(
-        "# Virtual Camera Readiness\n\n\
-Generated for `{target_label}` profile.\n\n\
-Status: **{status}**\n\n\
-## Product Boundary\n\n\
-- The project will not ship an OBS-specific plugin.\n\
-- The no-desktop path stays inside MacAvatarLayer as a macOS virtual camera output.\n\
-- OBS, QuickRecord, Zoom, Discord, and similar apps should eventually consume the same system camera source.\n\n\
-## Current Checks\n\n\
-| Check | Status | Detail |\n\
-| --- | --- | --- |\n\
-| macOS host | {platform_status} | `{os}` |\n\
-| Camera API direction | ok | CoreMediaIO Camera Extension, not legacy DAL or OBS plugin |\n\
-| Rust CMIO bindings | ok | `objc2-core-media-io` + `objc2-core-video` behind `virtual-camera-extension` |\n\
-| Active config | ok | `{config_display}` |\n\
-| Output mode | {mode_status} | `{mode}` |\n\
-| Internal producer | {producer_status} | `{producer}` |\n\
-| Camera activation | {activation_status} | `{activate_virtual_camera}` |\n\
-| IOSurface manifest | {manifest_status} | `{manifest_display}` |\n\
-| IOSurface id | {surface_status} | `{surface_id}` |\n\
-| Internal frame count | {frames_status} | `{frames}` |\n\
-| Texture size | {size_status} | `{size}` |\n\
-| Camera pixel format | {pixel_format_status} | `{pixel_format}` |\n\
-| Camera frame rate | {frame_rate_status} | `{frame_rate}` |\n\
-| Manifest updated | {updated_status} | `{updated_unix_ms}` |\n\
-| App wrapper | {bundle_status} | `{bundle}` |\n\
-| Embedded Camera Extension | {embedded_extension_status} | `{embedded_extension}` |\n\
-| Installed app wrapper | {installed_app_status} | `{installed_app}` |\n\
-| Installed Camera Extension | {installed_extension_status} | `{installed_extension}` |\n\
-| System extension install entitlement | {system_extension_entitlement_status} | `{system_extension_entitlement}` |\n\
-| Container provisioning profile | {container_profile_status} | `{container_profile}` |\n\
-| Extension provisioning profile | {extension_profile_status} | `{extension_profile}` |\n\
-| System Extension active | {system_extension_active_status} | `{system_extension_active}` |\n\
-| System Camera signing identity | {codesign_status} | `{codesign}` |\n\n\
-## Next Implementation Slice\n\n\
-1. Keep the existing internal IOSurface producer as the frame source.\n\
-2. Build and embed the macOS Camera Extension target owned by this project.\n\
-3. Use `MA -> OBS / Recording Output -> Apply System Camera Source...` or `cargo xtask configure-internal-output --{target_flag}` so IOSurface output and Camera Extension activation are enabled together for `{extension_bundle_id}`.\n\
-4. Feed the extension from the IOSurface manifest/producer bridge as `1080x1080 60fps BGRA` sample buffers.\n\
-5. Register one camera named `MacAvatarLayer Camera` and validate in QuickRecord, then OBS.\n\n\
-Generate the prototype bundle templates with `cargo xtask camera-extension-plan --{target_flag}`.\n\n\
-## Setup Commands\n\n\
-```bash\n\
-cargo xtask configure-internal-output --{target_flag}\n\
-cargo xtask run-metal{run_release_flag}\n\
-cargo xtask virtual-camera-readiness --{target_flag}\n\
-cargo xtask camera-extension-plan --{target_flag}\n\
-cargo xtask build-camera-extension --{target_flag}\n\
-cargo xtask build-app{run_release_flag}\n\
-```\n\n\
-`System Camera signing identity` is only relevant to the System Camera Source prototype. The normal desktop-window workflow builds and runs with ad-hoc signing when no Apple developer certificate is installed.\n",
-        target_label = target.label(),
-        status = status,
-        platform_status = readiness_status(platform_ok),
-        os = env::consts::OS,
-        config_display = config_display,
-        mode_status = readiness_status(output.mode == "internal"),
-        mode = output.mode,
-        producer_status = readiness_status(output.producer == "iosurface"),
-        producer = output.producer,
-        activation_status = readiness_status(output.activate_virtual_camera),
-        activate_virtual_camera = output.activate_virtual_camera,
-        manifest_status = readiness_status(output.manifest_exists),
-        manifest_display = manifest_display,
-        surface_status = readiness_status(output.manifest_surface_id.is_some()),
-        surface_id = manifest_surface_id,
-        frames_status = readiness_status(output.manifest_frames.unwrap_or(0) > 0),
-        frames = manifest_frames,
-        size_status = readiness_status(output.manifest_size == Some((1080, 1080))),
-        size = manifest_size,
-        pixel_format_status =
-            readiness_status(output.manifest_pixel_format.as_deref() == Some("BGRA8Unorm")),
-        pixel_format = manifest_pixel_format,
-        frame_rate_status = readiness_status(output.manifest_frame_rate == Some(60)),
-        frame_rate = manifest_frame_rate,
-        updated_status = readiness_status(output.manifest_updated_unix_ms.is_some()),
-        updated_unix_ms = manifest_updated,
-        bundle_status = readiness_status(app_bundle_exists),
-        bundle = app_bundle_display,
-        embedded_extension_status = readiness_status(embedded_extension_exists),
-        embedded_extension = embedded_extension_display,
-        installed_app_status = readiness_status(installed_app_exists),
-        installed_app = installed_app_display,
-        installed_extension_status = readiness_status(installed_extension_exists),
-        installed_extension = installed_extension_path.display(),
-        system_extension_entitlement_status =
-            readiness_status(app_has_system_extension_entitlement),
-        system_extension_entitlement = app_has_system_extension_entitlement,
-        container_profile_status = readiness_status(installed_app_profile_valid),
-        container_profile = container_profile_detail,
-        extension_profile_status = readiness_status(installed_extension_profile_valid),
-        extension_profile = extension_profile_detail,
-        system_extension_active_status = readiness_status(system_extension_active),
-        system_extension_active = system_extension_active,
-        codesign_status = if has_real_codesign_identity {
-            "ok"
-        } else {
-            "warn"
-        },
-        codesign = codesign_identity,
-        extension_bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
-        target_flag = target.flag_name(),
-        run_release_flag = if matches!(target, SelectModelTarget::Build) {
-            " --release"
-        } else {
-            ""
-        },
-    );
-
-    Ok(VirtualCameraReadinessReport {
-        markdown,
-        ready_for_extension_prototype,
-        next_action,
-    })
-}
-
-fn virtual_camera_next_action(
-    output: &InternalOutputReadiness,
-    platform_ok: bool,
-    app_bundle_exists: bool,
-    embedded_extension_exists: bool,
-    has_real_codesign_identity: bool,
-    installed_app_exists: bool,
-    app_has_system_extension_entitlement: bool,
-    installed_app_profile_exists: bool,
-    installed_extension_profile_exists: bool,
-    installed_app_profile_valid: bool,
-    installed_extension_profile_valid: bool,
-    system_extension_active: bool,
-) -> String {
-    if !platform_ok {
-        return "run this readiness check on macOS.".to_string();
-    }
-    if output.mode != "internal"
-        || output.producer != "iosurface"
-        || !output.activate_virtual_camera
-    {
-        return "run cargo xtask configure-internal-output --build.".to_string();
-    }
-    if !output.manifest_exists || output.manifest_frames.unwrap_or(0) == 0 {
-        return "run cargo xtask run-metal --release once to create and update the IOSurface manifest.".to_string();
-    }
-    if output.manifest_size != Some((1080, 1080))
-        || output.manifest_pixel_format.as_deref() != Some("BGRA8Unorm")
-        || output.manifest_frame_rate != Some(60)
-    {
-        return "rebuild and rerun cargo xtask run-metal --release so the IOSurface manifest uses 1080x1080 BGRA at 60fps.".to_string();
-    }
-    if !app_bundle_exists || !embedded_extension_exists {
-        return "run cargo xtask build-app --release to embed the Camera Extension into the app wrapper.".to_string();
-    }
-    if !has_real_codesign_identity {
-        return "System Camera Source activation needs Apple Developer Program signing and provisioning. For normal local use, keep using the desktop-window or offscreen-window output path; no developer certificate is required.".to_string();
-    }
-    if !installed_app_exists {
-        return "run cargo xtask build-app --release so the signed app wrapper is copied to /Applications for System Extension activation.".to_string();
-    }
-    if !app_has_system_extension_entitlement {
-        return "rebuild the app so the /Applications copy is signed with com.apple.developer.system-extension.install.".to_string();
-    }
-    if !installed_app_profile_exists || !installed_extension_profile_exists {
-        return format!(
-            "the app is signed, but embedded provisioning profiles are missing. Place Apple Developer Program profiles at `{DEFAULT_CONTAINER_PROVISION_PROFILE}` and `{DEFAULT_CAMERA_EXTENSION_PROVISION_PROFILE}` or set `{CONTAINER_PROVISION_PROFILE_ENV}` and `{CAMERA_EXTENSION_PROVISION_PROFILE_ENV}`, then run cargo xtask build-app --release."
-        );
-    }
-    if !installed_app_profile_valid || !installed_extension_profile_valid {
-        return "embedded provisioning profiles are present but do not match the required bundle ids, app group, or System Extension entitlement; replace them and run cargo xtask build-app --release.".to_string();
-    }
-    if !system_extension_active {
-        return "launch the /Applications app, approve the Camera Extension in System Settings > General > Login Items & Extensions > Camera Extensions, then re-run this readiness check.".to_string();
-    }
-    "test MacAvatarLayer Camera in QuickRecord or OBS.".to_string()
-}
-
-fn profile_readiness_detail(exists: bool, summary: Option<&ProvisioningProfileSummary>) -> String {
-    match (exists, summary) {
-        (false, _) => "missing".to_string(),
-        (true, Some(summary)) => {
-            let name = summary.name.as_deref().unwrap_or("unknown");
-            let team = summary.team_identifier.as_deref().unwrap_or("unknown");
-            format!(
-                "valid name={name} app_id={} team={team}",
-                summary.application_identifier
-            )
-        }
-        (true, None) => "present but invalid".to_string(),
-    }
-}
-
-fn signed_entitlements_text(bundle_path: &Path) -> Option<String> {
-    if !bundle_path.exists() {
-        return None;
-    }
-    let output = Command::new("codesign")
-        .arg("-d")
-        .arg("--entitlements")
-        .arg(":-")
-        .arg(bundle_path)
-        .output()
-        .ok()?;
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    Some(text)
-}
-
-fn camera_system_extension_active() -> bool {
-    let output = Command::new("systemextensionsctl").arg("list").output();
-    let Ok(output) = output else {
-        return false;
-    };
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    text.lines().any(|line| {
-        line.contains(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID) && line.contains("[activated enabled]")
-    })
-}
-
-fn camera_extension_plan_markdown(target: SelectModelTarget, root: &Path) -> String {
-    let prototype_dir = root.join("target/virtual-camera/camera-extension-prototype");
-    format!(
-        "# CoreMediaIO Camera Extension Prototype\n\n\
-Generated for `{target}` profile.\n\n\
-## Decision\n\n\
-- Use Apple's modern CoreMediaIO Camera Extension path, not legacy DAL, Syphon, NDI, or an OBS plugin.\n\
-- Keep the main app as the frame producer: Live2D -> Metal -> IOSurface manifest.\n\
-- Expose one system camera named `{camera_name}` so OBS, QuickRecord, Zoom, and other apps consume the same source.\n\n\
-## Rust Binding Stack\n\n\
-| Layer | Rust crate | Role |\n\
-| --- | --- | --- |\n\
-| CoreMediaIO extension API | `objc2-core-media-io = 0.3.2` | Provider, device, stream, and CMIO sample buffers |\n\
-| CoreVideo frame bridge | `objc2-core-video = 0.3.2` | CVPixelBuffer / IOSurface handoff for frames |\n\
-| Existing producer | `iosurface-output` feature | Metal render target backed by IOSurface |\n\n\
-## Identifiers\n\n\
-| Item | Value |\n\
-| --- | --- |\n\
-| Camera localized name | `{camera_name}` |\n\
-| Extension bundle id | `{bundle_id}` |\n\
-| Mach service | `{mach_service}` |\n\
-| App group | `{app_group}` |\n\
-| Producer manifest | `target/internal-output/iosurface.json` |\n\n\
-## Generated Templates\n\n\
-- `{prototype_dir}/CameraExtension.Info.plist`\n\
-- `{prototype_dir}/CameraExtension.entitlements`\n\
-- `{prototype_dir}/ContainerApp.entitlements`\n\n\
-These files are templates for the next implementation slice. The current app wrapper embeds the prototype `.systemextension` and exposes a first-pass `OSSystemExtensionManager` activation menu item. The extension now starts the CMIO provider service and contains a first-pass IOSurface -> CVPixelBuffer -> CMSampleBuffer sender, but a finished virtual camera still needs validation from `/Applications` with Apple Developer Program signing/provisioning plus consumer testing.\n\n\
-## Implementation Checklist\n\n\
-- [x] Add a Rust Camera Extension target or bundle step that builds a system extension binary.\n\
-- [x] Define provider/device/stream contracts, stable UUIDs, BGRA 1080x1080 format, IOSurface manifest input, and stream lifecycle state.\n\
-- [x] Implement first-pass `CMIOExtensionProviderSource` bridge class with provider properties.\n\
-- [x] Implement first-pass `CMIOExtensionDeviceSource` bridge class with model properties.\n\
-- [x] Implement first-pass `CMIOExtensionStreamSource` bridge class with BGRA 1080x1080 60fps format and start/stop logging.\n\
-- [x] Wire bridge source classes into a `CMIOExtensionProvider`, device, and stream object graph.\n\
-- [x] Start the `CMIOExtensionProvider` service inside the installed extension runtime.\n\
-- [x] Open the latest IOSurface id from `target/internal-output/iosurface.json`.\n\
-- [x] Convert the IOSurface-backed frame into a `CVPixelBuffer` and then a `CMSampleBuffer`/`CMIOSampleBufferCreate` payload.\n\
-- [x] Keep sending frames while the stream is active.\n\
-- [ ] Add app-group manifest handoff and a neutral transparent frame when the producer is stale.\n\
-- [x] Add app-side activation command for the embedded system extension prototype.\n\
-- [ ] Add app-side deactivation/status feedback once the extension delegate is implemented.\n\
-- [ ] Validate first in QuickRecord, then OBS as a normal camera source.\n\n\
-## Local Commands\n\n\
-```bash\n\
-cargo xtask configure-internal-output --{flag}\n\
-cargo xtask run-metal{release_flag}\n\
-cargo xtask virtual-camera-readiness --{flag}\n\
-cargo xtask camera-extension-plan --{flag}\n\
-cargo xtask build-camera-extension --{flag}\n\
-cargo test --features \"virtual-camera-extension\"\n\
-```\n",
-        target = target.label(),
-        camera_name = VIRTUAL_CAMERA_NAME,
-        bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
-        mach_service = VIRTUAL_CAMERA_MACH_SERVICE,
-        app_group = VIRTUAL_CAMERA_APP_GROUP,
-        prototype_dir = relative_display(root, &prototype_dir),
-        flag = target.flag_name(),
-        release_flag = if matches!(target, SelectModelTarget::Build) {
-            " --release"
-        } else {
-            ""
-        },
-    )
-}
-
-fn camera_extension_info_plist() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>CameraExtension</string>
-    <key>CFBundleIdentifier</key>
-    <string>{bundle_id}</string>
-    <key>CFBundleName</key>
-    <string>MacAvatarLayer Camera Extension</string>
-    <key>CFBundlePackageType</key>
-    <string>SYSX</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CMIOExtensionMachServiceName</key>
-    <string>{mach_service}</string>
-    <key>NSSystemExtensionUsageDescription</key>
-    <string>Publishes MacAvatarLayer frames as a macOS virtual camera.</string>
-</dict>
-</plist>
-"#,
-        bundle_id = VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID,
-        mach_service = VIRTUAL_CAMERA_MACH_SERVICE
-    )
-}
-
-fn camera_container_app_entitlements(system_camera_source_enabled: bool) -> String {
-    let system_camera_source_entitlements = if system_camera_source_enabled {
-        format!(
-            r#"    <key>com.apple.developer.system-extension.install</key>
-    <true/>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>{app_group}</string>
-    </array>
-"#,
-            app_group = VIRTUAL_CAMERA_APP_GROUP
-        )
-    } else {
-        String::new()
-    };
-
+fn camera_container_app_entitlements() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -4162,115 +2820,10 @@ fn camera_container_app_entitlements(system_camera_source_enabled: bool) -> Stri
     <true/>
     <key>com.apple.security.device.audio-input</key>
     <true/>
-{system_camera_source_entitlements}</dict>
-</plist>
-"#,
-        system_camera_source_entitlements = system_camera_source_entitlements
-    )
-}
-
-fn camera_extension_entitlements() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>{app_group}</string>
-    </array>
 </dict>
 </plist>
-"#,
-        app_group = VIRTUAL_CAMERA_APP_GROUP
+"#
     )
-}
-
-fn inspect_internal_output_readiness(
-    root: &Path,
-    config_path: &Path,
-) -> Result<InternalOutputReadiness> {
-    let content = fs::read_to_string(config_path).unwrap_or_default();
-    let config: toml::Value =
-        toml::from_str(&content).unwrap_or_else(|_| toml::Value::Table(Default::default()));
-    let output = config.get("output");
-    let internal = output.and_then(|value| value.get("internal"));
-    let mode = output
-        .and_then(|value| value.get("mode"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("window")
-        .trim()
-        .to_ascii_lowercase();
-    let producer = internal
-        .and_then(|value| value.get("producer"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("none")
-        .trim()
-        .to_ascii_lowercase();
-    let activate_virtual_camera = internal
-        .and_then(|value| value.get("activate_virtual_camera"))
-        .and_then(toml::Value::as_bool)
-        .unwrap_or(false);
-    let manifest_path = internal
-        .and_then(|value| value.get("manifest_path"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("target/internal-output/iosurface.json")
-        .trim()
-        .to_string();
-    let manifest_full_path = absolute_path(root, &manifest_path);
-    let manifest = read_iosurface_manifest_summary(&manifest_full_path);
-
-    Ok(InternalOutputReadiness {
-        mode,
-        producer,
-        activate_virtual_camera,
-        manifest_path,
-        manifest_exists: manifest_full_path.is_file(),
-        manifest_frames: manifest.as_ref().and_then(|value| value.frames),
-        manifest_surface_id: manifest.as_ref().and_then(|value| value.surface_id),
-        manifest_size: manifest.as_ref().and_then(|value| value.size),
-        manifest_pixel_format: manifest
-            .as_ref()
-            .and_then(|value| value.pixel_format.clone()),
-        manifest_frame_rate: manifest.as_ref().and_then(|value| value.frame_rate),
-        manifest_updated_unix_ms: manifest.and_then(|value| value.updated_unix_ms),
-    })
-}
-
-#[derive(Debug)]
-struct IosurfaceManifestSummary {
-    frames: Option<u64>,
-    surface_id: Option<u64>,
-    size: Option<(u64, u64)>,
-    pixel_format: Option<String>,
-    frame_rate: Option<u64>,
-    updated_unix_ms: Option<u64>,
-}
-
-fn read_iosurface_manifest_summary(path: &Path) -> Option<IosurfaceManifestSummary> {
-    let text = fs::read_to_string(path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let width = json.get("width").and_then(serde_json::Value::as_u64);
-    let height = json.get("height").and_then(serde_json::Value::as_u64);
-    Some(IosurfaceManifestSummary {
-        frames: json.get("frames").and_then(serde_json::Value::as_u64),
-        surface_id: json.get("iosurface_id").and_then(serde_json::Value::as_u64),
-        size: width.zip(height),
-        pixel_format: json
-            .get("pixel_format")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        frame_rate: json.get("frame_rate").and_then(serde_json::Value::as_u64),
-        updated_unix_ms: json
-            .get("updated_unix_ms")
-            .and_then(serde_json::Value::as_u64),
-    })
-}
-
-fn readiness_status(ok: bool) -> &'static str {
-    if ok { "ok" } else { "warn" }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4372,7 +2925,19 @@ fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, Stri
     }
 }
 
-fn parse_obs_recording_args(args: Vec<String>) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
+fn parse_obs_virtual_camera_args(
+    args: Vec<String>,
+) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
+    parse_obs_window_capture_args(
+        args,
+        "usage: cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen]",
+    )
+}
+
+fn parse_obs_window_capture_args(
+    args: Vec<String>,
+    usage: &'static str,
+) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
     let mut target = SelectModelTarget::Build;
     let mut placement = ObsWindowPlacement::Desktop;
     for arg in args {
@@ -4382,41 +2947,11 @@ fn parse_obs_recording_args(args: Vec<String>) -> Result<(SelectModelTarget, Obs
             "--desktop" => placement = ObsWindowPlacement::Desktop,
             "--offscreen" => placement = ObsWindowPlacement::Offscreen,
             _ => {
-                return Err(
-                    "usage: cargo xtask configure-obs-recording [--dev|--build] [--desktop|--offscreen]"
-                        .into(),
-                );
+                return Err(usage.into());
             }
         }
     }
     Ok((target, placement))
-}
-
-fn parse_internal_output_args(args: Vec<String>) -> Result<SelectModelTarget> {
-    match args.as_slice() {
-        [] => Ok(SelectModelTarget::Build),
-        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
-        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
-        _ => Err("usage: cargo xtask configure-internal-output [--dev|--build]".into()),
-    }
-}
-
-fn parse_camera_extension_plan_args(args: Vec<String>) -> Result<SelectModelTarget> {
-    match args.as_slice() {
-        [] => Ok(SelectModelTarget::Build),
-        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
-        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
-        _ => Err("usage: cargo xtask camera-extension-plan [--dev|--build]".into()),
-    }
-}
-
-fn parse_virtual_camera_readiness_args(args: Vec<String>) -> Result<SelectModelTarget> {
-    match args.as_slice() {
-        [] => Ok(SelectModelTarget::Build),
-        [flag] if flag == "--dev" || flag == "--development" => Ok(SelectModelTarget::Development),
-        [flag] if flag == "--build" => Ok(SelectModelTarget::Build),
-        _ => Err("usage: cargo xtask virtual-camera-readiness [--dev|--build]".into()),
-    }
 }
 
 fn parse_tune_input_args(
@@ -8051,26 +6586,6 @@ fn remove_path(path: PathBuf) -> io::Result<()> {
     }
 }
 
-fn copy_dir_replace(source: &Path, target: &Path) -> Result<()> {
-    remove_path(target.to_path_buf())?;
-    copy_dir_recursive(source, target)
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir_all(target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-        } else {
-            fs::copy(&source_path, &target_path)?;
-        }
-    }
-    Ok(())
-}
-
 fn terminate_app_processes(root: &Path) {
     let binary = root.join("target/debug/mac-avatar-layer");
     let canonical_binary = binary.canonicalize().unwrap_or_else(|_| binary.clone());
@@ -8726,284 +7241,19 @@ atlas_anisotropy = 1
     }
 
     #[test]
-    fn obs_recording_args_default_to_build_config() {
+    fn obs_virtual_camera_args_match_window_capture_profile_args() {
         let (target, placement) =
-            parse_obs_recording_args(Vec::new()).expect("default obs target should parse");
+            parse_obs_virtual_camera_args(Vec::new()).expect("default obs target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
         assert!(matches!(placement, ObsWindowPlacement::Desktop));
 
-        let (target, placement) = parse_obs_recording_args(vec!["--dev".to_string()])
-            .expect("dev obs target should parse");
+        let (target, placement) =
+            parse_obs_virtual_camera_args(vec!["--dev".to_string(), "--offscreen".to_string()])
+                .expect("dev obs virtual camera target should parse");
         assert!(matches!(target, SelectModelTarget::Development));
-        assert!(matches!(placement, ObsWindowPlacement::Desktop));
-
-        let (target, placement) =
-            parse_obs_recording_args(vec!["--build".to_string(), "--offscreen".to_string()])
-                .expect("build obs target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
         assert!(matches!(placement, ObsWindowPlacement::Offscreen));
 
-        assert!(parse_obs_recording_args(vec!["--release".to_string()]).is_err());
-    }
-
-    #[test]
-    fn internal_output_args_default_to_build_config() {
-        let target = parse_internal_output_args(Vec::new())
-            .expect("default internal output target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        let target = parse_internal_output_args(vec!["--dev".to_string()])
-            .expect("dev internal output target should parse");
-        assert!(matches!(target, SelectModelTarget::Development));
-
-        let target = parse_internal_output_args(vec!["--build".to_string()])
-            .expect("build internal output target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        assert!(parse_internal_output_args(vec!["--release".to_string()]).is_err());
-    }
-
-    #[test]
-    fn virtual_camera_readiness_args_default_to_build_config() {
-        let target = parse_virtual_camera_readiness_args(Vec::new())
-            .expect("default virtual camera target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        let target = parse_virtual_camera_readiness_args(vec!["--dev".to_string()])
-            .expect("dev virtual camera target should parse");
-        assert!(matches!(target, SelectModelTarget::Development));
-
-        let target = parse_virtual_camera_readiness_args(vec!["--build".to_string()])
-            .expect("build virtual camera target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        assert!(parse_virtual_camera_readiness_args(vec!["--release".to_string()]).is_err());
-    }
-
-    #[test]
-    fn camera_extension_plan_args_default_to_build_config() {
-        let target =
-            parse_camera_extension_plan_args(Vec::new()).expect("default plan target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        let target = parse_camera_extension_plan_args(vec!["--dev".to_string()])
-            .expect("dev plan target should parse");
-        assert!(matches!(target, SelectModelTarget::Development));
-
-        let target = parse_camera_extension_plan_args(vec!["--build".to_string()])
-            .expect("build plan target should parse");
-        assert!(matches!(target, SelectModelTarget::Build));
-
-        assert!(parse_camera_extension_plan_args(vec!["--release".to_string()]).is_err());
-    }
-
-    #[test]
-    fn provision_camera_profiles_args_parse_source_and_force() {
-        let options = parse_provision_camera_profiles_args(vec![
-            "--from".to_string(),
-            "/tmp/profiles".to_string(),
-            "--force".to_string(),
-        ])
-        .expect("provision args should parse");
-        assert_eq!(options.source_dirs, vec![PathBuf::from("/tmp/profiles")]);
-        assert!(options.force);
-
-        let options = parse_provision_camera_profiles_args(vec![
-            "--from".to_string(),
-            "/tmp/one".to_string(),
-            "--from".to_string(),
-            "/tmp/two".to_string(),
-        ])
-        .expect("multiple source dirs should parse");
-        assert_eq!(
-            options.source_dirs,
-            vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]
-        );
-
-        let options =
-            parse_provision_camera_profiles_args(Vec::new()).expect("default args should parse");
-        assert!(options.source_dirs.len() >= 2);
-        assert!(parse_provision_camera_profiles_args(vec!["--from".to_string()]).is_err());
-        assert!(parse_provision_camera_profiles_args(vec!["--bad".to_string()]).is_err());
-    }
-
-    #[test]
-    fn collect_provisioning_profile_paths_accepts_expected_extensions() {
-        let root = env::temp_dir().join(format!(
-            "mac-avatar-layer-profile-scan-test-{}",
-            timestamp_for_filename()
-        ));
-        let nested = root.join("nested");
-        fs::create_dir_all(&nested).expect("test directories should be created");
-        fs::write(root.join("one.provisionprofile"), "").expect("profile should be written");
-        fs::write(nested.join("two.mobileprovision"), "").expect("profile should be written");
-        fs::write(root.join("ignore.txt"), "").expect("ignored file should be written");
-
-        let mut paths = Vec::new();
-        collect_provisioning_profile_paths(&root, &mut paths)
-            .expect("profile paths should collect");
-        paths.sort();
-        assert_eq!(paths.len(), 2);
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.ends_with("one.provisionprofile"))
-        );
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.ends_with("two.mobileprovision"))
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn camera_extension_templates_include_coremediaio_identifiers() {
-        let root = env::temp_dir().join(format!(
-            "mac-avatar-layer-camera-extension-plan-test-{}",
-            timestamp_for_filename()
-        ));
-        let plan = camera_extension_plan_markdown(SelectModelTarget::Build, &root);
-        assert!(plan.contains("objc2-core-media-io"));
-        assert!(plan.contains("MacAvatarLayer Camera"));
-        assert!(plan.contains("CMIOExtensionStreamSource"));
-
-        let info = camera_extension_info_plist();
-        assert!(info.contains("CMIOExtensionMachServiceName"));
-        assert!(info.contains(VIRTUAL_CAMERA_EXTENSION_BUNDLE_ID));
-
-        let entitlements = camera_container_app_entitlements(true);
-        assert!(entitlements.contains("com.apple.developer.system-extension.install"));
-        assert!(entitlements.contains(VIRTUAL_CAMERA_APP_GROUP));
-        assert!(entitlements.contains("com.apple.security.device.camera"));
-        assert!(entitlements.contains("com.apple.security.device.audio-input"));
-    }
-
-    #[test]
-    fn validates_container_provisioning_profile_contract() {
-        let value = serde_json::json!({
-            "Name": "MacAvatarLayer Container",
-            "TeamIdentifier": ["TEAM123456"],
-            "Entitlements": {
-                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer",
-                "com.apple.developer.system-extension.install": true,
-                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
-            }
-        });
-        let summary =
-            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
-        validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
-            .expect("container profile should validate");
-    }
-
-    #[test]
-    fn rejects_container_profile_without_system_extension_entitlement() {
-        let value = serde_json::json!({
-            "Name": "MacAvatarLayer Container",
-            "TeamIdentifier": ["TEAM123456"],
-            "Entitlements": {
-                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer",
-                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
-            }
-        });
-        let summary =
-            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
-        let error =
-            validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
-                .expect_err("missing system extension entitlement should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("com.apple.developer.system-extension.install")
-        );
-    }
-
-    #[test]
-    fn validates_camera_extension_provisioning_profile_contract() {
-        let value = serde_json::json!({
-            "Name": "MacAvatarLayer Camera Extension",
-            "TeamIdentifier": ["TEAM123456"],
-            "Entitlements": {
-                "application-identifier": "TEAM123456.io.github.symphonyiceattack.mac-avatar-layer.CameraExtension",
-                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
-            }
-        });
-        let summary =
-            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
-        validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::CameraExtension)
-            .expect("extension profile should validate");
-    }
-
-    #[test]
-    fn rejects_provisioning_profile_for_wrong_bundle_id() {
-        let value = serde_json::json!({
-            "Name": "Wrong Profile",
-            "TeamIdentifier": ["TEAM123456"],
-            "Entitlements": {
-                "application-identifier": "TEAM123456.com.example.other",
-                "com.apple.developer.system-extension.install": true,
-                "com.apple.security.application-groups": ["group.io.github.symphonyiceattack.mac-avatar-layer"]
-            }
-        });
-        let summary =
-            provisioning_profile_summary_from_json(&value).expect("profile summary should parse");
-        let error =
-            validate_provisioning_profile_summary(&summary, ProvisioningProfileKind::ContainerApp)
-                .expect_err("wrong bundle id should be rejected");
-        assert!(error.to_string().contains("application-identifier"));
-    }
-
-    #[test]
-    fn virtual_camera_readiness_report_reads_iosurface_manifest() {
-        let root = env::temp_dir().join(format!(
-            "mac-avatar-layer-virtual-camera-test-{}",
-            timestamp_for_filename()
-        ));
-        let manifest_path = root.join("target/internal-output/iosurface.json");
-        fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
-            .expect("manifest dir should be created");
-        fs::write(
-            &manifest_path,
-            r#"{
-  "iosurface_id": 42,
-  "width": 1080,
-  "height": 1080,
-  "pixel_format": "BGRA8Unorm",
-  "frame_rate": 60,
-  "updated_unix_ms": 123456,
-  "frames": 120
-}"#,
-        )
-        .expect("manifest should be written");
-        let config_path = root.join(BUILD_CONFIG_PATH);
-        fs::write(
-            &config_path,
-            r#"
-[output]
-mode = "internal"
-
-[output.internal]
-producer = "iosurface"
-manifest_path = "target/internal-output/iosurface.json"
-activate_virtual_camera = true
-"#,
-        )
-        .expect("config should be written");
-
-        let report =
-            build_virtual_camera_readiness_report(&root, SelectModelTarget::Build, &config_path)
-                .expect("readiness report should build");
-
-        assert!(report.markdown.contains("IOSurface id"));
-        assert!(report.markdown.contains("`42`"));
-        assert!(report.markdown.contains("`120`"));
-        assert!(report.markdown.contains("`1080x1080`"));
-        assert!(report.markdown.contains("`BGRA8Unorm`"));
-        assert!(report.markdown.contains("`60 fps`"));
-        assert!(report.markdown.contains("OBS-specific plugin"));
-
-        let _ = fs::remove_dir_all(root);
+        assert!(parse_obs_virtual_camera_args(vec!["--release".to_string()]).is_err());
     }
 
     #[test]

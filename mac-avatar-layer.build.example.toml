@@ -16,7 +16,6 @@ height = 1080.0
 producer = "none"
 manifest_path = "target/internal-output/iosurface.json"
 obs_preview_window = false
-activate_virtual_camera = false
 
 [model]
 path = "public/model/0.model3.json"

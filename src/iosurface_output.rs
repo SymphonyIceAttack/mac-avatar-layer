@@ -127,10 +127,10 @@ impl IosurfaceOutput {
                 frame_rate: 60,
                 frame_duration_num: 1,
                 frame_duration_den: 60,
-                intended_consumer: "coremediaio-camera-extension",
+                intended_consumer: "diagnostics-or-external-consumer",
                 frames: self.frames,
                 updated_unix_ms: unix_time_millis(),
-                note: "IOSurface producer handoff manifest for the in-project CoreMediaIO camera extension.",
+                note: "IOSurface producer manifest for diagnostics and external integration experiments.",
             },
         )
     }

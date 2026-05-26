@@ -242,7 +242,6 @@ pub struct InternalOutputConfig {
     pub producer: String,
     pub manifest_path: String,
     pub obs_preview_window: bool,
-    pub activate_virtual_camera: bool,
 }
 
 impl Default for InternalOutputConfig {
@@ -253,7 +252,6 @@ impl Default for InternalOutputConfig {
             producer: "none".to_string(),
             manifest_path: "target/internal-output/iosurface.json".to_string(),
             obs_preview_window: false,
-            activate_virtual_camera: false,
         }
     }
 }

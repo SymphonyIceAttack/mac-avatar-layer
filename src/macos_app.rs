@@ -107,7 +107,6 @@ const MENU_OPEN_MICROPHONE_PRIVACY: u32 = 1 << 13;
 const MENU_REVEAL_ACTIVE_MODEL: u32 = 1 << 14;
 const MENU_OPEN_MODELS_FOLDER: u32 = 1 << 15;
 const MENU_APPLY_OBS_WINDOW_CAPTURE_PRESET: u32 = 1 << 16;
-const MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET: u32 = 1 << 17;
 const MENU_APPLY_OBS_OFFSCREEN_CAPTURE_PRESET: u32 = 1 << 18;
 const MODEL_INDEX_UNCHANGED: i32 = -1;
 const WINDOW_SIZE_INDEX_UNCHANGED: i32 = -1;
@@ -292,8 +291,6 @@ pub fn run(model_path: &str, config: AppConfig) -> Result<(), String> {
                 camera_preset: InputPreset::Normal,
             },
         )?;
-        maybe_submit_configured_virtual_camera_activation(&config);
-
         let event_pump = EventPump::new()?;
         let mut frame_clock = FrameClock::new(TARGET_FPS);
         let mut diagnostics = Diagnostics::new(
@@ -1142,28 +1139,13 @@ impl WindowSizePreset {
 enum RecordingOutputPreset {
     DesktopWindow,
     OffscreenWindow,
-    SystemCamera,
 }
 
 impl RecordingOutputPreset {
-    const ALL: [Self; 3] = [
-        Self::DesktopWindow,
-        Self::OffscreenWindow,
-        Self::SystemCamera,
-    ];
+    const ALL: [Self; 2] = [Self::DesktopWindow, Self::OffscreenWindow];
 
     fn from_config(config: &AppConfig) -> Self {
-        if config.output.mode() == crate::config::OutputMode::Internal
-            && matches!(
-                config.output.internal.producer(),
-                crate::config::InternalOutputProducer::Iosurface
-            )
-            && config.output.internal.activate_virtual_camera
-        {
-            Self::SystemCamera
-        } else if config.app.window_capture_friendly
-            && config.app.window_x.unwrap_or(100.0) < -1000.0
-        {
+        if config.app.window_capture_friendly && config.app.window_x.unwrap_or(100.0) < -1000.0 {
             Self::OffscreenWindow
         } else {
             Self::DesktopWindow
@@ -1172,9 +1154,8 @@ impl RecordingOutputPreset {
 
     fn label(self) -> &'static str {
         match self {
-            Self::DesktopWindow => "Apply Desktop Window Capture Preset...",
-            Self::OffscreenWindow => "Apply Offscreen Window Capture Preset...",
-            Self::SystemCamera => "Apply System Camera Source...",
+            Self::DesktopWindow => "Apply OBS Virtual Camera Desktop Preset...",
+            Self::OffscreenWindow => "Apply OBS Virtual Camera Offscreen Preset...",
         }
     }
 }
@@ -1572,7 +1553,7 @@ unsafe fn install_settings_menu(
     add_disabled_menu_item(app_menu, &texture_title)?;
     add_separator_menu_item(app_menu)?;
 
-    add_disabled_menu_item(app_menu, "OBS / Recording Output")?;
+    add_disabled_menu_item(app_menu, "OBS / Virtual Camera Output")?;
     let mut recording_output_items = Vec::new();
     let desktop_window_item = add_action_menu_item(
         app_menu,
@@ -1590,21 +1571,13 @@ unsafe fn install_settings_menu(
         controller,
     )?;
     recording_output_items.push(offscreen_window_item);
-    let system_camera_item = add_action_menu_item(
-        app_menu,
-        RecordingOutputPreset::SystemCamera.label(),
-        "applySystemCameraOutputPreset:",
-        "",
-        controller,
-    )?;
-    recording_output_items.push(system_camera_item);
     add_disabled_menu_item(
         app_menu,
-        "Offscreen uses a normal OBS-capturable window moved outside the visible desktop",
+        "OBS captures this window; OBS Virtual Camera sends the scene to video apps",
     )?;
     add_disabled_menu_item(
         app_menu,
-        "System camera requires Apple Developer Program profiles",
+        "Offscreen keeps a normal OBS-capturable window outside the visible desktop",
     )?;
     add_separator_menu_item(app_menu)?;
 
@@ -1852,16 +1825,6 @@ unsafe fn handle_settings_menu_commands(
         schedule_model_relaunch(model_path)?;
         println!(
             "renderer_event=settings_changed obs_offscreen_capture_preset=applied apply=relaunch config=\"{}\"",
-            crate::config::active_config_path()
-        );
-        terminate_current_app()?;
-    }
-
-    if commands & MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET != 0 {
-        write_internal_output_preset_to_active_config(config.app.runtime_profile)?;
-        schedule_model_relaunch(model_path)?;
-        println!(
-            "renderer_event=settings_changed system_camera_output_preset=applied apply=relaunch config=\"{}\"",
             crate::config::active_config_path()
         );
         terminate_current_app()?;
@@ -2312,7 +2275,6 @@ fn write_obs_window_capture_preset_to_active_config(
                 toml_string_literal("target/internal-output/iosurface.json"),
             ),
             ("internal.obs_preview_window", "false".to_string()),
-            ("internal.activate_virtual_camera", "false".to_string()),
         ],
     );
     updated = set_toml_section_values(
@@ -2327,73 +2289,6 @@ fn write_obs_window_capture_preset_to_active_config(
             ("window_height", "720.0".to_string()),
             ("window_capture_friendly", "true".to_string()),
         ],
-    );
-    updated = set_toml_section_value(&updated, "diagnostics", "show", "false");
-    updated = set_toml_section_values(
-        &updated,
-        "capture.screen_capture_kit",
-        &[
-            ("enabled", "false".to_string()),
-            ("target_fps", "10".to_string()),
-            ("log_interval_seconds", "2.0".to_string()),
-            ("stalled_after_seconds", "2.0".to_string()),
-        ],
-    );
-    updated = set_toml_section_values(
-        &updated,
-        "renderer",
-        &[
-            ("disable_masks", "false".to_string()),
-            ("high_precision_masks", "false".to_string()),
-            ("enable_msaa", "true".to_string()),
-            ("atlas_mipmaps", "true".to_string()),
-            ("atlas_anisotropy", "8".to_string()),
-            ("debug_texture_mode", toml_string_literal("none")),
-        ],
-    );
-    std::fs::write(config_path, updated)
-        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))
-}
-
-fn write_internal_output_preset_to_active_config(
-    runtime_profile: crate::config::RuntimeProfile,
-) -> Result<(), String> {
-    let config_path = Path::new(crate::config::active_config_path());
-    let content = if config_path.is_file() {
-        std::fs::read_to_string(config_path)
-            .map_err(|error| format!("Failed to read {}: {error}", config_path.display()))?
-    } else {
-        String::new()
-    };
-    let runtime_profile = match runtime_profile {
-        crate::config::RuntimeProfile::Development => "development",
-        crate::config::RuntimeProfile::Release => "release",
-    };
-    let mut updated = remove_toml_section(&content, "output");
-    updated = set_toml_section_values(
-        &updated,
-        "output",
-        &[
-            ("mode", toml_string_literal("internal")),
-            ("internal.width", "1080.0".to_string()),
-            ("internal.height", "1080.0".to_string()),
-            ("internal.producer", toml_string_literal("iosurface")),
-            (
-                "internal.manifest_path",
-                toml_string_literal("target/internal-output/iosurface.json"),
-            ),
-            ("internal.obs_preview_window", "false".to_string()),
-            ("internal.activate_virtual_camera", "true".to_string()),
-        ],
-    );
-    updated = set_toml_section_value(&updated, "app", "window_capture_friendly", "false");
-    updated = set_toml_section_value(&updated, "app", "window_x", "100.0");
-    updated = set_toml_section_value(&updated, "app", "window_y", "140.0");
-    updated = set_toml_section_value(
-        &updated,
-        "app",
-        "runtime_profile",
-        &toml_string_literal(runtime_profile),
     );
     updated = set_toml_section_value(&updated, "diagnostics", "show", "false");
     updated = set_toml_section_values(
@@ -2453,48 +2348,6 @@ fn open_privacy_settings(pane: PrivacySettingsPane) {
         eprintln!(
             "Failed to open macOS {} privacy settings: {error}",
             pane.label()
-        );
-    }
-}
-
-fn maybe_submit_configured_virtual_camera_activation(config: &AppConfig) {
-    if config.output.mode() == crate::config::OutputMode::Internal
-        && matches!(
-            config.output.internal.producer(),
-            crate::config::InternalOutputProducer::Iosurface
-        )
-        && config.output.internal.activate_virtual_camera
-    {
-        println!(
-            "renderer_event=system_camera_output_enabled producer=iosurface activate_virtual_camera=true"
-        );
-        submit_virtual_camera_activation_request();
-    }
-}
-
-fn submit_virtual_camera_activation_request() {
-    #[cfg(feature = "system-extension-activation")]
-    {
-        let kind = crate::system_extension_activation::SystemExtensionRequestKind::Activate;
-        match crate::system_extension_activation::submit_camera_extension_request(kind) {
-            Ok(()) => println!(
-                "renderer_event=system_extension_activation_submitted action={} bundle_id={} note=\"{}\"",
-                kind.label(),
-                crate::system_extension_activation::CAMERA_EXTENSION_BUNDLE_ID,
-                crate::system_extension_activation::activation_note()
-            ),
-            Err(error) => eprintln!(
-                "renderer_event=system_extension_activation_failed action={} error={}",
-                kind.label(),
-                error
-            ),
-        }
-    }
-
-    #[cfg(not(feature = "system-extension-activation"))]
-    {
-        eprintln!(
-            "renderer_event=system_extension_activation_unavailable reason=feature_not_enabled"
         );
     }
 }
@@ -2833,10 +2686,6 @@ fn settings_menu_controller_class() -> Result<Class, String> {
                 "applyObsOffscreenCapturePreset:",
                 settings_apply_obs_offscreen_capture_preset,
             ),
-            (
-                "applySystemCameraOutputPreset:",
-                settings_apply_system_camera_output_preset,
-            ),
         ],
     )
 }
@@ -2997,14 +2846,6 @@ extern "C-unwind" fn settings_apply_obs_offscreen_capture_preset(
     _sender: *mut objc2::runtime::AnyObject,
 ) {
     MENU_COMMANDS.fetch_or(MENU_APPLY_OBS_OFFSCREEN_CAPTURE_PRESET, Ordering::AcqRel);
-}
-
-extern "C-unwind" fn settings_apply_system_camera_output_preset(
-    _this: *mut objc2::runtime::AnyObject,
-    _selector: objc2::runtime::Sel,
-    _sender: *mut objc2::runtime::AnyObject,
-) {
-    MENU_COMMANDS.fetch_or(MENU_APPLY_SYSTEM_CAMERA_OUTPUT_PRESET, Ordering::AcqRel);
 }
 
 struct EventPump {
