@@ -1579,6 +1579,10 @@ unsafe fn install_settings_menu(
         app_menu,
         "Offscreen keeps a normal OBS-capturable window outside the visible desktop",
     )?;
+    add_disabled_menu_item(
+        app_menu,
+        "OBS presets use recording performance renderer settings; change Renderer Quality after applying if needed",
+    )?;
     add_separator_menu_item(app_menu)?;
 
     add_action_menu_item(
@@ -2307,9 +2311,9 @@ fn write_obs_window_capture_preset_to_active_config(
         &[
             ("disable_masks", "false".to_string()),
             ("high_precision_masks", "false".to_string()),
-            ("enable_msaa", "true".to_string()),
-            ("atlas_mipmaps", "true".to_string()),
-            ("atlas_anisotropy", "8".to_string()),
+            ("enable_msaa", "false".to_string()),
+            ("atlas_mipmaps", "false".to_string()),
+            ("atlas_anisotropy", "1".to_string()),
             ("debug_texture_mode", toml_string_literal("none")),
         ],
     );

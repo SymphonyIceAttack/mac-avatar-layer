@@ -91,7 +91,7 @@ Usage:
   cargo xtask capture-quality-matrix [MODEL_PATH ...]
   cargo xtask capture-risk-models [MODEL_PATH ...]
   cargo xtask capture-rice-stress [MODEL_PATH]
-  cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen]
+  cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen] [--quality performance|balanced|high]
   cargo xtask doctor
   cargo xtask fix-wwdr-cert
   cargo xtask list-models [MODEL_OR_DIR ...]
@@ -487,6 +487,61 @@ impl ObsWindowPlacement {
         match self {
             Self::Desktop => "transparent desktop window",
             Self::Offscreen => "transparent offscreen window",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ObsRenderQuality {
+    Performance,
+    Balanced,
+    High,
+}
+
+impl ObsRenderQuality {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Performance => "recording performance",
+            Self::Balanced => "balanced",
+            Self::High => "high quality",
+        }
+    }
+
+    fn renderer_updates(self) -> [(&'static str, String); 6] {
+        match self {
+            Self::Performance => [
+                ("disable_masks", "false".to_string()),
+                ("high_precision_masks", "false".to_string()),
+                ("enable_msaa", "false".to_string()),
+                ("atlas_mipmaps", "false".to_string()),
+                ("atlas_anisotropy", "1".to_string()),
+                ("debug_texture_mode", toml_string_literal("none")),
+            ],
+            Self::Balanced => [
+                ("disable_masks", "false".to_string()),
+                ("high_precision_masks", "false".to_string()),
+                ("enable_msaa", "false".to_string()),
+                ("atlas_mipmaps", "true".to_string()),
+                ("atlas_anisotropy", "1".to_string()),
+                ("debug_texture_mode", toml_string_literal("none")),
+            ],
+            Self::High => [
+                ("disable_masks", "false".to_string()),
+                ("high_precision_masks", "false".to_string()),
+                ("enable_msaa", "true".to_string()),
+                ("atlas_mipmaps", "true".to_string()),
+                ("atlas_anisotropy", "8".to_string()),
+                ("debug_texture_mode", toml_string_literal("none")),
+            ],
+        }
+    }
+
+    fn from_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "performance" | "perf" | "recording" | "stable" => Some(Self::Performance),
+            "balanced" | "balance" => Some(Self::Balanced),
+            "high" | "high-quality" | "quality" => Some(Self::High),
+            _ => None,
         }
     }
 }
@@ -1710,15 +1765,16 @@ fn select_model(args: Vec<String>) -> Result<()> {
 }
 
 fn configure_obs_virtual_camera(args: Vec<String>) -> Result<()> {
-    let (target, placement) = parse_obs_virtual_camera_args(args)?;
-    write_obs_window_capture_config(target, placement)?;
-    print_obs_virtual_camera_next_steps(target, placement);
+    let (target, placement, quality) = parse_obs_virtual_camera_args(args)?;
+    write_obs_window_capture_config(target, placement, quality)?;
+    print_obs_virtual_camera_next_steps(target, placement, quality);
     Ok(())
 }
 
 fn write_obs_window_capture_config(
     target: SelectModelTarget,
     placement: ObsWindowPlacement,
+    quality: ObsRenderQuality,
 ) -> Result<()> {
     let root = project_root()?;
     let config_path = root.join(target.config_path());
@@ -1776,18 +1832,7 @@ fn write_obs_window_capture_config(
             ("stalled_after_seconds", "2.0".to_string()),
         ],
     );
-    content = set_toml_section_values(
-        &content,
-        "renderer",
-        &[
-            ("disable_masks", "false".to_string()),
-            ("high_precision_masks", "false".to_string()),
-            ("enable_msaa", "true".to_string()),
-            ("atlas_mipmaps", "true".to_string()),
-            ("atlas_anisotropy", "8".to_string()),
-            ("debug_texture_mode", toml_string_literal("none")),
-        ],
-    );
+    content = set_toml_section_values(&content, "renderer", &quality.renderer_updates());
     fs::write(&config_path, content)?;
 
     println!("OBS Window Capture preset updated.");
@@ -1805,12 +1850,16 @@ fn write_obs_window_capture_config(
     println!(
         "Window: level screen_saver | size 540x720 | title `MacAvatarLayer OBS Source` | capture-friendly on | diagnostics off"
     );
-    println!("Renderer: MSAA on | mipmaps on | anisotropy 8 | masks enabled");
+    println!("Renderer: {} preset", quality.label());
     println!("ScreenCaptureKit probe: off (not an OBS output path)");
     Ok(())
 }
 
-fn print_obs_virtual_camera_next_steps(target: SelectModelTarget, placement: ObsWindowPlacement) {
+fn print_obs_virtual_camera_next_steps(
+    target: SelectModelTarget,
+    placement: ObsWindowPlacement,
+    quality: ObsRenderQuality,
+) {
     println!();
     println!("OBS Virtual Camera workflow:");
     println!(
@@ -1827,6 +1876,11 @@ fn print_obs_virtual_camera_next_steps(target: SelectModelTarget, placement: Obs
     if matches!(placement, ObsWindowPlacement::Offscreen) {
         println!(
             "Note: offscreen capture depends on OBS/macOS WindowServer behavior; use --desktop if OBS updates are not smooth."
+        );
+    }
+    if !matches!(quality, ObsRenderQuality::Performance) {
+        println!(
+            "Note: --quality performance is the most stable choice when OBS recording stutters."
         );
     }
 }
@@ -2927,31 +2981,46 @@ fn parse_select_model_args(args: Vec<String>) -> Result<(SelectModelTarget, Stri
 
 fn parse_obs_virtual_camera_args(
     args: Vec<String>,
-) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
+) -> Result<(SelectModelTarget, ObsWindowPlacement, ObsRenderQuality)> {
     parse_obs_window_capture_args(
         args,
-        "usage: cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen]",
+        "usage: cargo xtask configure-obs-virtual-camera [--dev|--build] [--desktop|--offscreen] [--quality performance|balanced|high]",
     )
 }
 
 fn parse_obs_window_capture_args(
     args: Vec<String>,
     usage: &'static str,
-) -> Result<(SelectModelTarget, ObsWindowPlacement)> {
+) -> Result<(SelectModelTarget, ObsWindowPlacement, ObsRenderQuality)> {
     let mut target = SelectModelTarget::Build;
     let mut placement = ObsWindowPlacement::Desktop;
-    for arg in args {
+    let mut quality = ObsRenderQuality::Performance;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dev" | "--development" => target = SelectModelTarget::Development,
             "--build" => target = SelectModelTarget::Build,
             "--desktop" => placement = ObsWindowPlacement::Desktop,
             "--offscreen" => placement = ObsWindowPlacement::Offscreen,
+            "--performance" => quality = ObsRenderQuality::Performance,
+            "--balanced" => quality = ObsRenderQuality::Balanced,
+            "--high-quality" | "--high" => quality = ObsRenderQuality::High,
+            "--quality" => {
+                let Some(value) = args.next() else {
+                    return Err(usage.into());
+                };
+                quality = ObsRenderQuality::from_value(&value).ok_or(usage)?;
+            }
+            _ if arg.starts_with("--quality=") => {
+                let value = arg.trim_start_matches("--quality=");
+                quality = ObsRenderQuality::from_value(value).ok_or(usage)?;
+            }
             _ => {
                 return Err(usage.into());
             }
         }
     }
-    Ok((target, placement))
+    Ok((target, placement, quality))
 }
 
 fn parse_tune_input_args(
@@ -7242,18 +7311,35 @@ atlas_anisotropy = 1
 
     #[test]
     fn obs_virtual_camera_args_match_window_capture_profile_args() {
-        let (target, placement) =
+        let (target, placement, quality) =
             parse_obs_virtual_camera_args(Vec::new()).expect("default obs target should parse");
         assert!(matches!(target, SelectModelTarget::Build));
         assert!(matches!(placement, ObsWindowPlacement::Desktop));
+        assert!(matches!(quality, ObsRenderQuality::Performance));
 
-        let (target, placement) =
-            parse_obs_virtual_camera_args(vec!["--dev".to_string(), "--offscreen".to_string()])
-                .expect("dev obs virtual camera target should parse");
+        let (target, placement, quality) = parse_obs_virtual_camera_args(vec![
+            "--dev".to_string(),
+            "--offscreen".to_string(),
+            "--quality".to_string(),
+            "high".to_string(),
+        ])
+        .expect("dev obs virtual camera target should parse");
         assert!(matches!(target, SelectModelTarget::Development));
         assert!(matches!(placement, ObsWindowPlacement::Offscreen));
+        assert!(matches!(quality, ObsRenderQuality::High));
+
+        let (_, _, quality) = parse_obs_virtual_camera_args(vec![
+            "--build".to_string(),
+            "--quality=balanced".to_string(),
+        ])
+        .expect("balanced obs quality should parse");
+        assert!(matches!(quality, ObsRenderQuality::Balanced));
 
         assert!(parse_obs_virtual_camera_args(vec!["--release".to_string()]).is_err());
+        assert!(
+            parse_obs_virtual_camera_args(vec!["--quality".to_string(), "cinema".to_string()])
+                .is_err()
+        );
     }
 
     #[test]

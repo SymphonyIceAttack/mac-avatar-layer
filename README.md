@@ -151,6 +151,10 @@ cargo xtask configure-obs-virtual-camera --build
 cargo xtask start
 ```
 
+This uses the recording performance renderer preset by default. If recording is
+smooth and you want sharper texture sampling, use `--quality balanced` or
+`--quality high`.
+
 ## Useful Commands
 
 ```bash
@@ -160,6 +164,7 @@ cargo xtask start public/model/0.model3.json
 cargo xtask list-models
 cargo xtask select-model --build public/model/0.model3.json
 cargo xtask configure-obs-virtual-camera --build
+cargo xtask configure-obs-virtual-camera --build --quality balanced
 cargo xtask run-metal        # development profile
 cargo xtask run-metal --release
 cargo xtask build-app --release

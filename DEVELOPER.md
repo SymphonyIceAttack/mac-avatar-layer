@@ -197,6 +197,7 @@ cargo xtask capture-quality-matrix
 cargo xtask capture-risk-models
 cargo xtask capture-rice-stress
 cargo xtask configure-obs-virtual-camera --build
+cargo xtask configure-obs-virtual-camera --build --quality balanced
 cargo xtask configure-obs-virtual-camera --build --offscreen
 cargo xtask doctor
 cargo xtask fix-wwdr-cert
@@ -323,6 +324,11 @@ cargo xtask configure-obs-virtual-camera --build
 cargo xtask run-metal --release
 ```
 
+The default OBS preset is recording-performance oriented: MSAA off, texture
+mipmaps off, anisotropy 1, diagnostics off, and ScreenCaptureKit probing off.
+If the recording path is smooth, `--quality balanced` enables mipmaps while
+keeping MSAA off; `--quality high` restores MSAA plus anisotropy 8.
+
 To keep the avatar off the visible desktop while still exposing a normal OBS
 Window Capture source, use the offscreen variant:
 
@@ -354,10 +360,10 @@ setups, so treat offscreen as a convenience preset and keep desktop capture as
 the stable baseline.
 
 The preset writes the build profile to a transparent `screen_saver` level
-window, sets `[app].window_capture_friendly = true`, hides diagnostics, enables
-MSAA/mipmaps/8x anisotropy, keeps masks on, and disables the ScreenCaptureKit
-probe because it is diagnostic-only and not an OBS output path. The
-capture-friendly flag gives the avatar window a stable `MacAvatarLayer OBS
+window, sets `[app].window_capture_friendly = true`, hides diagnostics, keeps
+masks on, applies the selected renderer quality, and disables the
+ScreenCaptureKit probe because it is diagnostic-only and not an OBS output path.
+The capture-friendly flag gives the avatar window a stable `MacAvatarLayer OBS
 Source` title, keeps it as a transparent `NSPanel`, exposes it through normal
 app/window enumeration, marks the window as read-only shareable for WindowServer
 capture, and moves it outside the visible desktop for the offscreen preset. Use
